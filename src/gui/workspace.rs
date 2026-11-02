@@ -3417,7 +3417,7 @@ impl ZaloGuiApp {
                                                     &self.sticker_textures,
                                                     &mut self.loading_stickers,
                                                     &self.emoji_textures,
-                                                    idx,
+                                                    self.settings.double_click_to_reply,
                                                 ) {
                                                     pending_action = Some((idx, action));
                                                 }

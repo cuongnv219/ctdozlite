@@ -1388,7 +1388,7 @@ pub(super) fn render_chat_bubble(
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
-    idx: usize,
+    double_click_to_reply: bool,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
@@ -1706,10 +1706,10 @@ pub(super) fn render_chat_bubble(
                         ui,
                         &fr.response,
                         msg,
-                        idx,
                         pal,
                         emoji_textures,
                         has_interactive_card,
+                        double_click_to_reply,
                     )
                 })
             });
@@ -1838,10 +1838,10 @@ pub(super) fn render_chat_bubble(
                         ui,
                         &fr.response,
                         msg,
-                        idx,
                         pal,
                         emoji_textures,
                         has_interactive_card,
+                        double_click_to_reply,
                     )
                 })
             })
@@ -1876,10 +1876,10 @@ pub(super) fn bubble_context_menu(
     ui: &mut egui::Ui,
     bubble: &egui::Response,
     msg: &ChatMessage,
-    _idx: usize,
     _pal: &ThemePalette,
     emoji_textures: &HashMap<String, TextureHandle>,
     has_interactive_card: bool,
+    double_click_to_reply: bool,
 ) -> Option<BubbleAction> {
     // Selectable text labels and card widgets sit on top of the bubble and take pointer clicks,
     // so feed the bubble's own response from raw pointer state while the pointer is over it.
@@ -1896,7 +1896,7 @@ pub(super) fn bubble_context_menu(
         resp.clicked |= secondary || double;
     }
     // Cards (links, photos, files, calls) use their own clicks; double-click replies elsewhere.
-    if !has_interactive_card && resp.double_clicked() {
+    if double_click_to_reply && !has_interactive_card && resp.double_clicked() {
         return Some(BubbleAction::Reply);
     }
     let mut action = None;
@@ -2148,7 +2148,11 @@ mod bubble_interaction_tests {
     use super::*;
 
     /// Renders one incoming text bubble for a pass with `events`; returns the bubble action.
-    fn run_bubble(ctx: &egui::Context, events: Vec<egui::Event>) -> Option<BubbleAction> {
+    fn run_bubble(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        double_click_to_reply: bool,
+    ) -> Option<BubbleAction> {
         let msg = ChatMessage {
             id: "m1".into(),
             sender: "An".into(),
@@ -2180,7 +2184,7 @@ mod bubble_interaction_tests {
                     &HashMap::new(),
                     &mut loading,
                     &HashMap::new(),
-                    0,
+                    double_click_to_reply,
                 );
             });
         });
@@ -2201,8 +2205,8 @@ mod bubble_interaction_tests {
     /// 12px inner margin), and returns it. Text labels are selectable, so they sit on top.
     fn hover_text(ctx: &egui::Context) -> Pos2 {
         let pos = Pos2::new(70.0, 24.0);
-        run_bubble(ctx, vec![]);
-        run_bubble(ctx, vec![egui::Event::PointerMoved(pos)]);
+        run_bubble(ctx, vec![], true);
+        run_bubble(ctx, vec![egui::Event::PointerMoved(pos)], true);
         pos
     }
 
@@ -2210,8 +2214,8 @@ mod bubble_interaction_tests {
     fn right_click_on_text_opens_reply_menu() {
         let ctx = egui::Context::default();
         let pos = hover_text(&ctx);
-        run_bubble(&ctx, click(pos, egui::PointerButton::Secondary));
-        run_bubble(&ctx, vec![]);
+        run_bubble(&ctx, click(pos, egui::PointerButton::Secondary), true);
+        run_bubble(&ctx, vec![], true);
         assert!(
             ctx.memory(|m| m.layer_ids().any(|l| l.order == egui::Order::Foreground)),
             "context menu should open on right-click over message text"
@@ -2222,11 +2226,23 @@ mod bubble_interaction_tests {
     fn double_click_on_text_replies() {
         let ctx = egui::Context::default();
         let pos = hover_text(&ctx);
-        run_bubble(&ctx, click(pos, egui::PointerButton::Primary));
-        let action = run_bubble(&ctx, click(pos, egui::PointerButton::Primary));
+        run_bubble(&ctx, click(pos, egui::PointerButton::Primary), true);
+        let action = run_bubble(&ctx, click(pos, egui::PointerButton::Primary), true);
         assert!(
             action == Some(BubbleAction::Reply),
             "double-click should trigger reply"
+        );
+    }
+
+    #[test]
+    fn double_click_reply_respects_setting() {
+        let ctx = egui::Context::default();
+        let pos = hover_text(&ctx);
+        run_bubble(&ctx, click(pos, egui::PointerButton::Primary), false);
+        let action = run_bubble(&ctx, click(pos, egui::PointerButton::Primary), false);
+        assert!(
+            action.is_none(),
+            "double-click must not reply when the setting is off"
         );
     }
 }
