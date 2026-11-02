@@ -1708,7 +1708,6 @@ pub(super) fn render_chat_bubble(
                         msg,
                         pal,
                         emoji_textures,
-                        has_interactive_card,
                         double_click_to_reply,
                     )
                 })
@@ -1840,7 +1839,6 @@ pub(super) fn render_chat_bubble(
                         msg,
                         pal,
                         emoji_textures,
-                        has_interactive_card,
                         double_click_to_reply,
                     )
                 })
@@ -1871,142 +1869,203 @@ pub(super) enum BubbleAction {
 }
 
 
-/// Right-click menu on a chat bubble: reactions, reply, forward, copy, delete-for-me.
+/// Open bubble context menu: which message it belongs to, where it opened, and on which pass.
+#[derive(Clone, Copy)]
+struct BubbleMenu {
+    msg: Id,
+    pos: Pos2,
+    opened_pass: u64,
+}
+
+fn bubble_menu_key() -> Id {
+    Id::new("bubble_ctx_menu")
+}
+
+/// Double-click reply plus the right-click menu on a chat bubble: reactions, reply, forward,
+/// copy, delete-for-me.
+///
+/// `bubble` must sense clicks *behind* the bubble contents, so double-clicking the text still
+/// selects a word while double-clicking the bubble padding replies. Text labels and cards sit on
+/// top and take right-clicks, so the menu opens from raw pointer input and keeps its own state,
+/// keyed by message id (egui's `context_menu` keys on widget ids that shift with layout).
 pub(super) fn bubble_context_menu(
     ui: &mut egui::Ui,
     bubble: &egui::Response,
     msg: &ChatMessage,
     _pal: &ThemePalette,
     emoji_textures: &HashMap<String, TextureHandle>,
-    has_interactive_card: bool,
     double_click_to_reply: bool,
 ) -> Option<BubbleAction> {
-    // Selectable text labels and card widgets sit on top of the bubble and take pointer clicks,
-    // so feed the bubble's own response from raw pointer state while the pointer is over it.
-    let mut resp = bubble.clone();
-    if ui.rect_contains_pointer(resp.interact_rect) {
-        let (secondary, double) = ui.input(|i| {
-            (
-                i.pointer.secondary_clicked(),
-                i.pointer
-                    .button_double_clicked(egui::PointerButton::Primary),
-            )
-        });
-        resp.hovered = true;
-        resp.clicked |= secondary || double;
-    }
-    // Cards (links, photos, files, calls) use their own clicks; double-click replies elsewhere.
-    if double_click_to_reply && !has_interactive_card && resp.double_clicked() {
+    if double_click_to_reply && bubble.double_clicked() {
         return Some(BubbleAction::Reply);
     }
-    let mut action = None;
-
-    resp.context_menu(|ui| {
-        ui.set_min_width(210.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-            for &(code, key, tooltip) in &REACTION_LIST {
-                if let Some(tex) = emoji_textures.get(key) {
-                    let img = egui::Image::new(tex).fit_to_exact_size(Vec2::splat(24.0));
-                    let btn = egui::ImageButton::new(img)
-                        .rounding(Rounding::same(6.0));
-                    if ui.add(btn).on_hover_text(tooltip).clicked() {
-                        action = Some(BubbleAction::React(code));
-                        ui.close_menu();
-                    }
-                } else if ui.button(RichText::new(code).size(18.0)).clicked() {
-                    action = Some(BubbleAction::React(code));
-                    ui.close_menu();
-                }
-            }
-        });
-        ui.separator();
-        if (msg.link_src.as_deref() == Some("Hình ảnh Zalo")
-            || msg.text.trim() == "[Hình ảnh]"
-            || msg.text.trim().starts_with("[Hình ảnh] "))
-            && msg
-                .link_thumb
-                .as_deref()
-                .or(msg.link_url.as_deref())
-                .map(|u| !u.is_empty())
-                .unwrap_or(false)
-        {
-            let thumb_url = msg
-                .link_thumb
-                .as_deref()
-                .or(msg.link_url.as_deref())
-                .unwrap_or_default();
-            if ui.button(format!("{} Xem ảnh phóng to", lucide::SEARCH)).clicked() {
-                action = Some(BubbleAction::OpenImagePopup {
-                    tex_key: format!("thumb_{}", crate::crypto::md5_hex(thumb_url)),
-                    full_url: msg
-                        .link_url
-                        .clone()
-                        .unwrap_or_else(|| thumb_url.to_string()),
-                    title: msg
-                        .link_title
-                        .clone()
-                        .unwrap_or_else(|| "Hình ảnh".to_string()),
-                    sender: if msg.is_outgoing {
-                        "Bạn".to_string()
-                    } else {
-                        msg.sender.clone()
+    let key = bubble_menu_key();
+    let msg_key = Id::new(&msg.id);
+    let pass = ui.ctx().cumulative_pass_nr();
+    let (right_click, pointer) =
+        ui.input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos()));
+    if right_click && ui.rect_contains_pointer(bubble.interact_rect) {
+        if let Some(pos) = pointer {
+            ui.data_mut(|d| {
+                d.insert_temp(
+                    key,
+                    BubbleMenu {
+                        msg: msg_key,
+                        pos,
+                        opened_pass: pass,
                     },
-                    time: msg.time.clone(),
-                });
-                ui.close_menu();
-            }
-        }
-        if ui.button("Trả lời").clicked() {
-            action = Some(BubbleAction::Reply);
-            ui.close_menu();
-        }
-        if ui.button("Chuyển tiếp").clicked() {
-            action = Some(BubbleAction::Forward);
-            ui.close_menu();
-        }
-        if ui.button("Copy tin nhắn").clicked() {
-            ui.ctx().copy_text(msg.text.clone());
-            ui.close_menu();
-        }
-        if ui
-            .button(if msg.is_pinned { "Bỏ ghim tin nhắn" } else { "Ghim tin nhắn" })
-            .clicked()
-        {
-            action = Some(BubbleAction::TogglePin);
-            ui.close_menu();
-        }
-        if ui
-            .button(if msg.is_starred {
-                "Bỏ đánh dấu tin nhắn"
-            } else {
-                "Đánh dấu tin nhắn"
-            })
-            .clicked()
-        {
-            action = Some(BubbleAction::ToggleStar);
-            ui.close_menu();
-        }
-        ui.separator();
-        if msg.is_outgoing && msg.text.trim() != "[Tin nhắn đã thu hồi]" {
-            if ui
-                .button(
-                    RichText::new("Thu hồi với mọi người").color(Color32::from_rgb(249, 115, 22)),
                 )
-                .clicked()
-            {
-                action = Some(BubbleAction::RecallForEveryone);
-                ui.close_menu();
-            }
+            });
         }
-        if ui
-            .button(RichText::new("Xóa chỉ ở phía tôi").color(Color32::from_rgb(220, 60, 60)))
-            .clicked()
-        {
-            action = Some(BubbleAction::DeleteForMe);
-            ui.close_menu();
-        }
-    });
+    }
+    let menu = ui
+        .data(|d| d.get_temp::<BubbleMenu>(key))
+        .filter(|m| m.msg == msg_key)?;
+
+    let mut action = None;
+    let mut close = false;
+    let area = egui::Area::new(key.with("area"))
+        .kind(egui::UiKind::Menu)
+        .order(egui::Order::Foreground)
+        .fixed_pos(menu.pos)
+        .show(ui.ctx(), |ui| {
+            // Mirrors egui's private menu style so this looks like `Response::context_menu`.
+            let style = ui.style_mut();
+            style.spacing.button_padding = Vec2::new(2.0, 0.0);
+            style.visuals.widgets.active.bg_stroke = Stroke::NONE;
+            style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+            style.visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            style.visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
+                    ui.set_min_width(210.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                        for &(code, key, tooltip) in &REACTION_LIST {
+                            if let Some(tex) = emoji_textures.get(key) {
+                                let img =
+                                    egui::Image::new(tex).fit_to_exact_size(Vec2::splat(24.0));
+                                let btn = egui::ImageButton::new(img).rounding(Rounding::same(6.0));
+                                if ui.add(btn).on_hover_text(tooltip).clicked() {
+                                    action = Some(BubbleAction::React(code));
+                                    close = true;
+                                }
+                            } else if ui.button(RichText::new(code).size(18.0)).clicked() {
+                                action = Some(BubbleAction::React(code));
+                                close = true;
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if (msg.link_src.as_deref() == Some("Hình ảnh Zalo")
+                        || msg.text.trim() == "[Hình ảnh]"
+                        || msg.text.trim().starts_with("[Hình ảnh] "))
+                        && msg
+                            .link_thumb
+                            .as_deref()
+                            .or(msg.link_url.as_deref())
+                            .map(|u| !u.is_empty())
+                            .unwrap_or(false)
+                    {
+                        let thumb_url = msg
+                            .link_thumb
+                            .as_deref()
+                            .or(msg.link_url.as_deref())
+                            .unwrap_or_default();
+                        if ui
+                            .button(format!("{} Xem ảnh phóng to", lucide::SEARCH))
+                            .clicked()
+                        {
+                            action = Some(BubbleAction::OpenImagePopup {
+                                tex_key: format!("thumb_{}", crate::crypto::md5_hex(thumb_url)),
+                                full_url: msg
+                                    .link_url
+                                    .clone()
+                                    .unwrap_or_else(|| thumb_url.to_string()),
+                                title: msg
+                                    .link_title
+                                    .clone()
+                                    .unwrap_or_else(|| "Hình ảnh".to_string()),
+                                sender: if msg.is_outgoing {
+                                    "Bạn".to_string()
+                                } else {
+                                    msg.sender.clone()
+                                },
+                                time: msg.time.clone(),
+                            });
+                            close = true;
+                        }
+                    }
+                    if ui.button("Trả lời").clicked() {
+                        action = Some(BubbleAction::Reply);
+                        close = true;
+                    }
+                    if ui.button("Chuyển tiếp").clicked() {
+                        action = Some(BubbleAction::Forward);
+                        close = true;
+                    }
+                    if ui.button("Copy tin nhắn").clicked() {
+                        ui.ctx().copy_text(msg.text.clone());
+                        close = true;
+                    }
+                    if ui
+                        .button(if msg.is_pinned {
+                            "Bỏ ghim tin nhắn"
+                        } else {
+                            "Ghim tin nhắn"
+                        })
+                        .clicked()
+                    {
+                        action = Some(BubbleAction::TogglePin);
+                        close = true;
+                    }
+                    if ui
+                        .button(if msg.is_starred {
+                            "Bỏ đánh dấu tin nhắn"
+                        } else {
+                            "Đánh dấu tin nhắn"
+                        })
+                        .clicked()
+                    {
+                        action = Some(BubbleAction::ToggleStar);
+                        close = true;
+                    }
+                    ui.separator();
+                    if msg.is_outgoing && msg.text.trim() != "[Tin nhắn đã thu hồi]" {
+                        if ui
+                            .button(
+                                RichText::new("Thu hồi với mọi người")
+                                    .color(Color32::from_rgb(249, 115, 22)),
+                            )
+                            .clicked()
+                        {
+                            action = Some(BubbleAction::RecallForEveryone);
+                            close = true;
+                        }
+                    }
+                    if ui
+                        .button(
+                            RichText::new("Xóa chỉ ở phía tôi")
+                                .color(Color32::from_rgb(220, 60, 60)),
+                        )
+                        .clicked()
+                    {
+                        action = Some(BubbleAction::DeleteForMe);
+                        close = true;
+                    }
+                });
+            });
+        });
+    let clicked_outside = menu.opened_pass < pass
+        && ui.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !area.response.rect.contains(p))
+        });
+    if close || clicked_outside || ui.input(|i| i.key_pressed(Key::Escape)) {
+        ui.data_mut(|d| d.remove::<BubbleMenu>(key));
+    }
     action
 }
 
@@ -2144,23 +2203,27 @@ pub(super) fn render_reactions(
 }
 
 #[cfg(test)]
-mod bubble_interaction_tests {
+mod tests {
     use super::*;
 
-    /// Renders one incoming text bubble for a pass with `events`; returns the bubble action.
-    fn run_bubble(
-        ctx: &egui::Context,
-        events: Vec<egui::Event>,
-        double_click_to_reply: bool,
-    ) -> Option<BubbleAction> {
-        let msg = ChatMessage {
+    fn text_msg(text: &str) -> ChatMessage {
+        ChatMessage {
             id: "m1".into(),
             sender: "An".into(),
-            text: "xin chao ban, day la tin nhan thu nghiem".into(),
+            text: text.into(),
             time: "10:00".into(),
             ts: 1,
             ..Default::default()
-        };
+        }
+    }
+
+    /// Renders one incoming bubble for a pass with `events`; returns the bubble action.
+    fn run_bubble(
+        ctx: &egui::Context,
+        msg: &ChatMessage,
+        events: Vec<egui::Event>,
+        double_click_to_reply: bool,
+    ) -> Option<BubbleAction> {
         let pal = ThemePalette::dark();
         let mut loading = HashSet::new();
         let mut action = None;
@@ -2173,7 +2236,7 @@ mod bubble_interaction_tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 action = render_chat_bubble(
                     ui,
-                    &msg,
+                    msg,
                     false,
                     false,
                     false,
@@ -2201,48 +2264,122 @@ mod bubble_interaction_tests {
         vec![egui::Event::PointerMoved(pos), ev(true), ev(false)]
     }
 
-    /// Lays the bubble out, hovers a point on the message text (past the 30px avatar and
-    /// 12px inner margin), and returns it. Text labels are selectable, so they sit on top.
-    fn hover_text(ctx: &egui::Context) -> Pos2 {
-        let pos = Pos2::new(70.0, 24.0);
-        run_bubble(ctx, vec![], true);
-        run_bubble(ctx, vec![egui::Event::PointerMoved(pos)], true);
-        pos
+    // Incoming bubble layout: 8px panel margin + 30px avatar + 8px spacing, then 12px inner
+    // margin before the (selectable) text.
+    const ON_TEXT: Pos2 = Pos2::new(70.0, 24.0);
+    const ON_PADDING: Pos2 = Pos2::new(51.0, 24.0);
+
+    fn double_click(
+        ctx: &egui::Context,
+        msg: &ChatMessage,
+        pos: Pos2,
+        enabled: bool,
+    ) -> Option<BubbleAction> {
+        run_bubble(ctx, msg, vec![], enabled);
+        run_bubble(ctx, msg, vec![egui::Event::PointerMoved(pos)], enabled);
+        run_bubble(ctx, msg, click(pos, egui::PointerButton::Primary), enabled);
+        run_bubble(ctx, msg, click(pos, egui::PointerButton::Primary), enabled)
+    }
+
+    fn open_menu_msg(ctx: &egui::Context) -> Option<Id> {
+        ctx.data(|d| d.get_temp::<BubbleMenu>(bubble_menu_key()))
+            .map(|m| m.msg)
     }
 
     #[test]
-    fn right_click_on_text_opens_reply_menu() {
+    fn menu_opens_for_message_when_right_clicking_text() {
         let ctx = egui::Context::default();
-        let pos = hover_text(&ctx);
-        run_bubble(&ctx, click(pos, egui::PointerButton::Secondary), true);
-        run_bubble(&ctx, vec![], true);
+        let msg = text_msg("xin chao ban, day la tin nhan thu nghiem");
+        run_bubble(&ctx, &msg, vec![], true);
+        run_bubble(
+            &ctx,
+            &msg,
+            click(ON_TEXT, egui::PointerButton::Secondary),
+            true,
+        );
+        run_bubble(&ctx, &msg, vec![], true);
+        assert!(open_menu_msg(&ctx) == Some(Id::new("m1")));
+    }
+
+    #[test]
+    fn menu_closes_when_clicking_outside() {
+        let ctx = egui::Context::default();
+        let msg = text_msg("xin chao ban, day la tin nhan thu nghiem");
+        run_bubble(&ctx, &msg, vec![], true);
+        run_bubble(
+            &ctx,
+            &msg,
+            click(ON_TEXT, egui::PointerButton::Secondary),
+            true,
+        );
+        run_bubble(
+            &ctx,
+            &msg,
+            click(Pos2::new(700.0, 500.0), egui::PointerButton::Primary),
+            true,
+        );
+        assert!(open_menu_msg(&ctx).is_none());
+    }
+
+    #[test]
+    fn reply_when_choosing_reply_in_menu() {
+        let ctx = egui::Context::default();
+        let msg = text_msg("xin chao ban, day la tin nhan thu nghiem");
+        let menu_rect = || ctx.memory(|m| m.area_rect(bubble_menu_key().with("area")));
+        // Scan down the menu; each click closes it, so reopen before every try.
+        let mut actions = Vec::new();
+        for dy in (4..120).step_by(6) {
+            run_bubble(
+                &ctx,
+                &msg,
+                click(ON_TEXT, egui::PointerButton::Secondary),
+                true,
+            );
+            run_bubble(&ctx, &msg, vec![], true);
+            let rect = menu_rect().expect("menu should be laid out");
+            let pos = Pos2::new(rect.left() + 40.0, rect.top() + dy as f32);
+            run_bubble(&ctx, &msg, vec![egui::Event::PointerMoved(pos)], true);
+            if let Some(a) = run_bubble(&ctx, &msg, click(pos, egui::PointerButton::Primary), true)
+            {
+                actions.push(a);
+            }
+        }
         assert!(
-            ctx.memory(|m| m.layer_ids().any(|l| l.order == egui::Order::Foreground)),
-            "context menu should open on right-click over message text"
+            actions.contains(&BubbleAction::Reply),
+            "menu should offer Trả lời"
+        );
+        assert!(
+            open_menu_msg(&ctx).is_none(),
+            "menu should close after choosing an item"
         );
     }
 
     #[test]
-    fn double_click_on_text_replies() {
+    fn reply_when_double_clicking_padding() {
         let ctx = egui::Context::default();
-        let pos = hover_text(&ctx);
-        run_bubble(&ctx, click(pos, egui::PointerButton::Primary), true);
-        let action = run_bubble(&ctx, click(pos, egui::PointerButton::Primary), true);
-        assert!(
-            action == Some(BubbleAction::Reply),
-            "double-click should trigger reply"
-        );
+        let msg = text_msg("xin chao ban, day la tin nhan thu nghiem");
+        assert!(double_click(&ctx, &msg, ON_PADDING, true) == Some(BubbleAction::Reply));
     }
 
     #[test]
-    fn double_click_reply_respects_setting() {
+    fn reply_when_double_clicking_padding_of_link_message() {
         let ctx = egui::Context::default();
-        let pos = hover_text(&ctx);
-        run_bubble(&ctx, click(pos, egui::PointerButton::Primary), false);
-        let action = run_bubble(&ctx, click(pos, egui::PointerButton::Primary), false);
-        assert!(
-            action.is_none(),
-            "double-click must not reply when the setting is off"
-        );
+        let mut msg = text_msg("xem cai nay https://example.com nhe");
+        msg.link_url = Some("https://example.com".into());
+        assert!(double_click(&ctx, &msg, ON_PADDING, true) == Some(BubbleAction::Reply));
+    }
+
+    #[test]
+    fn no_reply_when_double_clicking_text() {
+        let ctx = egui::Context::default();
+        let msg = text_msg("xin chao ban, day la tin nhan thu nghiem");
+        assert!(double_click(&ctx, &msg, ON_TEXT, true).is_none());
+    }
+
+    #[test]
+    fn no_reply_when_setting_disabled() {
+        let ctx = egui::Context::default();
+        let msg = text_msg("xin chao ban, day la tin nhan thu nghiem");
+        assert!(double_click(&ctx, &msg, ON_PADDING, false).is_none());
     }
 }
