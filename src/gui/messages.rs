@@ -1648,55 +1648,59 @@ pub(super) fn render_chat_bubble(
                 let rounding = Rounding::same(8.0);
 
                 let mut card_action = None;
-                let fr = egui::Frame::none()
-                    .fill(fill)
-                    .stroke(stroke)
-                    .rounding(rounding)
-                    .inner_margin(Margin::symmetric(h_margin, v_margin))
-                    .show(ui, |ui| {
-                        ui.set_min_width(content_width);
-                        ui.set_max_width(content_width);
-                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            render_quote_block(ui, msg, pal, true, content_width);
-                            if let Some(card) = &call_card_opt {
-                                card_action =
-                                    render_call_card_widget(ui, card, pal, content_width);
-                            } else if !render_sticker_widget(
-                                ui,
-                                msg,
-                                sticker_textures,
-                                loading_stickers,
-                            ) {
-                                card_action = render_message_body(
-                                    ui,
-                                    msg,
-                                    thread_name,
-                                    pal,
-                                    true,
-                                    content_width,
-                                    sticker_textures,
-                                    loading_stickers,
-                                );
-                            }
-                            render_reactions(ui, msg, pal, emoji_textures);
-                            if show_timestamp && !has_sticker && !is_frameless_photo {
-                                ui.add_space(3.5);
-                                let ts_txt = if is_latest_outgoing {
-                                    format!("{} · Đã nhận", msg.time)
-                                } else {
-                                    msg.time.clone()
-                                };
-                                ui.label(
-                                    RichText::new(ts_txt)
-                                        .size(11.0)
-                                        .color(pal.bubble_out_meta),
-                                );
-                            }
-                        });
-                    });
-                if fr.response.double_clicked() {
-                    return Some(BubbleAction::Reply);
-                }
+                let fr = ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt(&msg.id)
+                        .sense(Sense::click()),
+                    |ui| {
+                        egui::Frame::none()
+                            .fill(fill)
+                            .stroke(stroke)
+                            .rounding(rounding)
+                            .inner_margin(Margin::symmetric(h_margin, v_margin))
+                            .show(ui, |ui| {
+                                ui.set_min_width(content_width);
+                                ui.set_max_width(content_width);
+                                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                    render_quote_block(ui, msg, pal, true, content_width);
+                                    if let Some(card) = &call_card_opt {
+                                        card_action =
+                                            render_call_card_widget(ui, card, pal, content_width);
+                                    } else if !render_sticker_widget(
+                                        ui,
+                                        msg,
+                                        sticker_textures,
+                                        loading_stickers,
+                                    ) {
+                                        card_action = render_message_body(
+                                            ui,
+                                            msg,
+                                            thread_name,
+                                            pal,
+                                            true,
+                                            content_width,
+                                            sticker_textures,
+                                            loading_stickers,
+                                        );
+                                    }
+                                    render_reactions(ui, msg, pal, emoji_textures);
+                                    if show_timestamp && !has_sticker && !is_frameless_photo {
+                                        ui.add_space(3.5);
+                                        let ts_txt = if is_latest_outgoing {
+                                            format!("{} · Đã nhận", msg.time)
+                                        } else {
+                                            msg.time.clone()
+                                        };
+                                        ui.label(
+                                            RichText::new(ts_txt)
+                                                .size(11.0)
+                                                .color(pal.bubble_out_meta),
+                                        );
+                                    }
+                                });
+                            })
+                    },
+                );
                 card_action.or_else(|| {
                     bubble_context_menu(
                         ui,
@@ -1772,59 +1776,63 @@ pub(super) fn render_chat_bubble(
             ui.vertical(|ui| {
                 ui.set_max_width(total_bubble_w);
                 let mut card_action = None;
-                let fr = egui::Frame::none()
-                    .fill(fill)
-                    .stroke(stroke)
-                    .rounding(rounding)
-                    .inner_margin(Margin::symmetric(h_margin, v_margin))
-                    .show(ui, |ui| {
-                        ui.set_min_width(content_width);
-                        ui.set_max_width(content_width);
-                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            if show_group_sender {
-                                ui.label(
-                                    RichText::new(truncate_chars(&msg.sender, 22))
-                                        .color(sender_accent)
-                                        .size(12.0)
-                                        .strong(),
-                                );
-                                ui.add_space(2.0);
-                            }
-                            render_quote_block(ui, msg, pal, false, content_width);
-                            if let Some(card) = &call_card_opt {
-                                card_action =
-                                    render_call_card_widget(ui, card, pal, content_width);
-                            } else if !render_sticker_widget(
-                                ui,
-                                msg,
-                                sticker_textures,
-                                loading_stickers,
-                            ) {
-                                card_action = render_message_body(
-                                    ui,
-                                    msg,
-                                    thread_name,
-                                    pal,
-                                    false,
-                                    content_width,
-                                    sticker_textures,
-                                    loading_stickers,
-                                );
-                            }
-                            render_reactions(ui, msg, pal, emoji_textures);
-                            if show_timestamp && !has_sticker && !is_frameless_photo {
-                                ui.add_space(3.5);
-                                ui.label(
-                                    RichText::new(&msg.time)
-                                        .color(pal.bubble_in_meta)
-                                        .size(11.0),
-                                );
-                            }
-                        });
-                    });
-                if fr.response.double_clicked() {
-                    return Some(BubbleAction::Reply);
-                }
+                let fr = ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt(&msg.id)
+                        .sense(Sense::click()),
+                    |ui| {
+                        egui::Frame::none()
+                            .fill(fill)
+                            .stroke(stroke)
+                            .rounding(rounding)
+                            .inner_margin(Margin::symmetric(h_margin, v_margin))
+                            .show(ui, |ui| {
+                                ui.set_min_width(content_width);
+                                ui.set_max_width(content_width);
+                                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                    if show_group_sender {
+                                        ui.label(
+                                            RichText::new(truncate_chars(&msg.sender, 22))
+                                                .color(sender_accent)
+                                                .size(12.0)
+                                                .strong(),
+                                        );
+                                        ui.add_space(2.0);
+                                    }
+                                    render_quote_block(ui, msg, pal, false, content_width);
+                                    if let Some(card) = &call_card_opt {
+                                        card_action =
+                                            render_call_card_widget(ui, card, pal, content_width);
+                                    } else if !render_sticker_widget(
+                                        ui,
+                                        msg,
+                                        sticker_textures,
+                                        loading_stickers,
+                                    ) {
+                                        card_action = render_message_body(
+                                            ui,
+                                            msg,
+                                            thread_name,
+                                            pal,
+                                            false,
+                                            content_width,
+                                            sticker_textures,
+                                            loading_stickers,
+                                        );
+                                    }
+                                    render_reactions(ui, msg, pal, emoji_textures);
+                                    if show_timestamp && !has_sticker && !is_frameless_photo {
+                                        ui.add_space(3.5);
+                                        ui.label(
+                                            RichText::new(&msg.time)
+                                                .color(pal.bubble_in_meta)
+                                                .size(11.0),
+                                        );
+                                    }
+                                });
+                            })
+                    },
+                );
                 card_action.or_else(|| {
                     bubble_context_menu(
                         ui,
@@ -1868,24 +1876,29 @@ pub(super) fn bubble_context_menu(
     ui: &mut egui::Ui,
     bubble: &egui::Response,
     msg: &ChatMessage,
-    idx: usize,
+    _idx: usize,
     _pal: &ThemePalette,
     emoji_textures: &HashMap<String, TextureHandle>,
-    _has_interactive_card: bool,
+    has_interactive_card: bool,
 ) -> Option<BubbleAction> {
-    let secondary_or_popup = ui.input(|i| {
-        i.pointer.button_down(egui::PointerButton::Secondary)
-            || i.pointer.button_clicked(egui::PointerButton::Secondary)
-            || i.pointer.button_released(egui::PointerButton::Secondary)
-    }) || ui.memory(|m| m.any_popup_open());
-    if !secondary_or_popup {
-        return None;
+    // Selectable text labels and card widgets sit on top of the bubble and take pointer clicks,
+    // so feed the bubble's own response from raw pointer state while the pointer is over it.
+    let mut resp = bubble.clone();
+    if ui.rect_contains_pointer(resp.interact_rect) {
+        let (secondary, double) = ui.input(|i| {
+            (
+                i.pointer.secondary_clicked(),
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary),
+            )
+        });
+        resp.hovered = true;
+        resp.clicked |= secondary || double;
     }
-    let resp = ui.interact(
-        bubble.rect,
-        Id::new(("bubble_ctx", idx, msg.ts, &msg.id)),
-        Sense::click(),
-    );
+    // Cards (links, photos, files, calls) use their own clicks; double-click replies elsewhere.
+    if !has_interactive_card && resp.double_clicked() {
+        return Some(BubbleAction::Reply);
+    }
     let mut action = None;
 
     resp.context_menu(|ui| {
@@ -2128,4 +2141,92 @@ pub(super) fn render_reactions(
                 });
         }
     });
+}
+
+#[cfg(test)]
+mod bubble_interaction_tests {
+    use super::*;
+
+    /// Renders one incoming text bubble for a pass with `events`; returns the bubble action.
+    fn run_bubble(ctx: &egui::Context, events: Vec<egui::Event>) -> Option<BubbleAction> {
+        let msg = ChatMessage {
+            id: "m1".into(),
+            sender: "An".into(),
+            text: "xin chao ban, day la tin nhan thu nghiem".into(),
+            time: "10:00".into(),
+            ts: 1,
+            ..Default::default()
+        };
+        let pal = ThemePalette::dark();
+        let mut loading = HashSet::new();
+        let mut action = None;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                action = render_chat_bubble(
+                    ui,
+                    &msg,
+                    false,
+                    false,
+                    false,
+                    false,
+                    "An",
+                    None,
+                    &pal,
+                    &HashMap::new(),
+                    &mut loading,
+                    &HashMap::new(),
+                    0,
+                );
+            });
+        });
+        action
+    }
+
+    fn click(pos: Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
+        let ev = |pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        };
+        vec![egui::Event::PointerMoved(pos), ev(true), ev(false)]
+    }
+
+    /// Lays the bubble out, hovers a point on the message text (past the 30px avatar and
+    /// 12px inner margin), and returns it. Text labels are selectable, so they sit on top.
+    fn hover_text(ctx: &egui::Context) -> Pos2 {
+        let pos = Pos2::new(70.0, 24.0);
+        run_bubble(ctx, vec![]);
+        run_bubble(ctx, vec![egui::Event::PointerMoved(pos)]);
+        pos
+    }
+
+    #[test]
+    fn right_click_on_text_opens_reply_menu() {
+        let ctx = egui::Context::default();
+        let pos = hover_text(&ctx);
+        run_bubble(&ctx, click(pos, egui::PointerButton::Secondary));
+        run_bubble(&ctx, vec![]);
+        assert!(
+            ctx.memory(|m| m.layer_ids().any(|l| l.order == egui::Order::Foreground)),
+            "context menu should open on right-click over message text"
+        );
+    }
+
+    #[test]
+    fn double_click_on_text_replies() {
+        let ctx = egui::Context::default();
+        let pos = hover_text(&ctx);
+        run_bubble(&ctx, click(pos, egui::PointerButton::Primary));
+        let action = run_bubble(&ctx, click(pos, egui::PointerButton::Primary));
+        assert!(
+            action == Some(BubbleAction::Reply),
+            "double-click should trigger reply"
+        );
+    }
 }
