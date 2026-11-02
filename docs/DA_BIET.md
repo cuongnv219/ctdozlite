@@ -3,7 +3,7 @@
 Trang này được **sinh tự động** từ GitHub Issues — đừng sửa tay.
 Chạy `scripts/gen-known-issues.sh` để cập nhật.
 
-> Nguồn: [ctdoteam1110/ctdozlite/issues](https://github.com/ctdoteam1110/ctdozlite/issues) · cập nhật 2026-11-01 19:09 UTC
+> Nguồn: [ctdoteam1110/ctdozlite/issues](https://github.com/ctdoteam1110/ctdozlite/issues) · cập nhật 2026-11-02 03:07 UTC
 
 Đang mở: **0** mục, trong đó **0** là lỗi và **0** là đề xuất.
 
