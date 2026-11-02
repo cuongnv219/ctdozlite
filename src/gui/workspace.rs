@@ -4305,7 +4305,7 @@ fn render_quote_target(ui: &egui::Ui, rect: egui::Rect, scroll_pending: bool, co
     ui.painter().rect_stroke(
         rect.expand(2.0),
         Rounding::same(8.0),
-        Stroke::new(2.0, color),
+        Stroke::new(2.0_f32, color),
     );
     if scroll_pending {
         ui.scroll_to_rect(rect, Some(Align::Center));
