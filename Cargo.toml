@@ -81,6 +81,11 @@ assets = [
     ["README.md", "usr/share/doc/ctdozlite/README.md", "644"],
 ]
 
+# ponytail: vendored winit 0.30.13 + one-line macOS IME fix (space after Telex word dropped).
+# Drop when an upstream winit 0.30.x ships rust-windowing/winit#4650 or egui moves to winit 0.31.
+[patch.crates-io]
+winit = { path = "vendor/winit" }
+
 [profile.release]
 # Preserve PE debug/symbol metadata on Windows MSVC builds so unsigned binaries and
 # Inno Setup installers do not trigger Microsoft Defender's stripped-PE ML heuristics (#58).
