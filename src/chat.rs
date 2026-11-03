@@ -1404,7 +1404,10 @@ pub fn extract_zalo_rtf_text_properties(raw: &str) -> (String, Option<String>) {
                 break;
             }
         }
-        let line_len_u16 = out_text.encode_utf16().count().saturating_sub(line_start_u16);
+        let line_len_u16 = out_text
+            .encode_utf16()
+            .count()
+            .saturating_sub(line_start_u16);
         if !line_tags.is_empty() && line_len_u16 > 0 {
             styles.push(json!({
                 "start": line_start_u16,
@@ -4672,6 +4675,102 @@ fn extract_sticker_info(v: &Value) -> Option<(u64, u64, u32)> {
     }
 }
 
+/// Check whether `url` points to a Zalo photo CDN asset (`photo-stal`, `photo-zmp`, `zpcloud.zdn.vn`, etc., #72).
+pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
+    let u = url.trim().to_ascii_lowercase();
+    if (!u.starts_with("http://") && !u.starts_with("https://")) || u.contains("/renewmedia") {
+        return false;
+    }
+    let path_part = u.split('?').next().unwrap_or(&u);
+    if [
+        ".doc", ".docx", ".pdf", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".7z", ".txt",
+        ".csv", ".mp4", ".mov", ".mp3", ".m4a", ".exe", ".dmg", ".apk",
+    ]
+    .iter()
+    .any(|ext| path_part.ends_with(ext))
+    {
+        return false;
+    }
+    u.contains("photo-stal")
+        || u.contains("photo-zmp")
+        || u.contains("photo-aka")
+        || (u.contains("zdn.vn")
+            && (path_part.contains("/jpg/")
+                || path_part.contains("/png/")
+                || path_part.contains("/webp/")
+                || path_part.contains("/gif/")
+                || path_part.ends_with(".jpg")
+                || path_part.ends_with(".jpeg")
+                || path_part.ends_with(".png")
+                || path_part.ends_with(".webp")
+                || path_part.ends_with(".gif")))
+}
+
+/// Sanitize and resolve the original sender filename for a Zalo file attachment (#74),
+/// ensuring `/renewMedia` URLs never overwrite the sender's real filename.
+pub fn resolve_attachment_file_name(title: Option<&str>, text: &str, url: &str) -> String {
+    let is_usable_name = |s: &str| -> bool {
+        let t = s.trim();
+        !t.is_empty()
+            && !t.starts_with("http://")
+            && !t.starts_with("https://")
+            && !t.eq_ignore_ascii_case("renewmedia")
+            && !t.starts_with("renewMedia.")
+            && !t.starts_with("renewmedia.")
+            && !matches!(
+                t,
+                "[Tập tin]" | "[Chia sẻ]" | "[Hình ảnh]" | "[Video]" | "[Tin nhắn]"
+            )
+    };
+
+    fn strip_prefix_tag(s: &str) -> &str {
+        let t = s.trim();
+        t.strip_prefix("[Tập tin]")
+            .or_else(|| t.strip_prefix("[Chia sẻ]"))
+            .map(str::trim)
+            .unwrap_or(t)
+    }
+
+    let raw_candidate = title
+        .map(strip_prefix_tag)
+        .filter(|s| is_usable_name(s))
+        .or_else(|| {
+            let cleaned = strip_prefix_tag(text);
+            is_usable_name(cleaned).then_some(cleaned)
+        })
+        .unwrap_or_else(|| {
+            let path_seg = url
+                .split('?')
+                .next()
+                .unwrap_or(url)
+                .rsplit('/')
+                .next()
+                .unwrap_or("tap_tin_zalo");
+            if path_seg.is_empty() || path_seg.eq_ignore_ascii_case("renewmedia") {
+                "tap_tin_zalo"
+            } else {
+                path_seg
+            }
+        });
+
+    let sanitized: String = raw_candidate
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "tap_tin_zalo".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Extract rich link/media card metadata (`link_url`, `link_title`, `link_desc`, `link_thumb`, `link_src`)
 /// from a Zalo `chat.recommended` (`recommened.link`) or rich-object `content`.
 fn extract_link_info(
@@ -4715,7 +4814,9 @@ fn extract_link_info(
                 })
                 .map(str::to_string);
             let mut title = o
-                .get("title")
+                .get("fileName")
+                .or_else(|| o.get("name"))
+                .or_else(|| o.get("title"))
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
@@ -4728,15 +4829,37 @@ fn extract_link_info(
                 .filter(|d| !d.is_empty())
                 .map(str::to_string);
             let mut src = None;
+            let mut file_ext: Option<String> = o
+                .get("fileExt")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().trim_start_matches('.').to_string())
+                .filter(|s| !s.is_empty());
+            let mut has_file_params =
+                o.get("fileName").is_some() || url.to_ascii_lowercase().contains("/renewmedia");
+
             if let Some(params_str) = o.get("params").and_then(Value::as_str) {
                 if let Ok(p_json) = serde_json::from_str::<Value>(params_str.trim()) {
                     if title.is_none() {
                         title = p_json
-                            .get("mediaTitle")
+                            .get("fileName")
+                            .or_else(|| p_json.get("mediaTitle"))
                             .and_then(Value::as_str)
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
                             .map(str::to_string);
+                    }
+                    if file_ext.is_none() {
+                        file_ext = p_json
+                            .get("fileExt")
+                            .and_then(Value::as_str)
+                            .map(|s| s.trim().trim_start_matches('.').to_string())
+                            .filter(|s| !s.is_empty());
+                    }
+                    if p_json.get("fileExt").is_some()
+                        || p_json.get("fileSize").is_some()
+                        || p_json.get("checksum").is_some()
+                    {
+                        has_file_params = true;
                     }
                     src = p_json
                         .get("src")
@@ -4745,6 +4868,23 @@ fn extract_link_info(
                         .filter(|s| !s.is_empty())
                         .map(str::to_string);
                 }
+            }
+            if let (Some(ref mut t), Some(ref ext)) = (&mut title, &file_ext) {
+                let suffix = format!(".{ext}");
+                if !t
+                    .to_ascii_lowercase()
+                    .ends_with(&suffix.to_ascii_lowercase())
+                    && !t.starts_with("http://")
+                    && !t.starts_with("https://")
+                {
+                    t.push_str(&suffix);
+                }
+            }
+            if src.is_none() && has_file_params {
+                src = Some("Tập tin Zalo".to_string());
+            }
+            if src.is_none() && is_zalo_photo_cdn_url(&url) {
+                src = Some("Hình ảnh Zalo".to_string());
             }
             if src.is_none() {
                 src = url
@@ -4777,13 +4917,65 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     {
         sticker_meta = extract_sticker_info(it);
     }
-    let (link_url, link_title, link_desc, link_thumb, link_src) = raw_content_val
+    let (link_url, mut link_title, link_desc, mut link_thumb, mut link_src) = raw_content_val
         .map(extract_link_info)
         .unwrap_or((None, None, None, None, None));
 
     let mut content = raw_content_val
         .and_then(extract_content_text)
         .unwrap_or_default();
+
+    let is_photo_msg = matches!(msg_type.as_str(), "chat.photo" | "photo" | "2")
+        || link_src.as_deref() == Some("Hình ảnh Zalo")
+        || link_url.as_deref().is_some_and(is_zalo_photo_cdn_url)
+        || link_thumb.as_deref().is_some_and(is_zalo_photo_cdn_url);
+    let is_file_msg = matches!(
+        msg_type.as_str(),
+        "chat.file" | "file" | "19" | "share.file"
+    ) || link_src.as_deref() == Some("Tập tin Zalo")
+        || link_url
+            .as_deref()
+            .is_some_and(|u| u.to_ascii_lowercase().contains("/renewmedia"));
+
+    if is_photo_msg && !is_file_msg && sticker_meta.is_none() {
+        link_src = Some("Hình ảnh Zalo".to_string());
+        if link_thumb.is_none() {
+            link_thumb = link_url.clone();
+        }
+        let trimmed_c = content.trim();
+        let is_raw_url_content =
+            trimmed_c.starts_with("http://") || trimmed_c.starts_with("https://");
+        if trimmed_c.is_empty() || is_raw_url_content {
+            if let Some(cap) = link_desc.as_deref().map(str::trim).filter(|d| {
+                !d.is_empty() && !d.starts_with("http://") && !d.starts_with("https://")
+            }) {
+                content = format!("[Hình ảnh] {cap}");
+            } else {
+                content = "[Hình ảnh]".to_string();
+            }
+        }
+    } else if is_file_msg && sticker_meta.is_none() {
+        link_src = Some("Tập tin Zalo".to_string());
+        if link_url.is_some() || link_title.is_some() {
+            let resolved_name = resolve_attachment_file_name(
+                link_title.as_deref(),
+                &content,
+                link_url.as_deref().unwrap_or_default(),
+            );
+            if link_title.is_none()
+                || link_title
+                    .as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case("renewmedia"))
+            {
+                link_title = Some(resolved_name.clone());
+            }
+            let final_title = link_title.as_deref().unwrap_or(&resolved_name);
+            let trimmed_c = content.trim();
+            if !trimmed_c.starts_with("[Tập tin]") {
+                content = format!("[Tập tin] {final_title}");
+            }
+        }
+    }
     let is_undo_type = matches!(msg_type.as_str(), "chat.undo" | "undo" | "31");
     if is_undo_type {
         content = "[Tin nhắn đã thu hồi]".to_string();
@@ -6032,7 +6224,7 @@ pub fn extract_mute_controls(data_node: &Value, now_unix: i64) -> Vec<MuteContro
     out
 }
 
-/// Request mobile message sync (`pullMobileMsg` @ `app.asar`, cmd `12000`, `file` endpoint, #68).
+/// Request mobile message sync (`pullMobileMsg` @ `app.asar`, cmd `12000`, `file` endpoint, #68, #73).
 /// Sends a wake-up/sync signal to the user's phone Zalo client to push recent messages.
 pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> {
     if s.login.is_none() {
@@ -6044,6 +6236,8 @@ pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> 
         "from_seq_id": 0,
         "is_retry": 0,
         "min_seq_id": 0,
+        "last_action_id": 0,
+        "last_group_action_id": 0,
         "temp_key": "",
         "imei": s.imei
     });
@@ -6052,11 +6246,22 @@ pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> 
         "/api/message/pull_mobile_msg?{}&params={params}",
         s.common_params()
     );
-    let resp = s.get_endpoint("file", &path).await?;
+    if let Ok(resp) = s.get_endpoint("file", &path).await {
+        let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+        if dec.get("error_code").and_then(Value::as_i64) == Some(0) {
+            return Ok(dec);
+        }
+    }
+    let post_url = format!(
+        "{}/api/message/pull_mobile_msg?{}",
+        s.domains.file,
+        s.common_params()
+    );
+    let resp = s.post_form(&post_url, format!("params={params}")).await?;
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
-/// Request transfer-sync v2 from phone (`requestSyncMessage` @ `app.asar`, cmd `12888`, `file` endpoint, #68).
+/// Request transfer-sync v2 from phone (`requestSyncMessage` @ `app.asar`, cmd `12888`, `file` endpoint, #68, #73).
 pub async fn request_phone_sync_v2(s: &Session, public_key: &str) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
@@ -6066,6 +6271,8 @@ pub async fn request_phone_sync_v2(s: &Session, public_key: &str) -> Result<Valu
         "public_key": public_key,
         "version": 1,
         "is_retry": 0,
+        "last_action_id": 0,
+        "last_group_action_id": 0,
         "temp_key": "",
         "imei": s.imei
     });
@@ -6074,7 +6281,18 @@ pub async fn request_phone_sync_v2(s: &Session, public_key: &str) -> Result<Valu
         "/api/transfer-sync-v2/request-sync?{}&params={params}",
         s.common_params()
     );
-    let resp = s.get_endpoint("file", &path).await?;
+    if let Ok(resp) = s.get_endpoint("file", &path).await {
+        let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+        if dec.get("error_code").and_then(Value::as_i64) == Some(0) {
+            return Ok(dec);
+        }
+    }
+    let post_url = format!(
+        "{}/api/transfer-sync-v2/request-sync?{}",
+        s.domains.file,
+        s.common_params()
+    );
+    let resp = s.post_form(&post_url, format!("params={params}")).await?;
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
@@ -7188,5 +7406,70 @@ mod send_identity_tests {
                 settings_until: None,
             }
         );
+    }
+
+    #[test]
+    fn parse_photo_message_hides_raw_cdn_url_and_sets_photo_source() {
+        let raw_photo = json!({
+            "msgId": "photo_72",
+            "msgType": "chat.photo",
+            "uidFrom": "1000001",
+            "ts": 1700000000000_i64,
+            "content": {
+                "title": "",
+                "description": "",
+                "href": "https://photo-stal-zmp.zdn.vn/jpg/55022364c4202d7e7431/999888777.jpg",
+                "thumb": "https://photo-stal-zmp.zdn.vn/jpg/55022364c4202d7e7431/999888777_thumb.jpg",
+                "params": "{\"width\":1280,\"height\":960}"
+            }
+        });
+        let msg = parse_chat_message(&raw_photo).expect("must parse photo message");
+        assert_eq!(msg.link_src.as_deref(), Some("Hình ảnh Zalo"));
+        assert_eq!(msg.text, "[Hình ảnh]");
+        assert!(is_zalo_photo_cdn_url(msg.link_url.as_deref().unwrap()));
+    }
+
+    #[test]
+    fn parse_share_file_preserves_sender_doc_filename_instead_of_renew_media() {
+        let raw_file = json!({
+            "msgId": "file_74",
+            "msgType": "share.file",
+            "uidFrom": "1000002",
+            "ts": 1700000001000_i64,
+            "content": {
+                "title": "Bao_cao_do_an.doc",
+                "description": "",
+                "href": "https://f16-zpc.zdn.vn/renewMedia?p=abc123xyz",
+                "thumb": "",
+                "params": "{\"fileSize\":\"54272\",\"checksum\":\"deadbeef\",\"fileExt\":\"doc\"}"
+            }
+        });
+        let msg = parse_chat_message(&raw_file).expect("must parse file message");
+        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
+        assert_eq!(msg.link_title.as_deref(), Some("Bao_cao_do_an.doc"));
+        assert_eq!(msg.text, "[Tập tin] Bao_cao_do_an.doc");
+        let resolved = resolve_attachment_file_name(
+            msg.link_title.as_deref(),
+            &msg.text,
+            msg.link_url.as_deref().unwrap_or_default(),
+        );
+        assert_eq!(resolved, "Bao_cao_do_an.doc");
+
+        // Also verify when `title` omits `.doc` but `params.fileExt` has `"doc"`
+        let raw_file_no_ext = json!({
+            "msgId": "file_74_b",
+            "msgType": "share.file",
+            "uidFrom": "1000002",
+            "ts": 1700000002000_i64,
+            "content": {
+                "title": "De_cuong_mon_hoc",
+                "description": "",
+                "href": "https://f16-zpc.zdn.vn/renewMedia?p=def456",
+                "params": "{\"fileSize\":\"12345\",\"fileExt\":\"doc\"}"
+            }
+        });
+        let msg_b = parse_chat_message(&raw_file_no_ext).expect("must parse file message");
+        assert_eq!(msg_b.link_src.as_deref(), Some("Tập tin Zalo"));
+        assert_eq!(msg_b.link_title.as_deref(), Some("De_cuong_mon_hoc.doc"));
     }
 }

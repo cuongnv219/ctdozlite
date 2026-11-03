@@ -68,7 +68,6 @@ pub(super) fn render_sticker_widget(
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(super) struct CallCardView {
     pub(super) title: String,
@@ -248,9 +247,7 @@ pub(super) fn render_call_card_widget(
                     ui.add_space(3.0);
                     ui.add(
                         egui::Label::new(
-                            RichText::new(reason)
-                                .size(11.2)
-                                .color(pal.text_secondary),
+                            RichText::new(reason).size(11.2).color(pal.text_secondary),
                         )
                         .wrap(),
                     );
@@ -258,8 +255,7 @@ pub(super) fn render_call_card_widget(
             });
         });
         ui.add_space(8.0);
-        let (sep_rect, _) =
-            ui.allocate_exact_size(Vec2::new(card_width, 1.0), Sense::hover());
+        let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(card_width, 1.0), Sense::hover());
         ui.painter().line_segment(
             [sep_rect.left_center(), sep_rect.right_center()],
             Stroke::new(1.0_f32, pal.border),
@@ -412,7 +408,10 @@ pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::Pa
         };
         let ok = unsafe { GetOpenFileNameW(&mut ofn) };
         if ok != 0 {
-            let end = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
+            let end = file_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(file_buf.len());
             let s = String::from_utf16_lossy(&file_buf[..end]);
             if !s.is_empty() {
                 Some(std::path::PathBuf::from(s))
@@ -547,7 +546,8 @@ pub(super) fn finalize_clipboard_rgba_image(
 /// 1. Registered `"PNG"` / `"image/png"` streams (Snipping Tool, ShareX, Chrome/Edge, Discord)
 /// 2. `CF_HDROP` (`15`) copied image files from Windows Explorer or ShareX
 /// 3. `CF_DIB` (`8`) / `CF_DIBV5` (`17`) 24-bit & 32-bit bitmaps (`BI_RGB` & `BI_BITFIELDS`)
-pub(super) fn read_clipboard_image_to_png() -> Option<(std::path::PathBuf, u32, u32, egui::ColorImage)> {
+pub(super) fn read_clipboard_image_to_png(
+) -> Option<(std::path::PathBuf, u32, u32, egui::ColorImage)> {
     #[cfg(target_os = "windows")]
     {
         const CF_DIB: u32 = 8;
@@ -627,7 +627,8 @@ pub(super) fn read_clipboard_image_to_png() -> Option<(std::path::PathBuf, u32, 
                 let hdrop = GetClipboardData(CF_HDROP);
                 if !hdrop.is_null() {
                     let mut buf = vec![0u16; 1024];
-                    let chars = DragQueryFileW(hdrop, 0, buf.as_mut_ptr(), buf.len() as u32) as usize;
+                    let chars =
+                        DragQueryFileW(hdrop, 0, buf.as_mut_ptr(), buf.len() as u32) as usize;
                     if chars > 0 && chars < buf.len() {
                         let file_path =
                             std::path::PathBuf::from(String::from_utf16_lossy(&buf[..chars]));
@@ -758,7 +759,6 @@ pub(super) fn read_clipboard_image_to_png() -> Option<(std::path::PathBuf, u32, 
     }
 }
 
-
 /// Format a URL for clean UI display by stripping tracking query strings (`?_r=1&utm_...`)
 /// and truncating to `max_chars`.
 pub(super) fn clean_display_url(url: &str, max_chars: usize) -> String {
@@ -767,7 +767,11 @@ pub(super) fn clean_display_url(url: &str, max_chars: usize) -> String {
         .strip_prefix("https://")
         .or_else(|| trimmed.strip_prefix("http://"))
         .unwrap_or(trimmed);
-    let base = no_scheme.split('?').next().unwrap_or(no_scheme).trim_end_matches('/');
+    let base = no_scheme
+        .split('?')
+        .next()
+        .unwrap_or(no_scheme)
+        .trim_end_matches('/');
     truncate_chars(base, max_chars).into_owned()
 }
 
@@ -812,7 +816,9 @@ pub(super) fn extract_message_link_view(msg: &ChatMessage) -> Option<(String, St
                 let end = after.find(char::is_whitespace).unwrap_or(after.len());
                 let found = &after[..end];
                 if found == url || found.starts_with(url_base) {
-                    line = format!("{}{}", &line[..pos], &after[end..]).trim().to_string();
+                    line = format!("{}{}", &line[..pos], &after[end..])
+                        .trim()
+                        .to_string();
                 }
             }
             if line.is_empty()
@@ -840,7 +846,9 @@ pub(super) fn extract_message_link_view(msg: &ChatMessage) -> Option<(String, St
     if url.len() < 10 {
         return None;
     }
-    let caption = format!("{}{}", &text[..pos], &after[end..]).trim().to_string();
+    let caption = format!("{}{}", &text[..pos], &after[end..])
+        .trim()
+        .to_string();
     let domain = extract_clean_domain(url);
     Some((caption, url.to_string(), domain))
 }
@@ -926,9 +934,13 @@ pub(super) fn render_date_divider(ui: &mut egui::Ui, msg: &ChatMessage, pal: &Th
     let avail_w = ui.available_width();
     ui.horizontal(|ui| {
         let text_w = ui.fonts(|f| {
-            f.layout_no_wrap(label.clone(), FontId::proportional(11.5), pal.text_secondary)
-                .size()
-                .x
+            f.layout_no_wrap(
+                label.clone(),
+                FontId::proportional(11.5),
+                pal.text_secondary,
+            )
+            .size()
+            .x
         });
         let pill_w = text_w + 26.0;
         let left_space = ((avail_w - pill_w) * 0.5).max(0.0);
@@ -980,9 +992,13 @@ pub(super) fn render_system_notice_pill(ui: &mut egui::Ui, msg: &ChatMessage, pa
     let text = msg.text.trim();
     ui.horizontal(|ui| {
         let text_w = ui.fonts(|f| {
-            f.layout_no_wrap(text.to_string(), FontId::proportional(12.0), pal.text_secondary)
-                .size()
-                .x
+            f.layout_no_wrap(
+                text.to_string(),
+                FontId::proportional(12.0),
+                pal.text_secondary,
+            )
+            .size()
+            .x
         });
         let pill_w = (text_w + 28.0).min(avail_w - 40.0);
         let left_pad = ((avail_w - pill_w) * 0.5).max(0.0);
@@ -1034,9 +1050,7 @@ fn render_markdown_inline_rich(
         let next_under = rest.find("__");
         let next_strike = rest.find("~~");
         let next_code = rest.find('`');
-        let next_italic = rest
-            .find('*')
-            .filter(|&i| rest.get(i..i + 2) != Some("**"));
+        let next_italic = rest.find('*').filter(|&i| rest.get(i..i + 2) != Some("**"));
         let next_link = rest.find('[').and_then(|lb| {
             let after_lb = &rest[lb + 1..];
             let rb = after_lb.find("](")?;
@@ -1281,13 +1295,7 @@ pub(super) fn render_chat_markdown_block(
                 let (bar_r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
                 ui.painter()
                     .rect_filled(bar_r, Rounding::same(1.5), pal.primary_hover);
-                render_markdown_inline_rich(
-                    ui,
-                    quote,
-                    13.8,
-                    text_col.linear_multiply(0.88),
-                    pal,
-                );
+                render_markdown_inline_rich(ui, quote, 13.8, text_col.linear_multiply(0.88), pal);
             });
         } else if let Some(bullet) = t_start
             .strip_prefix("- ")
@@ -1373,17 +1381,10 @@ pub(super) fn render_message_body(
         thread_name.to_string()
     };
 
-    // Dedicated inline Photo Card when the message is an uploaded/received Zalo photo
-    let is_zalo_photo = msg.link_src.as_deref() == Some("Hình ảnh Zalo")
-        || trimmed_text == "[Hình ảnh]"
-        || trimmed_text.starts_with("[Hình ảnh] ");
+    // Dedicated inline Photo Card when the message is an uploaded/received Zalo photo (#72)
+    let is_zalo_photo = is_zalo_photo_message(msg);
     if is_zalo_photo {
-        if let Some(thumb_url) = msg
-            .link_thumb
-            .as_deref()
-            .or(msg.link_url.as_deref())
-            .filter(|u| !u.is_empty())
-        {
+        if let Some(thumb_url) = photo_primary_url(msg) {
             let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
             if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
                 if let Some(tx) = WORKER_TX.get() {
@@ -1393,22 +1394,30 @@ pub(super) fn render_message_body(
                     });
                 }
             }
-            let open_target = msg.link_url.as_deref().unwrap_or(thumb_url).to_string();
+            let open_target = msg
+                .link_url
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .unwrap_or(thumb_url)
+                .to_string();
             let title_label = msg
                 .link_title
                 .as_deref()
-                .filter(|t| !t.is_empty())
-                .unwrap_or(trimmed_text)
+                .map(str::trim)
+                .filter(|t| {
+                    !t.is_empty() && !t.starts_with("http://") && !t.starts_with("https://")
+                })
+                .unwrap_or("Hình ảnh")
                 .to_string();
             if let Some(tex) = sticker_textures.get(&key) {
                 let [tw, th] = tex.size();
                 let tw_f = (tw.max(1)) as f32;
                 let th_f = (th.max(1)) as f32;
-                let max_w = max_text_width.clamp(160.0, 270.0);
-                let max_h = 260.0_f32;
+                let max_w = max_text_width.clamp(220.0, 360.0);
+                let max_h = 340.0_f32;
                 let scale = (max_w / tw_f).min(max_h / th_f).min(1.0);
-                let disp_w = (tw_f * scale).clamp(135.0, max_w);
-                let disp_h = (th_f * scale).clamp(95.0, max_h);
+                let disp_w = (tw_f * scale).clamp(160.0, max_w);
+                let disp_h = (th_f * scale).clamp(120.0, max_h);
                 let img = egui::Image::new(tex)
                     .fit_to_exact_size(Vec2::new(disp_w, disp_h))
                     .rounding(Rounding::same(12.0))
@@ -1416,7 +1425,7 @@ pub(super) fn render_message_body(
                 let resp = ui
                     .add(img)
                     .on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text("Bấm để phóng to hình ảnh");
+                    .on_hover_text("Bấm để xem ảnh trong ứng dụng");
                 ui.painter().rect_stroke(
                     resp.rect,
                     Rounding::same(12.0),
@@ -1494,35 +1503,38 @@ pub(super) fn render_message_body(
                     });
                 }
             }
-            if let Some(cap) = msg.link_desc.as_deref().filter(|c| !c.trim().is_empty()) {
+            if let Some(cap) = extract_photo_user_caption(msg) {
                 ui.add_space(5.0);
                 render_chat_markdown_block(ui, cap, text_col, pal);
-            } else if !trimmed_text.starts_with("[Hình ảnh]") && !trimmed_text.is_empty() {
-                ui.add_space(5.0);
-                render_chat_markdown_block(ui, trimmed_text, text_col, pal);
             }
             return body_action;
         }
     }
-    // Dedicated File / Video Attachment Card
-    let is_zalo_file_or_video = matches!(
-        msg.link_src.as_deref(),
-        Some("Tập tin Zalo") | Some("Video Zalo")
-    ) || trimmed_text.starts_with("[Tập tin]")
-        || trimmed_text.starts_with("[Video]")
-        || trimmed_text.starts_with("[Tin nhắn thoại]");
+    // Dedicated File / Video Attachment Card (#74)
+    let is_zalo_file_or_video = is_zalo_file_or_video_message(msg);
     if is_zalo_file_or_video {
-        let is_vid = msg.link_src.as_deref() == Some("Video Zalo")
-            || trimmed_text.starts_with("[Video]");
-        let title_str = msg
-            .link_title
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(trimmed_text);
-        let sub_str = msg
-            .link_src
-            .as_deref()
-            .unwrap_or(if is_vid { "Video đính kèm" } else { "Tập tin đính kèm" });
+        let is_vid =
+            msg.link_src.as_deref() == Some("Video Zalo") || trimmed_text.starts_with("[Video]");
+        let url_str = msg.link_url.as_deref().unwrap_or_default();
+        let resolved_file_name = crate::chat::resolve_attachment_file_name(
+            msg.link_title.as_deref(),
+            trimmed_text,
+            url_str,
+        );
+        let title_str = if is_vid {
+            msg.link_title
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(trimmed_text)
+                .to_string()
+        } else {
+            resolved_file_name.clone()
+        };
+        let sub_str = if is_vid {
+            "Video đính kèm · Bấm để mở"
+        } else {
+            "Tập tin Zalo · Bấm để lưu về máy"
+        };
         let link_col = if pal.is_dark {
             Color32::from_rgb(97, 175, 239)
         } else {
@@ -1530,16 +1542,21 @@ pub(super) fn render_message_body(
         };
         let resp = ui
             .add(
-                egui::Label::new(RichText::new(title_str).size(13.8).color(text_col).strong())
-                    .wrap()
-                    .sense(Sense::click()),
+                egui::Label::new(
+                    RichText::new(&title_str)
+                        .size(13.8)
+                        .color(text_col)
+                        .strong(),
+                )
+                .wrap()
+                .sense(Sense::click()),
             )
-            .on_hover_cursor(CursorIcon::PointingHand);
-        if resp.clicked() {
-            if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
-                open_external_url(url);
-            }
-        }
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(if is_vid {
+                "Bấm để mở video"
+            } else {
+                "Bấm để tải và lưu tập tin với tên gốc"
+            });
         ui.add_space(2.0);
         let dom_resp = ui
             .add(
@@ -1547,9 +1564,16 @@ pub(super) fn render_message_body(
                     .sense(Sense::click()),
             )
             .on_hover_cursor(CursorIcon::PointingHand);
-        if dom_resp.clicked() {
+        if resp.clicked() || dom_resp.clicked() {
             if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
-                open_external_url(url);
+                if is_vid && !url.to_ascii_lowercase().contains("/renewmedia") {
+                    open_external_url(url);
+                } else {
+                    return Some(BubbleAction::DownloadFile {
+                        url: url.to_string(),
+                        file_name: resolved_file_name,
+                    });
+                }
             }
         }
         return None;
@@ -1701,6 +1725,76 @@ pub(super) fn render_message_body(
     body_action
 }
 
+pub(super) fn is_zalo_file_or_video_message(msg: &ChatMessage) -> bool {
+    let trimmed = msg.text.trim();
+    matches!(
+        msg.link_src.as_deref(),
+        Some("Tập tin Zalo") | Some("Video Zalo")
+    ) || trimmed.starts_with("[Tập tin]")
+        || trimmed.starts_with("[Video]")
+        || trimmed.starts_with("[Tin nhắn thoại]")
+        || msg
+            .link_url
+            .as_deref()
+            .is_some_and(|u| u.to_ascii_lowercase().contains("/renewmedia"))
+}
+
+pub(super) fn photo_primary_url(msg: &ChatMessage) -> Option<&str> {
+    msg.link_thumb
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .or_else(|| msg.link_url.as_deref().filter(|u| !u.is_empty()))
+        .or_else(|| {
+            let t = msg.text.trim();
+            crate::chat::is_zalo_photo_cdn_url(t).then_some(t)
+        })
+}
+
+pub(super) fn is_zalo_photo_message(msg: &ChatMessage) -> bool {
+    if is_sticker_message(msg).is_some() || is_zalo_file_or_video_message(msg) {
+        return false;
+    }
+    let trimmed = msg.text.trim();
+    msg.link_src.as_deref() == Some("Hình ảnh Zalo")
+        || trimmed == "[Hình ảnh]"
+        || trimmed.starts_with("[Hình ảnh] ")
+        || msg
+            .link_url
+            .as_deref()
+            .is_some_and(crate::chat::is_zalo_photo_cdn_url)
+        || msg
+            .link_thumb
+            .as_deref()
+            .is_some_and(crate::chat::is_zalo_photo_cdn_url)
+        || crate::chat::is_zalo_photo_cdn_url(trimmed)
+}
+
+pub(super) fn extract_photo_user_caption(msg: &ChatMessage) -> Option<&str> {
+    let is_valid_caption = |s: &str| -> bool {
+        let t = s.trim();
+        !t.is_empty()
+            && t != "[Hình ảnh]"
+            && !t.starts_with("http://")
+            && !t.starts_with("https://")
+            && Some(t) != msg.link_src.as_deref()
+    };
+    if let Some(desc) = msg.link_desc.as_deref().map(str::trim) {
+        if is_valid_caption(desc) {
+            return Some(desc);
+        }
+    }
+    let trimmed = msg.text.trim();
+    let stripped = trimmed
+        .strip_prefix("[Hình ảnh]")
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    if is_valid_caption(stripped) {
+        Some(stripped)
+    } else {
+        None
+    }
+}
+
 pub(super) fn render_chat_bubble(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -1722,17 +1816,10 @@ pub(super) fn render_chat_bubble(
     let has_sticker = is_sticker_message(msg).is_some();
     let call_card_opt = extract_call_card_view(msg);
     let is_call_card = call_card_opt.is_some();
-    let is_photo_card = !has_sticker
-        && (msg.link_src.as_deref() == Some("Hình ảnh Zalo")
-            || msg.text.trim() == "[Hình ảnh]"
-            || msg.text.trim().starts_with("[Hình ảnh] "));
-    let is_file_card = matches!(
-        msg.link_src.as_deref(),
-        Some("Tập tin Zalo") | Some("Video Zalo")
-    ) || msg.text.trim().starts_with("[Tập tin]")
-        || msg.text.trim().starts_with("[Video]")
-        || msg.text.trim().starts_with("[Tin nhắn thoại]");
-    let has_link_card = !has_sticker && extract_message_link_view(msg).is_some();
+    let is_photo_card = !has_sticker && is_zalo_photo_message(msg);
+    let is_file_card = !has_sticker && is_zalo_file_or_video_message(msg);
+    let has_link_card =
+        !has_sticker && !is_photo_card && !is_file_card && extract_message_link_view(msg).is_some();
     let has_interactive_card = is_call_card || has_link_card || is_photo_card || is_file_card;
 
     let show_timestamp = !msg.time.is_empty()
@@ -1743,13 +1830,12 @@ pub(super) fn render_chat_bubble(
             || msg.is_pinned
             || msg.is_starred);
 
-    let has_photo_caption = is_photo_card
-        && (msg
-            .link_desc
-            .as_deref()
-            .map(|c| !c.trim().is_empty())
-            .unwrap_or(false)
-            || (!msg.text.trim().starts_with("[Hình ảnh]") && !msg.text.trim().is_empty()));
+    let photo_caption = if is_photo_card {
+        extract_photo_user_caption(msg)
+    } else {
+        None
+    };
+    let has_photo_caption = photo_caption.is_some();
     let is_frameless_photo = is_photo_card
         && !has_photo_caption
         && msg.reply_to_text.is_none()
@@ -1767,29 +1853,20 @@ pub(super) fn render_chat_bubble(
     } else if is_call_card {
         max_text_width.min(256.0)
     } else if is_photo_card {
-        let thumb_u = msg
-            .link_thumb
-            .as_deref()
-            .or(msg.link_url.as_deref())
-            .unwrap_or("");
+        let thumb_u = photo_primary_url(msg).unwrap_or("");
         let tkey = format!("thumb_{}", crate::crypto::md5_hex(thumb_u));
         let photo_w = if let Some(tex) = sticker_textures.get(&tkey) {
             let [tw, th] = tex.size();
             let tw_f = (tw.max(1)) as f32;
             let th_f = (th.max(1)) as f32;
-            let max_w = max_text_width.clamp(160.0, 270.0);
-            let max_h = 260.0_f32;
+            let max_w = max_text_width.clamp(220.0, 360.0);
+            let max_h = 340.0_f32;
             let scale = (max_w / tw_f).min(max_h / th_f).min(1.0);
-            (tw_f * scale).clamp(135.0, max_w).ceil()
+            (tw_f * scale).clamp(160.0, max_w).ceil()
         } else {
-            220.0_f32
+            240.0_f32
         };
-        if has_photo_caption {
-            let cap_str = msg
-                .link_desc
-                .as_deref()
-                .filter(|c| !c.trim().is_empty())
-                .unwrap_or_else(|| msg.text.trim());
+        if let Some(cap_str) = photo_caption {
             let cap_w = ui.fonts(|f| {
                 f.layout(
                     cap_str.to_string(),
@@ -1819,7 +1896,13 @@ pub(super) fn render_chat_bubble(
                 .link_title
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| if !url.is_empty() { &url } else { msg.text.trim() });
+                .unwrap_or_else(|| {
+                    if !url.is_empty() {
+                        &url
+                    } else {
+                        msg.text.trim()
+                    }
+                });
             let desc = msg.link_desc.as_deref().unwrap_or("");
             let measure = |s: &str, sz: f32| -> f32 {
                 if s.is_empty() {
@@ -1878,13 +1961,9 @@ pub(super) fn render_chat_bubble(
                     .filter(|sn| !sn.is_empty() && !sn.chars().all(|c| c.is_ascii_digit()))
                     .unwrap_or("Tin nhắn trích dẫn");
                 let q_who_w = ui.fonts(|f| {
-                    f.layout_no_wrap(
-                        who.to_string(),
-                        FontId::proportional(11.5),
-                        Color32::WHITE,
-                    )
-                    .size()
-                    .x
+                    f.layout_no_wrap(who.to_string(), FontId::proportional(11.5), Color32::WHITE)
+                        .size()
+                        .x
                 });
                 q_body_w.max(q_who_w) + 30.0
             }
@@ -2055,8 +2134,7 @@ pub(super) fn render_chat_bubble(
 
             // Sender Avatar (only on first message of a consecutive group)
             if !prev_same_sender {
-                let (av_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(30.0, 30.0), Sense::hover());
+                let (av_rect, _) = ui.allocate_exact_size(Vec2::new(30.0, 30.0), Sense::hover());
                 paint_user_avatar(
                     ui.painter(),
                     av_rect.center(),
@@ -2188,13 +2266,19 @@ pub(super) enum BubbleAction {
     ToggleStar,
     DeleteForMe,
     RecallForEveryone,
-    CallAgain { is_video: bool },
+    CallAgain {
+        is_video: bool,
+    },
     OpenImagePopup {
         tex_key: String,
         full_url: String,
         title: String,
         sender: String,
         time: String,
+    },
+    DownloadFile {
+        url: String,
+        file_name: String,
     },
 }
 
@@ -2287,43 +2371,56 @@ pub(super) fn bubble_context_menu(
                         }
                     });
                     ui.separator();
-                    if (msg.link_src.as_deref() == Some("Hình ảnh Zalo")
-                        || msg.text.trim() == "[Hình ảnh]"
-                        || msg.text.trim().starts_with("[Hình ảnh] "))
-                        && msg
-                            .link_thumb
-                            .as_deref()
-                            .or(msg.link_url.as_deref())
-                            .map(|u| !u.is_empty())
-                            .unwrap_or(false)
-                    {
-                        let thumb_url = msg
-                            .link_thumb
-                            .as_deref()
-                            .or(msg.link_url.as_deref())
-                            .unwrap_or_default();
-                        if ui
-                            .button(format!("{} Xem ảnh phóng to", lucide::SEARCH))
-                            .clicked()
-                        {
-                            action = Some(BubbleAction::OpenImagePopup {
-                                tex_key: format!("thumb_{}", crate::crypto::md5_hex(thumb_url)),
-                                full_url: msg
-                                    .link_url
-                                    .clone()
-                                    .unwrap_or_else(|| thumb_url.to_string()),
-                                title: msg
-                                    .link_title
-                                    .clone()
-                                    .unwrap_or_else(|| "Hình ảnh".to_string()),
-                                sender: if msg.is_outgoing {
-                                    "Bạn".to_string()
-                                } else {
-                                    msg.sender.clone()
-                                },
-                                time: msg.time.clone(),
-                            });
-                            close = true;
+                    if is_zalo_photo_message(msg) {
+                        if let Some(thumb_url) = photo_primary_url(msg) {
+                            if ui
+                                .button(format!("{} Xem ảnh phóng to", lucide::SEARCH))
+                                .clicked()
+                            {
+                                action = Some(BubbleAction::OpenImagePopup {
+                                    tex_key: format!("thumb_{}", crate::crypto::md5_hex(thumb_url)),
+                                    full_url: msg
+                                        .link_url
+                                        .clone()
+                                        .filter(|u| !u.is_empty())
+                                        .unwrap_or_else(|| thumb_url.to_string()),
+                                    title: msg
+                                        .link_title
+                                        .clone()
+                                        .filter(|t| {
+                                            !t.is_empty()
+                                                && !t.starts_with("http://")
+                                                && !t.starts_with("https://")
+                                        })
+                                        .unwrap_or_else(|| "Hình ảnh".to_string()),
+                                    sender: if msg.is_outgoing {
+                                        "Bạn".to_string()
+                                    } else {
+                                        msg.sender.clone()
+                                    },
+                                    time: msg.time.clone(),
+                                });
+                                close = true;
+                            }
+                        }
+                    }
+                    if is_zalo_file_or_video_message(msg) {
+                        if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                            let resolved_name = crate::chat::resolve_attachment_file_name(
+                                msg.link_title.as_deref(),
+                                msg.text.trim(),
+                                url,
+                            );
+                            if ui
+                                .button(format!("📥 Lưu tập tin \"{resolved_name}\""))
+                                .clicked()
+                            {
+                                action = Some(BubbleAction::DownloadFile {
+                                    url: url.to_string(),
+                                    file_name: resolved_name,
+                                });
+                                close = true;
+                            }
                         }
                     }
                     if ui.button("Trả lời").clicked() {
@@ -2467,7 +2564,6 @@ pub(super) fn render_quote_block(
     ui.add_space(5.0);
     clicked.then(|| BubbleAction::JumpToQuoted(reference.unwrap_or_default()))
 }
-
 
 pub(super) fn render_reactions(
     ui: &mut egui::Ui,

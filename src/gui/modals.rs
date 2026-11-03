@@ -1861,6 +1861,29 @@ impl ZaloGuiApp {
                                                 });
                                             ui.add_space(14.0);
 
+                                            ui.label(RichText::new("Phím tắt gửi tin nhắn").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(Margin::symmetric(14.0, 10.0))
+                                                .show(ui, |ui| {
+                                                    for (val, lbl) in [
+                                                        ("enter", "Nhấn Enter để gửi (Shift + Enter để xuống dòng)"),
+                                                        ("cmd_enter", "Nhấn Cmd/Ctrl + Enter để gửi (Enter để xuống dòng)"),
+                                                    ] {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(RichText::new(lbl).color(pal.text_primary).size(13.0));
+                                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                                ui.radio_value(&mut self.settings.send_message_key, val.into(), "");
+                                                            });
+                                                        });
+                                                        ui.add_space(4.0);
+                                                    }
+                                                });
+                                            ui.add_space(14.0);
+
                                             ui.label(RichText::new("Cài đặt khác").color(pal.text_primary).size(13.5).strong());
                                             ui.add_space(6.0);
                                             egui::Frame::none()
@@ -5453,10 +5476,8 @@ impl ZaloGuiApp {
                     ),
                 ] {
                     let active = self.contacts_sub_tab == tab;
-                    let (row_r, row_resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 44.0),
-                        Sense::click(),
-                    );
+                    let (row_r, row_resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
                     if active {
                         ui.painter()
                             .rect_filled(row_r, Rounding::same(8.0), active_row_bg);
@@ -5486,10 +5507,7 @@ impl ZaloGuiApp {
                             pal.text_primary
                         },
                     );
-                    if row_resp
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .clicked()
-                    {
+                    if row_resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                         self.contacts_sub_tab = tab;
                     }
                     ui.add_space(4.0);
@@ -5510,10 +5528,8 @@ impl ZaloGuiApp {
                 };
 
                 // Full-width Top Header Bar (stretches 100% across CentralPanel)
-                let (hdr_rect, _) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), 56.0),
-                    Sense::hover(),
-                );
+                let (hdr_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::hover());
                 ui.painter()
                     .rect_filled(hdr_rect, Rounding::ZERO, pal.bg_sidebar);
                 ui.painter().line_segment(
@@ -5551,28 +5567,25 @@ impl ZaloGuiApp {
                                     ContactsSubTab::Friends | ContactsSubTab::Groups => {
                                         let want_group =
                                             self.contacts_sub_tab == ContactsSubTab::Groups;
-                                        let mut items: Vec<(
-                                            String,
-                                            String,
-                                            Option<String>,
-                                            bool,
-                                        )> = self
-                                            .threads
-                                            .iter()
-                                            .filter(|t| {
-                                                t.is_group == want_group
-                                                    && !t.name.contains("Cloud của tôi")
-                                                    && matches_vn_query(&t.name, &q_low, &q_fold)
-                                            })
-                                            .map(|t| {
-                                                (
-                                                    t.id.clone(),
-                                                    t.name.clone(),
-                                                    t.avatar.clone(),
-                                                    t.is_group,
-                                                )
-                                            })
-                                            .collect();
+                                        let mut items: Vec<(String, String, Option<String>, bool)> =
+                                            self.threads
+                                                .iter()
+                                                .filter(|t| {
+                                                    t.is_group == want_group
+                                                        && !t.name.contains("Cloud của tôi")
+                                                        && matches_vn_query(
+                                                            &t.name, &q_low, &q_fold,
+                                                        )
+                                                })
+                                                .map(|t| {
+                                                    (
+                                                        t.id.clone(),
+                                                        t.name.clone(),
+                                                        t.avatar.clone(),
+                                                        t.is_group,
+                                                    )
+                                                })
+                                                .collect();
                                         items.sort_by(|a, b| {
                                             fold_vn_search(&a.1).cmp(&fold_vn_search(&b.1))
                                         });
@@ -5743,9 +5756,7 @@ impl ZaloGuiApp {
                                                     );
                                                     if resp
                                                         .on_hover_cursor(CursorIcon::PointingHand)
-                                                        .on_hover_text(
-                                                            "Bấm để mở cuộc trò chuyện",
-                                                        )
+                                                        .on_hover_text("Bấm để mở cuộc trò chuyện")
                                                         .clicked()
                                                     {
                                                         open_thread_id = Some((tid, is_grp));

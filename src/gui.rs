@@ -203,6 +203,7 @@ pub enum GuiEvent {
         error: Option<String>,
     },
     ProxyUpdated(Result<Option<String>, String>),
+    FileDownloaded(Result<(String, String), String>),
     LoggedOut,
 }
 
@@ -271,7 +272,6 @@ enum ContactsSubTab {
     GroupInvites,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     General,
@@ -316,6 +316,7 @@ struct AppSettings {
     excel_paste_mode: String, // "image" | "text" | "ask"
     double_click_to_reply: bool,
     show_typing_indicator: bool,
+    send_message_key: String, // "enter" | "cmd_enter"
     // 6. Tiện ích
     suggest_stickers_while_typing: bool,
     suggest_mentions: bool,
@@ -374,6 +375,7 @@ impl Default for AppSettings {
             excel_paste_mode: "ask".into(),
             double_click_to_reply: true,
             show_typing_indicator: true,
+            send_message_key: "enter".into(),
             suggest_stickers_while_typing: true,
             suggest_mentions: true,
             enable_gif_search: true,
@@ -587,6 +589,8 @@ pub struct ZaloGuiApp {
     /// (thread id, number of newest bubbles rendered) — see `CHAT_RENDER_STEP`.
     chat_render_window: (String, usize),
     quote_jump: Option<QuoteJump>,
+    ime_active: bool,
+    ime_just_committed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -814,6 +818,8 @@ impl ZaloGuiApp {
             event_tx: tx.clone(),
             chat_render_window: (String::new(), CHAT_RENDER_STEP),
             quote_jump: None,
+            ime_active: false,
+            ime_just_committed: false,
         };
         let mut app = app;
         let _ = app.reload_custom_sticker_packs();
@@ -1727,6 +1733,18 @@ impl ZaloGuiApp {
                         self.show_toast(msg);
                     }
                 },
+                GuiEvent::FileDownloaded(res) => match res {
+                    Ok((fname, path)) => {
+                        let msg = format!("✅ Đã lưu tập tin \"{fname}\" tại {path}");
+                        self.status_msg = msg.clone();
+                        self.show_toast(msg);
+                    }
+                    Err(e) => {
+                        let msg = format!("⚠️ Lỗi lưu tập tin: {e}");
+                        self.status_msg = msg.clone();
+                        self.show_toast(msg);
+                    }
+                },
             }
         }
     }
@@ -1757,6 +1775,125 @@ impl eframe::App for ZaloGuiApp {
         }
 
         self.check_events(ctx);
+
+        self.ime_just_committed = false;
+        ctx.input_mut(|i| {
+            let mut ime_commit_in_frame = false;
+            let mut ime_space_commit = false;
+
+            #[cfg(target_os = "macos")]
+            let space_is_down = {
+                #[link(name = "CoreGraphics", kind = "framework")]
+                extern "C" {
+                    fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
+                }
+                // state_id = 0 (kCGEventSourceStateCombinedSessionState), key = 49 (kVK_Space)
+                unsafe { CGEventSourceKeyState(0, 49) }
+            };
+            #[cfg(not(target_os = "macos"))]
+            let space_is_down = false;
+
+            let space_in_events = i.events.iter().any(|e| match e {
+                egui::Event::Key {
+                    key: Key::Space,
+                    pressed: true,
+                    ..
+                } => true,
+                egui::Event::Text(s) if s == " " => true,
+                _ => false,
+            }) || i.key_down(Key::Space);
+
+            // Check whether Enter, non-space punctuation/navigation, or a mouse click
+            // occurred in the same frame so we only auto-append a trailing space when
+            // Spacebar triggered the macOS Vietnamese Telex IME commit (#71).
+            let enter_pressed = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: Key::Enter,
+                        pressed: true,
+                        ..
+                    }
+                )
+            });
+            let non_space_trigger = i.events.iter().any(|e| match e {
+                egui::Event::Text(s) => s != " ",
+                egui::Event::Key {
+                    key, pressed: true, ..
+                } => !matches!(key, Key::Space | Key::Backspace),
+                _ => false,
+            });
+            let mouse_clicked =
+                i.pointer.any_pressed() || i.pointer.any_released() || i.pointer.any_click();
+            let space_pressed = space_is_down || space_in_events;
+            let mut was_composing = self.ime_active;
+
+            for event in &mut i.events {
+                match event {
+                    egui::Event::Ime(egui::ImeEvent::Enabled) => {
+                        self.ime_active = true;
+                        was_composing = true;
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
+                        self.ime_active = !text.is_empty();
+                        if !text.is_empty() {
+                            was_composing = true;
+                        }
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Commit(ref mut text)) => {
+                        let inferred_macos_space_commit = cfg!(target_os = "macos")
+                            && was_composing
+                            && !enter_pressed
+                            && !non_space_trigger
+                            && !mouse_clicked;
+                        if (space_pressed || inferred_macos_space_commit)
+                            && !text.is_empty()
+                            && !text.ends_with(' ')
+                            && !text.chars().any(crate::gui::theme::is_cjk)
+                        {
+                            text.push(' ');
+                            ime_space_commit = true;
+                        }
+                        self.ime_active = false;
+                        self.ime_just_committed = true;
+                        ime_commit_in_frame = true;
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Disabled) => {
+                        self.ime_active = false;
+                    }
+                    _ => {}
+                }
+            }
+
+            if ime_space_commit {
+                // Prevent duplicate space insertion if winit also forwarded a Space event in the same frame.
+                i.events.retain(|e| {
+                    !matches!(e, egui::Event::Text(s) if s == " ")
+                        && !matches!(
+                            e,
+                            egui::Event::Key {
+                                key: Key::Space,
+                                pressed: true,
+                                ..
+                            }
+                        )
+                });
+            }
+
+            if self.ime_active || ime_commit_in_frame {
+                // Suppress Enter key events during IME composition/commit so pressing Enter
+                // to accept an IME candidate does not blur TextEdit or send prematurely (#71).
+                i.events.retain(|e| {
+                    !matches!(
+                        e,
+                        egui::Event::Key {
+                            key: Key::Enter,
+                            ..
+                        }
+                    )
+                });
+            }
+        });
 
         // No timer repaint: the worker owns the poll timer and every GuiTx send wakes the UI.
 

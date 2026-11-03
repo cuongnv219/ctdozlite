@@ -67,15 +67,15 @@ Bản Zalo PC chính thức đóng gói trên Electron thường chiếm 350–6
 
 ---
 
-## Cấu trúc & Quy mô mã nguồn (Codebase LoC — `v0.0.6`)
+## Cấu trúc & Quy mô mã nguồn (Codebase LoC — `v0.0.7`)
 
 | Hạng mục | Số tệp | Tổng số dòng | Dòng mã thực thi (Code LoC) | Chú thích & Dòng trống |
 | :--- | :---: | :---: | :---: | :---: |
-| **Rust Source (`src/*.rs`)** | 44 | **54,096** | **49,191** | 4,905 |
+| **Rust Source (`src/*.rs`)** | 44 | **54,485** | **49,540** | 4,945 |
 | **Integration Tests (`tests/*.rs`)** | 4 | **1,193** | **1,081** | 112 |
-| **Tài liệu & Kiến trúc (`docs/*.md`, `README*`)** | 48 | **4,681** | **3,014** | 1,667 |
+| **Tài liệu & Kiến trúc (`docs/*.md`, `README*`)** | 48 | **4,689** | **3,022** | 1,667 |
 | **Đóng gói & CI/CD (`packaging/`, `.github/`)** | 22 | **1,262** | **1,115** | 147 |
-| **Tổng cộng toàn kho (Tracked Repository)** | **118** | **61,232 lines** | **54,401 lines** | **6,831 lines** |
+| **Tổng cộng toàn kho (Tracked Repository)** | **118** | **61,629 lines** | **54,758 lines** | **6,871 lines** |
 
 ```text
 src/ (54,096 lines across 44 files)
@@ -276,7 +276,7 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 | Contributor | GitHub | Đóng góp chính | Khối lượng |
 | :--- | :--- | :--- | :---: |
 | **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 | **> 75,600+ lines** |
-| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & phát hành v0.0.5 | **> 35,100+ lines** 🏆 |
+| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 25+ Issues & phát hành v0.0.5 / v0.0.7 | **> 35,600+ lines** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | Loạt 10 PRs: Múi giờ OS, tùy biến data-dir, helpers macOS, session atomic, media cache, updater, message state, định danh tin nhắn (#61), điều hướng trích dẫn (#60), quyền thông báo macOS (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | Loạt 5 PRs: Tiêu chuẩn kỹ thuật, bảo toàn session an toàn, phân giải domain mạng | **> 3,400+ lines** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | Loạt 8 PRs: Tối ưu khởi động SQLite, đồng bộ lịch sử nhóm/Cloud (#45), poll timer worker (#46), virtualization chat, lazy load Font CJK | **~950+ lines** |

@@ -182,9 +182,7 @@ impl ZaloGuiApp {
                     );
                     if nav2_resp
                         .on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text(format!(
-                            "Danh bạ ({direct_cnt} bạn bè · {group_cnt} nhóm)"
-                        ))
+                        .on_hover_text(format!("Danh bạ ({direct_cnt} bạn bè · {group_cnt} nhóm)"))
                         .clicked()
                     {
                         self.feed_modal_open = false;
@@ -525,8 +523,13 @@ impl ZaloGuiApp {
                                         .hint_text("Tìm hội thoại, tin nhắn, SĐT...")
                                         .desired_width(edit_rect.width()),
                                 );
+                                let is_ime_busy = self.ime_active || self.ime_just_committed;
+                                if is_ime_busy && s_resp.lost_focus() {
+                                    s_resp.request_focus();
+                                }
                                 let s_enter = (s_resp.lost_focus() || s_resp.has_focus())
-                                    && ui.input(|i| i.key_pressed(Key::Enter));
+                                    && ui.input(|i| i.key_pressed(Key::Enter))
+                                    && !is_ime_busy;
                                 let digits_cnt = self
                                     .search_query
                                     .chars()
@@ -3594,6 +3597,18 @@ impl ZaloGuiApp {
                                         pan: Vec2::ZERO,
                                     });
                                 }
+                                BubbleAction::DownloadFile { url, file_name } => {
+                                    self.show_toast(format!(
+                                        "⏳ Đang tải tập tin \"{file_name}\"…"
+                                    ));
+                                    if let Some(tx) = WORKER_TX.get() {
+                                        let _ = tx.send(WorkerCmd::DownloadFile {
+                                            url,
+                                            file_name,
+                                            download_dir: self.settings.download_dir.clone(),
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -3817,12 +3832,18 @@ impl ZaloGuiApp {
                                 }
                             }
 
-                            let (enter_without_shift, shift_enter_pressed) =
-                                ui.input(|i| {
-                                    let ent = i.key_pressed(Key::Enter);
+                            let is_ime_busy = self.ime_active || self.ime_just_committed;
+                            let is_cmd_enter_mode = self.settings.send_message_key == "cmd_enter";
+                            let (send_via_enter, insert_newline_via_enter) = ui.input(|i| {
+                                let ent = i.key_pressed(Key::Enter) && !is_ime_busy;
+                                let cmd_or_ctrl = i.modifiers.command || i.modifiers.ctrl;
+                                if is_cmd_enter_mode {
+                                    (ent && cmd_or_ctrl, ent && !cmd_or_ctrl)
+                                } else {
                                     (ent && !i.modifiers.shift, ent && i.modifiers.shift)
-                                });
-                            if enter_without_shift || shift_enter_pressed {
+                                }
+                            });
+                            if send_via_enter || insert_newline_via_enter {
                                 ui.input_mut(|i| {
                                     i.events.retain(|ev| {
                                         !matches!(
@@ -4151,7 +4172,10 @@ impl ZaloGuiApp {
                                         })
                                         .inner;
 
-                                    if shift_enter_pressed
+                                    if is_ime_busy && response.lost_focus() {
+                                        response.request_focus();
+                                    }
+                                    if insert_newline_via_enter
                                         && (response.has_focus() || response.lost_focus())
                                     {
                                         if let Some(mut st) =
@@ -4246,7 +4270,8 @@ impl ZaloGuiApp {
 
                                     let enter_pressed = (response.lost_focus()
                                         || response.has_focus())
-                                        && enter_without_shift;
+                                        && send_via_enter
+                                        && !is_ime_busy;
                                     if enter_pressed {
                                         if let Some(sel) = self.composer_sticker_selected {
                                             if let Some(st) = contextual_stickers.get(sel) {
