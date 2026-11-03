@@ -101,8 +101,9 @@ impl ZaloGuiApp {
                     ui.add_space(18.0);
 
                     // Navigation Icon 1: Tin nhắn (All / Active Chat)
-                    let is_msg_nav =
-                        !self.feed_modal_open && self.thread_filter == ThreadFilter::All;
+                    let is_msg_nav = !self.feed_modal_open
+                        && !self.contacts_view_open
+                        && self.thread_filter == ThreadFilter::All;
                     let (nav1_rect, nav1_resp) =
                         ui.allocate_exact_size(Vec2::new(42.0, 42.0), Sense::click());
                     if is_msg_nav {
@@ -137,16 +138,20 @@ impl ZaloGuiApp {
                         .clicked()
                     {
                         self.feed_modal_open = false;
+                        self.contacts_view_open = false;
                         self.thread_filter = ThreadFilter::All;
                     }
 
                     ui.add_space(6.0);
 
-                    // Navigation Icon 2: Danh bạ / Cá nhân (`ThreadFilter::Direct`)
-                    let direct_cnt = self.threads.iter().filter(|t| !t.is_group).count();
+                    // Navigation Icon 2: Danh bạ (Unified Friends + Groups + Invites matching Zalo PC)
+                    let direct_cnt = self
+                        .threads
+                        .iter()
+                        .filter(|t| !t.is_group && !t.name.contains("Cloud của tôi"))
+                        .count();
                     let group_cnt = self.threads.iter().filter(|t| t.is_group).count();
-                    let is_contacts_nav =
-                        !self.feed_modal_open && self.thread_filter == ThreadFilter::Direct;
+                    let is_contacts_nav = !self.feed_modal_open && self.contacts_view_open;
                     let (nav2_rect, nav2_resp) =
                         ui.allocate_exact_size(Vec2::new(42.0, 42.0), Sense::click());
                     if is_contacts_nav {
@@ -165,10 +170,9 @@ impl ZaloGuiApp {
                         ui.painter()
                             .rect_filled(nav2_rect, Rounding::same(11.0), pal.bg_hover);
                     }
-                    draw_lucide_icon(
+                    draw_icon_contacts(
                         ui.painter(),
                         nav2_rect.center(),
-                        lucide::USER,
                         19.0,
                         if is_contacts_nav {
                             pal.primary_hover
@@ -178,106 +182,20 @@ impl ZaloGuiApp {
                     );
                     if nav2_resp
                         .on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text(format!("Cá nhân ({direct_cnt} liên hệ)"))
+                        .on_hover_text(format!(
+                            "Danh bạ ({direct_cnt} bạn bè · {group_cnt} nhóm)"
+                        ))
                         .clicked()
                     {
                         self.feed_modal_open = false;
-                        self.thread_filter = if self.thread_filter == ThreadFilter::Direct {
-                            ThreadFilter::All
-                        } else {
-                            ThreadFilter::Direct
-                        };
-                    }
-
-                    ui.add_space(6.0);
-
-                    // Navigation Icon 2b: Nhóm chat (`ThreadFilter::Groups`)
-                    let is_groups_nav =
-                        !self.feed_modal_open && self.thread_filter == ThreadFilter::Groups;
-                    let (nav2g_rect, nav2g_resp) =
-                        ui.allocate_exact_size(Vec2::new(42.0, 42.0), Sense::click());
-                    if is_groups_nav {
-                        ui.painter().rect_filled(
-                            nav2g_rect,
-                            Rounding::same(11.0),
-                            pal.primary.linear_multiply(0.18),
-                        );
-                        let pill = Rect::from_min_size(
-                            Pos2::new(nav2g_rect.left() - 6.0, nav2g_rect.center().y - 10.0),
-                            Vec2::new(3.5, 20.0),
-                        );
-                        ui.painter()
-                            .rect_filled(pill, Rounding::same(2.0), pal.primary);
-                    } else if nav2g_resp.hovered() {
-                        ui.painter()
-                            .rect_filled(nav2g_rect, Rounding::same(11.0), pal.bg_hover);
-                    }
-                    draw_icon_contacts(
-                        ui.painter(),
-                        nav2g_rect.center(),
-                        19.0,
-                        if is_groups_nav {
-                            pal.primary_hover
-                        } else {
-                            pal.text_secondary
-                        },
-                    );
-                    if group_cnt > 0 {
-                        let badge_rect = Rect::from_min_size(
-                            Pos2::new(nav2g_rect.right() - 16.0, nav2g_rect.top() + 3.0),
-                            Vec2::new(15.0, 14.0),
-                        );
-                        ui.painter()
-                            .rect_filled(badge_rect, Rounding::same(7.0), pal.primary);
-                        ui.painter().text(
-                            badge_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            group_cnt.to_string(),
-                            FontId::proportional(9.5),
-                            Color32::WHITE,
-                        );
-                    }
-                    if nav2g_resp
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text(format!("Nhóm chat ({group_cnt} nhóm)"))
-                        .clicked()
-                    {
-                        self.feed_modal_open = false;
-                        self.thread_filter = if self.thread_filter == ThreadFilter::Groups {
-                            ThreadFilter::All
-                        } else {
-                            ThreadFilter::Groups
-                        };
-                        if self.thread_filter == ThreadFilter::Groups {
-                            if let Some((gidx, gthread)) =
-                                self.threads.iter().enumerate().find(|(_, t)| t.is_group)
-                            {
-                                let gid = gthread.id.clone();
-                                self.selected_thread_index = gidx;
-                                if let Some(tx) = WORKER_TX.get() {
-                                    let _ = tx.send(WorkerCmd::LoadGroupHistory {
-                                        group_id: gid,
-                                        is_group: true,
-                                        have: 0,
-                                    });
-                                }
-                            }
-                            if group_cnt == 0
-                                || self.threads.iter().any(|t| {
-                                    t.is_group && crate::chat::is_generic_thread_name(&t.name)
-                                })
-                            {
-                                if let Some(tx) = WORKER_TX.get() {
-                                    let _ = tx.send(WorkerCmd::RefreshThreads);
-                                }
-                            }
-                        }
+                        self.contacts_view_open = !self.contacts_view_open;
                     }
 
                     ui.add_space(6.0);
 
                     // Navigation Icon 3: Cloud của tôi
                     let is_cloud_selected = !self.feed_modal_open
+                        && !self.contacts_view_open
                         && self
                             .threads
                             .get(self.selected_thread_index)
@@ -311,6 +229,7 @@ impl ZaloGuiApp {
                         .clicked()
                     {
                         self.feed_modal_open = false;
+                        self.contacts_view_open = false;
                         if let Some((cidx, cthread)) = self
                             .threads
                             .iter()
@@ -365,6 +284,7 @@ impl ZaloGuiApp {
                         .on_hover_text("Tường nhà / Nhật ký bạn bè")
                         .clicked()
                     {
+                        self.contacts_view_open = false;
                         self.feed_modal_open = true;
                         self.trigger_feed_timeline_load();
                     }
@@ -475,6 +395,19 @@ impl ZaloGuiApp {
                 });
             });
 
+        if self.contacts_view_open {
+            self.render_contacts_page(ctx, pal);
+            self.render_profile_popover(ctx, pal);
+            self.render_wipe_confirm(ctx, pal);
+            self.render_toast_overlay(ctx, pal);
+            self.render_forward_dialog(ctx, pal);
+            self.render_call_overlay(ctx, pal);
+            self.render_image_viewer_modal(ctx, pal);
+            self.render_phone_lookup_modal(ctx, pal);
+            self.render_settings_modal(ctx, pal);
+            self.render_schedule_modal(ctx, pal);
+            return;
+        }
         if self.feed_modal_open {
             self.render_feed_page(ctx, pal);
             self.render_profile_popover(ctx, pal);
@@ -1017,7 +950,8 @@ impl ZaloGuiApp {
                                 .get(&t.id)
                                 .map(|&until| until == -1 || until > now_unix)
                                 .unwrap_or(false)
-                                || t.presentation.muted;
+                                || t.presentation.muted
+                                || t.unread.is_muted();
                             let is_hidden = self.settings.hidden_threads.contains(&t.id)
                                 || t.presentation.hidden;
                             let cur_label = self.settings.thread_labels.get(&t.id).cloned();
@@ -1759,6 +1693,14 @@ impl ZaloGuiApp {
                             };
                             if let Some(th) = self.threads.iter_mut().find(|t| t.id == tid) {
                                 th.presentation.muted = mute;
+                                th.unread.muted = mute;
+                                th.unread.muted_until = if mute && dur_sec > 0 {
+                                    Some(now_unix + dur_sec)
+                                } else {
+                                    None
+                                };
+                                th.unread.settings_fresh = true;
+                                th.unread.fresh = true;
                             }
                             self.settings.save();
                             self.persist_threads_async();
@@ -1864,6 +1806,9 @@ impl ZaloGuiApp {
                                 let is_photo = m.link_src.as_deref() == Some("Hình ảnh Zalo")
                                     || m.text.trim() == "[Hình ảnh]"
                                     || m.text.trim().starts_with("[Hình ảnh] ");
+                                if is_sticker_message(m).is_some() {
+                                    return None;
+                                }
                                 if !is_photo {
                                     return None;
                                 }
@@ -2484,6 +2429,8 @@ impl ZaloGuiApp {
                                             .clicked()
                                         {
                                             self.info_drawer_open = !self.info_drawer_open;
+                                            self.settings.info_drawer_open = self.info_drawer_open;
+                                            self.settings.save();
                                         }
                                     }
 
@@ -3264,9 +3211,17 @@ impl ZaloGuiApp {
                     } else {
                         HashMap::new()
                     };
-                    let msg_area_height =
-                        (ui.available_height() - 66.0 - picker_reserve).max(100.0);
-
+                    let composer_lines = self
+                        .input_message
+                        .split('\n')
+                        .count()
+                        .clamp(1, 5);
+                    let composer_extra_h = (composer_lines.saturating_sub(1) as f32) * 20.0;
+                    let msg_area_height = (ui.available_height()
+                        - 68.0
+                        - composer_extra_h
+                        - picker_reserve)
+                        .max(100.0);
                     egui::ScrollArea::vertical()
                         .id_salt(Id::new(("chat_scroll", &thread_id)))
                         .max_height(msg_area_height)
@@ -3862,396 +3817,507 @@ impl ZaloGuiApp {
                                 }
                             }
 
+                            let (enter_without_shift, shift_enter_pressed) =
+                                ui.input(|i| {
+                                    let ent = i.key_pressed(Key::Enter);
+                                    (ent && !i.modifiers.shift, ent && i.modifiers.shift)
+                                });
+                            if enter_without_shift || shift_enter_pressed {
+                                ui.input_mut(|i| {
+                                    i.events.retain(|ev| {
+                                        !matches!(
+                                            ev,
+                                            egui::Event::Key {
+                                                key: Key::Enter,
+                                                pressed: true,
+                                                ..
+                                            }
+                                        ) && !matches!(
+                                            ev,
+                                            egui::Event::Text(t)
+                                                if t == "\n" || t == "\r" || t == "\r\n"
+                                        )
+                                    });
+                                });
+                            }
+
                             egui::Frame::none()
                                 .fill(pal.bg_input)
                                 .rounding(Rounding::same(11.0))
                                 .stroke(Stroke::new(1.0_f32, pal.border))
                                 .inner_margin(Margin::symmetric(8.0, 5.0))
                                 .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                    let mut send_clicked = false;
+                                    let mut send_selected_sticker: Option<
+                                        crate::chat::StickerItem,
+                                    > = None;
+                                    let composer_id =
+                                        Id::new(("chat_composer_input", &thread_id));
 
-                                        // 1) Compact Sticker Icon Button
-                                        let (stk_rect, stk_resp) = ui.allocate_exact_size(
-                                            Vec2::new(34.0, 34.0),
-                                            Sense::click(),
-                                        );
-                                        if self.sticker_picker_open || stk_resp.hovered() {
-                                            ui.painter().rect_filled(
-                                                stk_rect,
-                                                Rounding::same(8.0),
-                                                pal.bg_hover,
+                                    let response = ui
+                                        .horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+
+                                            // 1) Compact Sticker Icon Button
+                                            let (stk_rect, stk_resp) = ui.allocate_exact_size(
+                                                Vec2::new(34.0, 34.0),
+                                                Sense::click(),
                                             );
-                                        }
-                                        draw_icon_sticker(
-                                            ui.painter(),
-                                            stk_rect.center(),
-                                            18.0,
                                             if self.sticker_picker_open || stk_resp.hovered() {
-                                                Color32::from_rgb(251, 191, 36)
+                                                ui.painter().rect_filled(
+                                                    stk_rect,
+                                                    Rounding::same(8.0),
+                                                    pal.bg_hover,
+                                                );
+                                            }
+                                            draw_icon_sticker(
+                                                ui.painter(),
+                                                stk_rect.center(),
+                                                18.0,
+                                                if self.sticker_picker_open || stk_resp.hovered() {
+                                                    Color32::from_rgb(251, 191, 36)
+                                                } else {
+                                                    pal.text_secondary
+                                                },
+                                            );
+                                            if stk_resp
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text("Nhãn dán (Sticker)")
+                                                .clicked()
+                                            {
+                                                self.sticker_picker_open =
+                                                    !self.sticker_picker_open;
+                                            }
+
+                                            // 2) Compact Photo Upload Icon Button
+                                            let (img_rect, img_resp) = ui.allocate_exact_size(
+                                                Vec2::new(34.0, 34.0),
+                                                Sense::click(),
+                                            );
+                                            if img_resp.hovered() {
+                                                ui.painter().rect_filled(
+                                                    img_rect,
+                                                    Rounding::same(8.0),
+                                                    pal.bg_hover,
+                                                );
+                                            }
+                                            draw_icon_image(
+                                                ui.painter(),
+                                                img_rect.center(),
+                                                18.0,
+                                                if img_resp.hovered() {
+                                                    pal.accent_online
+                                                } else {
+                                                    pal.text_secondary
+                                                },
+                                            );
+                                            if img_resp
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text("Gửi hình ảnh")
+                                                .clicked()
+                                            {
+                                                let cap = self.input_message.trim().to_string();
+                                                self.input_message.clear();
+                                                if let Some(tx) = WORKER_TX.get() {
+                                                    let _ =
+                                                        tx.send(WorkerCmd::PickAndSendAttachment {
+                                                            to_id: thread_id.clone(),
+                                                            is_group,
+                                                            images_only: true,
+                                                            caption: cap,
+                                                            preset_path: None,
+                                                        });
+                                                }
+                                            }
+
+                                            // 3) Compact File Upload Icon Button
+                                            let (att_rect, att_resp) = ui.allocate_exact_size(
+                                                Vec2::new(34.0, 34.0),
+                                                Sense::click(),
+                                            );
+                                            if att_resp.hovered() {
+                                                ui.painter().rect_filled(
+                                                    att_rect,
+                                                    Rounding::same(8.0),
+                                                    pal.bg_hover,
+                                                );
+                                            }
+                                            draw_icon_attachment(
+                                                ui.painter(),
+                                                att_rect.center(),
+                                                17.0,
+                                                if att_resp.hovered() {
+                                                    pal.primary_hover
+                                                } else {
+                                                    pal.text_secondary
+                                                },
+                                            );
+                                            if att_resp
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text("Đính kèm File / Video")
+                                                .clicked()
+                                            {
+                                                let cap = self.input_message.trim().to_string();
+                                                self.input_message.clear();
+                                                if let Some(tx) = WORKER_TX.get() {
+                                                    let _ =
+                                                        tx.send(WorkerCmd::PickAndSendAttachment {
+                                                            to_id: thread_id.clone(),
+                                                            is_group,
+                                                            images_only: false,
+                                                            caption: cap,
+                                                            preset_path: None,
+                                                        });
+                                                }
+                                            }
+
+                                            let is_multiline = self.input_message.contains('\n');
+                                            let vis_lines = if is_multiline {
+                                                self.input_message
+                                                    .split('\n')
+                                                    .count()
+                                                    .clamp(2, 5)
                                             } else {
-                                                pal.text_secondary
-                                            },
+                                                1
+                                            };
+                                            let box_h = if is_multiline {
+                                                14.0 + (vis_lines as f32 * 20.0)
+                                            } else {
+                                                34.0
+                                            };
+
+                                            // Vertical hairline separator
+                                            let (sep_r, _) = ui.allocate_exact_size(
+                                                Vec2::new(8.0, (box_h - 10.0).clamp(20.0, 72.0)),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().line_segment(
+                                                [sep_r.center_top(), sep_r.center_bottom()],
+                                                Stroke::new(1.0_f32, pal.border),
+                                            );
+
+                                            let send_btn_w =
+                                                if is_narrow_w { 52.0 } else { 76.0 };
+                                            let sched_btn_w = 34.0;
+                                            let input_w = (ui.available_width()
+                                                - send_btn_w
+                                                - sched_btn_w
+                                                - 16.0)
+                                                .max(50.0);
+                                            let hint_str = format!(
+                                                "Nhập tin nhắn tới {}...",
+                                                truncate_chars(&thread_name, 18)
+                                            );
+                                            let resp = if is_multiline {
+                                                ui.allocate_ui_with_layout(
+                                                    Vec2::new(input_w, box_h),
+                                                    Layout::top_down(Align::Min),
+                                                    |ui| {
+                                                        ui.set_min_size(Vec2::new(input_w, box_h));
+                                                        ui.set_max_size(Vec2::new(input_w, box_h));
+                                                        egui::ScrollArea::vertical()
+                                                            .id_salt((
+                                                                "composer_fixed_scroll",
+                                                                &thread_id,
+                                                            ))
+                                                            .max_width(input_w)
+                                                            .max_height(box_h)
+                                                            .auto_shrink([false, false])
+                                                            .stick_to_bottom(true)
+                                                            .show(ui, |ui| {
+                                                                ui.add(
+                                                                    egui::TextEdit::multiline(
+                                                                        &mut self.input_message,
+                                                                    )
+                                                                    .id(composer_id)
+                                                                    .desired_rows(vis_lines)
+                                                                    .frame(false)
+                                                                    .hint_text(hint_str)
+                                                                    .margin(Margin::symmetric(
+                                                                        6.0, 6.0,
+                                                                    ))
+                                                                    .desired_width(input_w - 10.0),
+                                                                )
+                                                            })
+                                                            .inner
+                                                    },
+                                                )
+                                                .inner
+                                            } else {
+                                                ui.add_sized(
+                                                    [input_w, 34.0],
+                                                    egui::TextEdit::singleline(
+                                                        &mut self.input_message,
+                                                    )
+                                                    .id(composer_id)
+                                                    .frame(false)
+                                                    .hint_text(hint_str)
+                                                    .margin(Margin::symmetric(6.0, 7.0))
+                                                    .desired_width(input_w),
+                                                )
+                                            };
+
+                                            // Schedule Send Button (`🕒`)
+                                            let (sched_rect, sched_resp) = ui.allocate_exact_size(
+                                                Vec2::new(32.0, 34.0),
+                                                Sense::click(),
+                                            );
+                                            if self.schedule_modal_open || sched_resp.hovered() {
+                                                ui.painter().rect_filled(
+                                                    sched_rect,
+                                                    Rounding::same(8.0),
+                                                    pal.bg_hover,
+                                                );
+                                            }
+                                            ui.painter().text(
+                                                sched_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "🕒",
+                                                FontId::proportional(14.5),
+                                                if self.schedule_modal_open || sched_resp.hovered()
+                                                {
+                                                    pal.primary_hover
+                                                } else {
+                                                    pal.text_secondary
+                                                },
+                                            );
+                                            if sched_resp
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text("Hẹn giờ gửi tin nhắn & Nhắc hẹn")
+                                                .clicked()
+                                            {
+                                                self.schedule_modal_open =
+                                                    !self.schedule_modal_open;
+                                            }
+
+                                            // Send Button
+                                            let can_send = !self.input_message.trim().is_empty()
+                                                || self.pending_clipboard_image.is_some();
+                                            let (send_rect, send_resp) = ui.allocate_exact_size(
+                                                Vec2::new(send_btn_w, 34.0),
+                                                Sense::click(),
+                                            );
+                                            if send_resp.secondary_clicked() {
+                                                self.schedule_modal_open = true;
+                                            }
+                                            let send_bg = if !can_send {
+                                                pal.primary.linear_multiply(0.42)
+                                            } else if send_resp.hovered() {
+                                                pal.primary_hover
+                                            } else {
+                                                pal.primary
+                                            };
+                                            ui.painter().rect_filled(
+                                                send_rect,
+                                                Rounding::same(8.0),
+                                                send_bg,
+                                            );
+                                            if !is_narrow_w {
+                                                ui.painter().text(
+                                                    Pos2::new(
+                                                        send_rect.left() + 15.0,
+                                                        send_rect.center().y,
+                                                    ),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    "Gửi",
+                                                    FontId::proportional(13.0),
+                                                    Color32::WHITE,
+                                                );
+                                                draw_icon_send(
+                                                    ui.painter(),
+                                                    Pos2::new(
+                                                        send_rect.right() - 17.0,
+                                                        send_rect.center().y,
+                                                    ),
+                                                    14.0,
+                                                    Color32::WHITE,
+                                                );
+                                            } else {
+                                                draw_icon_send(
+                                                    ui.painter(),
+                                                    send_rect.center(),
+                                                    16.0,
+                                                    Color32::WHITE,
+                                                );
+                                            }
+                                            send_clicked = send_resp
+                                                .on_hover_cursor(if can_send {
+                                                    CursorIcon::PointingHand
+                                                } else {
+                                                    CursorIcon::Default
+                                                })
+                                                .clicked();
+                                            resp
+                                        })
+                                        .inner;
+
+                                    if shift_enter_pressed
+                                        && (response.has_focus() || response.lost_focus())
+                                    {
+                                        if let Some(mut st) =
+                                            egui::TextEdit::load_state(ui.ctx(), composer_id)
+                                        {
+                                            let char_idx = st
+                                                .cursor
+                                                .char_range()
+                                                .map(|r| r.primary.index)
+                                                .unwrap_or_else(|| {
+                                                    self.input_message.chars().count()
+                                                });
+                                            let byte_idx = self
+                                                .input_message
+                                                .char_indices()
+                                                .nth(char_idx)
+                                                .map(|(i, _)| i)
+                                                .unwrap_or(self.input_message.len());
+                                            self.input_message.insert(byte_idx, '\n');
+                                            let next_c = egui::text::CCursor::new(char_idx + 1);
+                                            st.cursor.set_char_range(Some(
+                                                egui::text::CCursorRange::one(next_c),
+                                            ));
+                                            st.store(ui.ctx(), composer_id);
+                                        } else {
+                                            self.input_message.push('\n');
+                                        }
+                                        response.request_focus();
+                                    }
+                                    if response.changed() {
+                                        ensure_cjk_font(
+                                            ui.ctx(),
+                                            std::iter::once(self.input_message.as_str()),
                                         );
-                                        if stk_resp
-                                            .on_hover_cursor(CursorIcon::PointingHand)
-                                            .on_hover_text("Nhãn dán (Sticker)")
+                                    }
+                                    if self.composer_focus_pending {
+                                        response.request_focus();
+                                        self.composer_focus_pending = false;
+                                    }
+                                    response.context_menu(|ui| {
+                                        if ui
+                                            .button(format!(
+                                                "{} Dán hình ảnh từ Clipboard (Ctrl+V)",
+                                                lucide::IMAGE
+                                            ))
                                             .clicked()
                                         {
-                                            self.sticker_picker_open = !self.sticker_picker_open;
-                                        }
-
-                                        // 2) Compact Photo Upload Icon Button
-                                        let (img_rect, img_resp) = ui.allocate_exact_size(
-                                            Vec2::new(34.0, 34.0),
-                                            Sense::click(),
-                                        );
-                                        if img_resp.hovered() {
-                                            ui.painter().rect_filled(
-                                                img_rect,
-                                                Rounding::same(8.0),
-                                                pal.bg_hover,
-                                            );
-                                        }
-                                        draw_icon_image(
-                                            ui.painter(),
-                                            img_rect.center(),
-                                            18.0,
-                                            if img_resp.hovered() {
-                                                pal.accent_online
+                                            ui.close_menu();
+                                            if let Some((path, w, h, col_img)) =
+                                                read_clipboard_image_to_png()
+                                            {
+                                                let tex = ctx.load_texture(
+                                                    format!(
+                                                        "clip_preview_{}",
+                                                        crate::login::unix_now()
+                                                    ),
+                                                    col_img,
+                                                    TextureOptions::LINEAR,
+                                                );
+                                                self.pending_clipboard_image =
+                                                    Some((path, w, h, tex));
+                                                self.composer_focus_pending = true;
+                                                self.show_toast(format!(
+                                                    "Đã dán ảnh ({w}×{h} px) từ Clipboard — nhấn Enter để gửi"
+                                                ));
                                             } else {
-                                                pal.text_secondary
-                                            },
-                                        );
-                                        if img_resp
-                                            .on_hover_cursor(CursorIcon::PointingHand)
-                                            .on_hover_text("Gửi hình ảnh")
-                                            .clicked()
+                                                self.show_toast(
+                                                    "Không tìm thấy hình ảnh nào trong Clipboard",
+                                                );
+                                            }
+                                        }
+                                    });
+
+                                    if !contextual_stickers.is_empty() && response.has_focus() {
+                                        let len = contextual_stickers.len();
+                                        if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
+                                            self.composer_sticker_selected = Some(0);
+                                        } else if let Some(sel) = self.composer_sticker_selected {
+                                            if ui.input(|i| i.key_pressed(Key::ArrowRight)) {
+                                                self.composer_sticker_selected =
+                                                    Some((sel + 1) % len);
+                                            } else if ui.input(|i| i.key_pressed(Key::ArrowLeft)) {
+                                                self.composer_sticker_selected =
+                                                    Some((sel + len - 1) % len);
+                                            } else if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
+                                                self.composer_sticker_selected = None;
+                                            }
+                                        }
+                                    } else {
+                                        self.composer_sticker_selected = None;
+                                    }
+
+                                    let enter_pressed = (response.lost_focus()
+                                        || response.has_focus())
+                                        && enter_without_shift;
+                                    if enter_pressed {
+                                        if let Some(sel) = self.composer_sticker_selected {
+                                            if let Some(st) = contextual_stickers.get(sel) {
+                                                send_selected_sticker = Some(st.clone());
+                                            }
+                                        }
+                                    }
+                                    let can_send = !self.input_message.trim().is_empty()
+                                        || self.pending_clipboard_image.is_some();
+
+                                    if let Some(chosen) = send_selected_sticker {
+                                        self.input_message.clear();
+                                        self.dismissed_sticker_suggest_for.clear();
+                                        self.composer_sticker_selected = None;
+                                        response.request_focus();
+                                        if let Some(tx) = WORKER_TX.get() {
+                                            let _ = tx.send(WorkerCmd::SendSticker {
+                                                to_id: thread_id.clone(),
+                                                sticker_id: chosen.sticker_id,
+                                                cate_id: chosen.cate_id,
+                                                sticker_type: chosen.sticker_type,
+                                                is_group,
+                                            });
+                                        }
+                                    } else if (send_clicked || enter_pressed)
+                                        && self.pending_clipboard_image.is_some()
+                                    {
+                                        if let Some((clip_path, _, _, _)) =
+                                            self.pending_clipboard_image.take()
                                         {
                                             let cap = self.input_message.trim().to_string();
                                             self.input_message.clear();
+                                            self.dismissed_sticker_suggest_for.clear();
+                                            self.composer_sticker_selected = None;
+                                            response.request_focus();
                                             if let Some(tx) = WORKER_TX.get() {
                                                 let _ = tx.send(WorkerCmd::PickAndSendAttachment {
                                                     to_id: thread_id.clone(),
                                                     is_group,
                                                     images_only: true,
                                                     caption: cap,
-                                                    preset_path: None,
+                                                    preset_path: Some(clip_path),
                                                 });
                                             }
                                         }
-
-                                        // 3) Compact File Upload Icon Button
-                                        let (att_rect, att_resp) = ui.allocate_exact_size(
-                                            Vec2::new(34.0, 34.0),
-                                            Sense::click(),
-                                        );
-                                        if att_resp.hovered() {
-                                            ui.painter().rect_filled(
-                                                att_rect,
-                                                Rounding::same(8.0),
-                                                pal.bg_hover,
-                                            );
-                                        }
-                                        draw_icon_attachment(
-                                            ui.painter(),
-                                            att_rect.center(),
-                                            17.0,
-                                            if att_resp.hovered() {
-                                                pal.primary_hover
-                                            } else {
-                                                pal.text_secondary
-                                            },
-                                        );
-                                        if att_resp
-                                            .on_hover_cursor(CursorIcon::PointingHand)
-                                            .on_hover_text("Đính kèm File / Video")
-                                            .clicked()
-                                        {
-                                            let cap = self.input_message.trim().to_string();
-                                            self.input_message.clear();
-                                            if let Some(tx) = WORKER_TX.get() {
-                                                let _ = tx.send(WorkerCmd::PickAndSendAttachment {
+                                    } else if (send_clicked || enter_pressed) && can_send {
+                                        let text = self.input_message.trim().to_string();
+                                        self.input_message.clear();
+                                        self.dismissed_sticker_suggest_for.clear();
+                                        self.composer_sticker_selected = None;
+                                        response.request_focus();
+                                        let quoted = self.replying_to.take();
+                                        if let Some(tx) = WORKER_TX.get() {
+                                            if let Some(quoted) = quoted {
+                                                let _ = tx.send(WorkerCmd::SendQuote {
                                                     to_id: thread_id.clone(),
+                                                    text,
+                                                    quoted,
                                                     is_group,
-                                                    images_only: false,
-                                                    caption: cap,
-                                                    preset_path: None,
                                                 });
-                                            }
-                                        }
-
-                                        // Vertical hairline separator
-                                        let (sep_r, _) = ui.allocate_exact_size(
-                                            Vec2::new(8.0, 20.0),
-                                            Sense::hover(),
-                                        );
-                                        ui.painter().line_segment(
-                                            [sep_r.center_top(), sep_r.center_bottom()],
-                                            Stroke::new(1.0_f32, pal.border),
-                                        );
-                                        // Responsive Borderless Input Field (shrinks gracefully down to 50px)
-                                        let send_btn_w = if is_narrow_w { 52.0 } else { 76.0 };
-                                        let sched_btn_w = 34.0;
-                                        let input_w = (ui.available_width()
-                                            - send_btn_w
-                                            - sched_btn_w
-                                            - 16.0)
-                                            .max(50.0);
-                                        let text_edit =
-                                            egui::TextEdit::singleline(&mut self.input_message)
-                                                .id(Id::new(("chat_composer_input", &thread_id)))
-                                                .frame(false)
-                                                .hint_text(format!(
-                                                    "Nhập tin nhắn tới {}...",
-                                                    truncate_chars(&thread_name, 16)
-                                                ))
-                                                .margin(Margin::symmetric(6.0, 7.0))
-                                                .desired_width(input_w);
-
-                                        let response = ui.add(text_edit);
-                                        if response.changed() {
-                                            ensure_cjk_font(
-                                                ui.ctx(),
-                                                std::iter::once(self.input_message.as_str()),
-                                            );
-                                        }
-                                        if self.composer_focus_pending {
-                                            response.request_focus();
-                                            self.composer_focus_pending = false;
-                                        }
-                                        response.context_menu(|ui| {
-                                            if ui
-                                                .button(format!(
-                                                    "{} Dán hình ảnh từ Clipboard (Ctrl+V)",
-                                                    lucide::IMAGE
-                                                ))
-                                                .clicked()
-                                            {
-                                                ui.close_menu();
-                                                if let Some((path, w, h, col_img)) =
-                                                    read_clipboard_image_to_png()
-                                                {
-                                                    let tex = ctx.load_texture(
-                                                        format!(
-                                                            "clip_preview_{}",
-                                                            crate::login::unix_now()
-                                                        ),
-                                                        col_img,
-                                                        TextureOptions::LINEAR,
-                                                    );
-                                                    self.pending_clipboard_image =
-                                                        Some((path, w, h, tex));
-                                                    self.composer_focus_pending = true;
-                                                    self.show_toast(format!(
-                                                        "Đã dán ảnh ({w}×{h} px) từ Clipboard — nhấn Enter để gửi"
-                                                    ));
-                                                } else {
-                                                    self.show_toast(
-                                                        "Không tìm thấy hình ảnh nào trong Clipboard",
-                                                    );
-                                                }
-                                            }
-                                        });
-
-                                        // Keyboard navigation for contextual sticker popover (Zalo PC `changeSelectedIndex`):
-                                        // - ArrowUp selects the first suggested sticker
-                                        // - ArrowLeft / ArrowRight cycles through suggested stickers
-                                        // - ArrowDown / Escape deselects or hides the popover
-                                        // - Enter sends the selected sticker if one is highlighted, otherwise sends text!
-                                        let mut send_selected_sticker: Option<
-                                            crate::chat::StickerItem,
-                                        > = None;
-                                        if !contextual_stickers.is_empty() && response.has_focus() {
-                                            let len = contextual_stickers.len();
-                                            if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
-                                                self.composer_sticker_selected = Some(0);
-                                            } else if let Some(sel) = self.composer_sticker_selected
-                                            {
-                                                if ui.input(|i| i.key_pressed(Key::ArrowRight)) {
-                                                    self.composer_sticker_selected =
-                                                        Some((sel + 1) % len);
-                                                } else if ui
-                                                    .input(|i| i.key_pressed(Key::ArrowLeft))
-                                                {
-                                                    self.composer_sticker_selected =
-                                                        Some((sel + len - 1) % len);
-                                                } else if ui
-                                                    .input(|i| i.key_pressed(Key::ArrowDown))
-                                                {
-                                                    self.composer_sticker_selected = None;
-                                                }
-                                            }
-                                        } else {
-                                            self.composer_sticker_selected = None;
-                                        }
-
-                                        let enter_pressed =
-                                            (response.lost_focus() || response.has_focus())
-                                                && ui.input(|i| i.key_pressed(Key::Enter));
-                                        if enter_pressed {
-                                            if let Some(sel) = self.composer_sticker_selected {
-                                                if let Some(st) = contextual_stickers.get(sel) {
-                                                    send_selected_sticker = Some(st.clone());
-                                                }
-                                            }
-                                        }
-                                        // Schedule Send Button (`🕒`, #38)
-                                        let (sched_rect, sched_resp) = ui.allocate_exact_size(
-                                            Vec2::new(32.0, 34.0),
-                                            Sense::click(),
-                                        );
-                                        if self.schedule_modal_open || sched_resp.hovered() {
-                                            ui.painter().rect_filled(
-                                                sched_rect,
-                                                Rounding::same(8.0),
-                                                pal.bg_hover,
-                                            );
-                                        }
-                                        ui.painter().text(
-                                            sched_rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            "🕒",
-                                            FontId::proportional(14.5),
-                                            if self.schedule_modal_open || sched_resp.hovered() {
-                                                pal.primary_hover
                                             } else {
-                                                pal.text_secondary
-                                            },
-                                        );
-                                        if sched_resp
-                                            .on_hover_cursor(CursorIcon::PointingHand)
-                                            .on_hover_text("Hẹn giờ gửi tin nhắn & Nhắc hẹn")
-                                            .clicked()
-                                        {
-                                            self.schedule_modal_open = !self.schedule_modal_open;
-                                        }
-
-                                        // Responsive Padded Send Button (shows icon-only on very tight widths)
-                                        let can_send = !self.input_message.trim().is_empty()
-                                            || self.pending_clipboard_image.is_some();
-                                        let (send_rect, send_resp) = ui.allocate_exact_size(
-                                            Vec2::new(send_btn_w, 34.0),
-                                            Sense::click(),
-                                        );
-                                        if send_resp.secondary_clicked() {
-                                            self.schedule_modal_open = true;
-                                        }
-                                        let send_bg = if !can_send {
-                                            pal.primary.linear_multiply(0.42)
-                                        } else if send_resp.hovered() {
-                                            pal.primary_hover
-                                        } else {
-                                            pal.primary
-                                        };
-                                        ui.painter().rect_filled(
-                                            send_rect,
-                                            Rounding::same(8.0),
-                                            send_bg,
-                                        );
-                                        if !is_narrow_w {
-                                            ui.painter().text(
-                                                Pos2::new(
-                                                    send_rect.left() + 15.0,
-                                                    send_rect.center().y,
-                                                ),
-                                                egui::Align2::LEFT_CENTER,
-                                                "Gửi",
-                                                FontId::proportional(13.0),
-                                                Color32::WHITE,
-                                            );
-                                            draw_icon_send(
-                                                ui.painter(),
-                                                Pos2::new(
-                                                    send_rect.right() - 17.0,
-                                                    send_rect.center().y,
-                                                ),
-                                                14.0,
-                                                Color32::WHITE,
-                                            );
-                                        } else {
-                                            draw_icon_send(
-                                                ui.painter(),
-                                                send_rect.center(),
-                                                16.0,
-                                                Color32::WHITE,
-                                            );
-                                        }
-
-
-                                        let send_clicked = send_resp
-                                            .on_hover_cursor(if can_send {
-                                                CursorIcon::PointingHand
-                                            } else {
-                                                CursorIcon::Default
-                                            })
-                                            .clicked();
-
-                                        if let Some(chosen) = send_selected_sticker {
-                                            self.input_message.clear();
-                                            self.dismissed_sticker_suggest_for.clear();
-                                            self.composer_sticker_selected = None;
-                                            response.request_focus();
-                                            if let Some(tx) = WORKER_TX.get() {
-                                                let _ = tx.send(WorkerCmd::SendSticker {
+                                                let _ = tx.send(WorkerCmd::SendMessage {
                                                     to_id: thread_id.clone(),
-                                                    sticker_id: chosen.sticker_id,
-                                                    cate_id: chosen.cate_id,
-                                                    sticker_type: chosen.sticker_type,
+                                                    text,
                                                     is_group,
                                                 });
                                             }
-                                        } else if (send_clicked || enter_pressed)
-                                            && self.pending_clipboard_image.is_some()
-                                        {
-                                            if let Some((clip_path, _, _, _)) =
-                                                self.pending_clipboard_image.take()
-                                            {
-                                                let cap =
-                                                    self.input_message.trim().to_string();
-                                                self.input_message.clear();
-                                                self.dismissed_sticker_suggest_for.clear();
-                                                self.composer_sticker_selected = None;
-                                                response.request_focus();
-                                                if let Some(tx) = WORKER_TX.get() {
-                                                    let _ = tx.send(
-                                                        WorkerCmd::PickAndSendAttachment {
-                                                            to_id: thread_id.clone(),
-                                                            is_group,
-                                                            images_only: true,
-                                                            caption: cap,
-                                                            preset_path: Some(clip_path),
-                                                        },
-                                                    );
-                                                }
-                                            }
-                                        } else if (send_clicked || enter_pressed) && can_send {
-                                            let text = self.input_message.trim().to_string();
-                                            self.input_message.clear();
-                                            self.dismissed_sticker_suggest_for.clear();
-                                            self.composer_sticker_selected = None;
-                                            response.request_focus();
-                                            let quoted = self.replying_to.take();
-                                            if let Some(tx) = WORKER_TX.get() {
-                                                if let Some(quoted) = quoted {
-                                                    let _ = tx.send(WorkerCmd::SendQuote {
-                                                        to_id: thread_id.clone(),
-                                                        text,
-                                                        quoted,
-                                                        is_group,
-                                                    });
-                                                } else {
-                                                    let _ = tx.send(WorkerCmd::SendMessage {
-                                                        to_id: thread_id.clone(),
-                                                        text,
-                                                        is_group,
-                                                    });
-                                                }
-                                            }
-                                        } else if enter_pressed {
-                                            response.request_focus();
                                         }
-                                    });
+                                    } else if enter_pressed {
+                                        response.request_focus();
+                                    }
                                 });
                         });
 

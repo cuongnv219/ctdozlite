@@ -72,7 +72,7 @@ Core contributors with representative code commits in the repository:
 
 | Contributor | GitHub | Key Role | Code Volume |
 | :--- | :--- | :--- | :---: |
-| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Core architecture, VoIP call engine, egui framework, Social Feed, cross-platform | **> 73,300+ lines** |
+| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Core architecture, VoIP call engine, egui framework, Contacts & Social Feed, cross-platform & v0.0.6 release | **> 75,600+ lines** |
 | **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Modular GUI refactoring, Atom One Dark, MCP/REST API, Message Scheduler, GitHub API Auto-Updater, 20+ Issue fixes & v0.0.5 release | **> 35,100+ lines** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | 10 PRs: OS timezone, customizable data-dir, macOS helpers, session atomic, media cache, updater, message state, exact message identity (#61), quote navigation (#60), macOS notification permissions (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | 5 PRs: Engineering standards, session safety, domain resolution | **> 3,400+ lines** |

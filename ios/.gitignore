@@ -1,5 +1,0 @@
-build/
-rust-core/target/
-*.ipa
-*.app/
-.DS_Store

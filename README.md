@@ -67,35 +67,53 @@ Bản Zalo PC chính thức đóng gói trên Electron thường chiếm 350–6
 
 ---
 
-## Cấu trúc mã nguồn
+## Cấu trúc & Quy mô mã nguồn (Codebase LoC — `v0.0.6`)
+
+| Hạng mục | Số tệp | Tổng số dòng | Dòng mã thực thi (Code LoC) | Chú thích & Dòng trống |
+| :--- | :---: | :---: | :---: | :---: |
+| **Rust Source (`src/*.rs`)** | 44 | **54,096** | **49,191** | 4,905 |
+| **Integration Tests (`tests/*.rs`)** | 4 | **1,193** | **1,081** | 112 |
+| **Tài liệu & Kiến trúc (`docs/*.md`, `README*`)** | 48 | **4,681** | **3,014** | 1,667 |
+| **Đóng gói & CI/CD (`packaging/`, `.github/`)** | 22 | **1,262** | **1,115** | 147 |
+| **Tổng cộng toàn kho (Tracked Repository)** | **118** | **61,232 lines** | **54,401 lines** | **6,831 lines** |
 
 ```text
-src/
-├── main.rs            # Điểm vào CLI, phân tích tham số khởi chạy (--gui, --tui, --dev, --logout)
-├── lib.rs             # Khai báo các module thư viện
-├── session.rs         # Quản lý phiên, cookie jar (zpw_sek), khóa giải mã (zpw_enk) và bảng domain
-├── crypto.rs          # AES-128/256-CBC, PKCS7, MD5 và hàm tạo chữ ký signkey
-├── param_cipher.rs    # Mã hóa tham số xác thực ParamCipher v2 (zcid, zcid_ext, encrypt_key)
-├── qr.rs              # Luồng sinh mã QR, long-polling chờ quét và xác nhận đăng nhập
-├── login.rs           # Đăng nhập mật khẩu (PasswordCipher), getServerInfo, getLoginInfo
-├── socket.rs          # Kết nối WebSocket thời gian thực (zpw_ws)
-├── chat.rs            # API hội thoại, tin nhắn, nhóm, đính kèm, link preview và tìm kiếm sticker
-├── store.rs           # Lưu trữ SQLite (zalo_history.db) và đồng bộ lịch sử
-├── call.rs            # Báo hiệu VoIP, điều khiển phiên gọi 1-1 và bắt tay ZRTP
-├── media.rs           # Đóng gói/giải mã RTP/RTCP, H.264 FU-A và luồng webcam/video
-├── audio.rs           # Thu/phát âm thanh thời gian thực (cpal + libopus)
-├── voip_log.rs        # Ghi nhận chẩn đoán luồng gói tin RTP/RTCP (voip.log)
-├── logger.rs          # Bộ thu thập log mạng và quét mã lỗi cho chế độ --dev
-├── tui.rs             # Giao diện dòng lệnh (ratatui)
-└── gui/               # Giao diện đồ họa native (eframe/egui)
-    ├── theme.rs       # Bảng màu Dark/Light, vector icon Lucide, nạp font hệ thống
-    ├── stickers.rs    # Sticker picker, auto-suggest khi gõ và bộ lọc nhãn dán
-    ├── worker.rs      # Luồng nền Tokio xử lý lệnh mạng và prefetch ảnh/sticker
-    ├── workspace.rs   # Bố cục cột danh bạ, khung chat chính và ngăn thông tin hội thoại
-    ├── messages.rs    # Render bong bóng tin nhắn, reaction, quote, ảnh clipboard
-    └── modals.rs      # Hộp thoại cài đặt, cuộc gọi, xem ảnh, tra cứu SĐT và Dev Inspector
+src/ (54,096 lines across 44 files)
+├── main.rs            # (388 lines)   Điểm vào CLI, phân tích tham số (--gui, --tui, --dev, --profile, --proxy)
+├── lib.rs             # (39 lines)    Khai báo các module thư viện
+├── chat.rs            # (7,188 lines) API hội thoại, tin nhắn, nhóm, RTF/Markdown, link preview & tìm kiếm sticker
+├── call.rs            # (4,712 lines) Báo hiệu VoIP, điều khiển phiên gọi 1-1 và bắt tay ZRTP
+├── tui.rs             # (2,847 lines) Giao diện dòng lệnh (ratatui)
+├── media.rs           # (2,738 lines) Đóng gói/giải mã RTP/RTCP, H.264 FU-A và luồng webcam/video
+├── gui.rs             # (2,503 lines) Khởi tạo trạng thái ZaloGuiApp, bộ lọc, đồng bộ & vòng lặp sự kiện
+├── session.rs         # (1,738 lines) Quản lý phiên, cookie jar (zpw_sek), khóa (zpw_enk), proxy & multi-profile
+├── store.rs           # (1,068 lines) Lưu trữ SQLite (zalo_history.db) và đồng bộ lịch sử
+├── api_mcp.rs         # (947 lines)   Máy chủ HTTP REST API cục bộ & giao thức MCP (JSON-RPC 2.0)
+├── updater.rs         # (768 lines)   Tự động kiểm tra, tải và xác thực chữ ký/SHA-256 bản cập nhật GitHub
+├── voip_log.rs        # (661 lines)   Ghi nhận chẩn đoán luồng gói tin RTP/RTCP (voip.log)
+├── reactions.rs       # (656 lines)   Quản lý trạng thái thả cảm xúc (reaction) tin nhắn
+├── unread.rs          # (644 lines)   Theo dõi bộ đếm tin nhắn chưa đọc và trạng thái tắt thông báo (mute)
+├── socket.rs          # (604 lines)   Kết nối WebSocket thời gian thực (zpw_ws)
+├── scheduler.rs       # (504 lines)   Bộ lập lịch gửi tin nhắn hẹn giờ & nhắc hẹn cục bộ
+├── feed.rs            # (498 lines)   API Nhật ký (Social Timeline, hồ sơ & album ảnh bạn bè)
+├── qr.rs              # (477 lines)   Luồng sinh mã QR, long-polling chờ quét và xác nhận đăng nhập
+├── media_resources.rs # (453 lines)   Quản lý bộ nhớ đệm tài nguyên đa phương tiện & ảnh
+├── login.rs           # (407 lines)   Đăng nhập mật khẩu (PasswordCipher), getServerInfo, getLoginInfo
+├── data_dir.rs        # (391 lines)   Phân giải thư mục dữ liệu đa nền tảng (--data-dir / --profile)
+├── history_sync.rs    # (347 lines)   Đồng bộ lịch sử phân trang và giải mã gói backup từ điện thoại
+├── message_model.rs   # (329 lines)   Mô hình định danh và hợp nhất trạng thái tin nhắn
+├── logger.rs          # (255 lines)   Bộ thu thập log mạng và quét mã lỗi cho chế độ --dev
+├── param_cipher.rs    # (222 lines)   Mã hóa tham số xác thực ParamCipher v2 (zcid, zcid_ext, encrypt_key)
+├── crypto.rs          # (146 lines)   AES-128/256-CBC, PKCS7, MD5 và hàm tạo chữ ký signkey
+├── audio.rs           # (142 lines)   Thu/phát âm thanh thời gian thực (cpal + libopus)
+└── gui/               # Giao diện đồ họa native (eframe/egui — 19,883 lines)
+    ├── modals.rs      # (6,958 lines) Trang Danh bạ, Nhật ký, Hẹn giờ, Cài đặt, Cuộc gọi & Dev Inspector
+    ├── workspace.rs   # (4,483 lines) Bố cục thanh điều hướng, cột hội thoại, khung chat chính & ngăn thông tin
+    ├── worker.rs      # (3,053 lines) Luồng nền Tokio xử lý lệnh mạng, đồng bộ và prefetch ảnh/sticker
+    ├── messages.rs    # (2,612 lines) Render bong bóng tin nhắn, Markdown/RTF, reaction, quote, ảnh clipboard
+    ├── stickers.rs    # (1,844 lines) Sticker picker, gói Mèo Ami Bụng Bự (GIF), auto-suggest & bộ lọc nhãn dán
+    └── theme.rs       # (933 lines)   Bảng màu Dark/Light, vector icon Lucide, nạp font hệ thống
 ```
-
 ---
 
 ## Tải bản cài đặt dựng sẵn
@@ -257,12 +275,11 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 
 | Contributor | GitHub | Đóng góp chính | Khối lượng |
 | :--- | :--- | :--- | :---: |
-| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Nhật ký Social, đa nền tảng | **> 73,300+ lines** |
+| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 | **> 75,600+ lines** |
 | **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & phát hành v0.0.5 | **> 35,100+ lines** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | Loạt 10 PRs: Múi giờ OS, tùy biến data-dir, helpers macOS, session atomic, media cache, updater, message state, định danh tin nhắn (#61), điều hướng trích dẫn (#60), quyền thông báo macOS (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | Loạt 5 PRs: Tiêu chuẩn kỹ thuật, bảo toàn session an toàn, phân giải domain mạng | **> 3,400+ lines** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | Loạt 8 PRs: Tối ưu khởi động SQLite, đồng bộ lịch sử nhóm/Cloud (#45), poll timer worker (#46), virtualization chat, lazy load Font CJK | **~950+ lines** |
-
 > *Ghi chú: Toàn bộ danh sách vinh danh mọi cá nhân đóng góp (báo lỗi, đề xuất tính năng, pull request) được cập nhật công khai tại trang [Người đóng góp](https://ctdozlite.ctdo.net/contributors.html).*
 
 <details>

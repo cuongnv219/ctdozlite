@@ -10,6 +10,24 @@ pub(super) fn is_sticker_message(msg: &ChatMessage) -> Option<(u64, u64)> {
             return Some((sid, msg.sticker_cate_id.unwrap_or(0)));
         }
     }
+    let check_ami = |s: &str| -> Option<(u64, u64)> {
+        let pos = s.find("ami_fat_cat_")?;
+        let num_str = s.get(pos + 12..pos + 14)?;
+        let idx = num_str.parse::<u64>().ok()?;
+        if (1..=15).contains(&idx) {
+            Some((999000 + idx, AMI_FAT_CAT_CATE_ID))
+        } else {
+            None
+        }
+    };
+    if let Some(hit) = check_ami(&msg.text)
+        .or_else(|| msg.link_desc.as_deref().and_then(check_ami))
+        .or_else(|| msg.link_title.as_deref().and_then(check_ami))
+        .or_else(|| msg.link_url.as_deref().and_then(check_ami))
+        .or_else(|| msg.link_thumb.as_deref().and_then(check_ami))
+    {
+        return Some(hit);
+    }
     if msg.text.trim() == "[Nhãn dán]" {
         return Some((18009, 10130));
     }
@@ -987,6 +1005,320 @@ pub(super) fn render_system_notice_pill(ui: &mut egui::Ui, msg: &ChatMessage, pa
 }
 
 /// Return `true` when two adjacent messages belong to the same visual bubble group.
+/// Render chat message text with full Markdown support:
+/// - Fenced code blocks (` ```lang ... ``` `)
+/// - Headings (`#`, `##`, `###`)
+/// - Bullet lists (`- `, `* `) and blockquotes (`> `)
+/// - Inline `**bold**`, `*italic*`, `~~strikethrough~~`, `` `inline code` ``, and `[link](url)`
+fn strip_markdown_syntax_for_width(s: &str) -> String {
+    s.replace("```", "")
+        .replace("**", "")
+        .replace("__", "")
+        .replace("~~", "")
+        .replace('`', "")
+}
+
+fn render_markdown_inline_rich(
+    ui: &mut egui::Ui,
+    text: &str,
+    base_size: f32,
+    base_color: Color32,
+    pal: &ThemePalette,
+) {
+    let mut job = egui::text::LayoutJob::default();
+    let mut first_link: Option<String> = None;
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        let next_bold = rest.find("**");
+        let next_under = rest.find("__");
+        let next_strike = rest.find("~~");
+        let next_code = rest.find('`');
+        let next_italic = rest
+            .find('*')
+            .filter(|&i| rest.get(i..i + 2) != Some("**"));
+        let next_link = rest.find('[').and_then(|lb| {
+            let after_lb = &rest[lb + 1..];
+            let rb = after_lb.find("](")?;
+            let after_rb = &after_lb[rb + 2..];
+            let rp = after_rb.find(')')?;
+            Some((lb, lb + 1 + rb, lb + 1 + rb + 2 + rp))
+        });
+
+        let min_pos = [
+            next_bold,
+            next_under,
+            next_strike,
+            next_code,
+            next_italic,
+            next_link.map(|(lb, _, _)| lb),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let Some(pos) = min_pos else {
+            job.append(
+                rest,
+                0.0,
+                egui::TextFormat {
+                    font_id: FontId::proportional(base_size),
+                    color: base_color,
+                    ..Default::default()
+                },
+            );
+            break;
+        };
+
+        if pos > 0 {
+            job.append(
+                &rest[..pos],
+                0.0,
+                egui::TextFormat {
+                    font_id: FontId::proportional(base_size),
+                    color: base_color,
+                    ..Default::default()
+                },
+            );
+            rest = &rest[pos..];
+            continue;
+        }
+
+        if let Some((0, rb_idx, rp_idx)) = next_link {
+            let label = &rest[1..rb_idx];
+            let url = &rest[rb_idx + 2..rp_idx];
+            if first_link.is_none() && (url.starts_with("http://") || url.starts_with("https://")) {
+                first_link = Some(url.to_string());
+            }
+            job.append(
+                label.trim_matches('*').trim_matches('`'),
+                0.0,
+                egui::TextFormat {
+                    font_id: FontId::proportional(base_size),
+                    color: pal.primary_hover,
+                    underline: Stroke::new(1.0_f32, pal.primary_hover),
+                    ..Default::default()
+                },
+            );
+            rest = &rest[rp_idx + 1..];
+            continue;
+        }
+
+        if rest.starts_with("**") {
+            let after = &rest[2..];
+            if let Some(end_b) = after.find("**") {
+                job.append(
+                    &after[..end_b],
+                    0.0,
+                    egui::TextFormat {
+                        font_id: FontId::proportional(base_size + 0.4),
+                        color: if pal.is_dark {
+                            Color32::WHITE
+                        } else {
+                            pal.text_primary
+                        },
+                        ..Default::default()
+                    },
+                );
+                rest = &after[end_b + 2..];
+                continue;
+            }
+        }
+
+        if rest.starts_with("__") {
+            let after = &rest[2..];
+            if let Some(end_u) = after.find("__") {
+                job.append(
+                    &after[..end_u],
+                    0.0,
+                    egui::TextFormat {
+                        font_id: FontId::proportional(base_size),
+                        color: base_color,
+                        underline: Stroke::new(1.0_f32, base_color),
+                        ..Default::default()
+                    },
+                );
+                rest = &after[end_u + 2..];
+                continue;
+            }
+        }
+
+        if rest.starts_with("~~") {
+            let after = &rest[2..];
+            if let Some(end_s) = after.find("~~") {
+                job.append(
+                    &after[..end_s],
+                    0.0,
+                    egui::TextFormat {
+                        font_id: FontId::proportional(base_size),
+                        color: base_color.linear_multiply(0.75),
+                        strikethrough: Stroke::new(1.0_f32, base_color),
+                        ..Default::default()
+                    },
+                );
+                rest = &after[end_s + 2..];
+                continue;
+            }
+        }
+        if rest.starts_with('*') && !rest.starts_with("**") {
+            let after = &rest[1..];
+            if let Some(end_i) = after.find('*') {
+                if end_i > 0 {
+                    job.append(
+                        &after[..end_i],
+                        0.0,
+                        egui::TextFormat {
+                            font_id: FontId::proportional(base_size),
+                            color: base_color,
+                            italics: true,
+                            ..Default::default()
+                        },
+                    );
+                    rest = &after[end_i + 1..];
+                    continue;
+                }
+            }
+        }
+
+        if rest.starts_with('`') {
+            let after = &rest[1..];
+            if let Some(end_c) = after.find('`') {
+                job.append(
+                    &after[..end_c],
+                    0.0,
+                    egui::TextFormat {
+                        font_id: FontId::monospace((base_size - 0.8).max(11.0)),
+                        color: pal.primary_hover,
+                        background: pal.bg_input,
+                        ..Default::default()
+                    },
+                );
+                rest = &after[end_c + 1..];
+                continue;
+            }
+        }
+
+        let mut chars = rest.chars();
+        if let Some(ch) = chars.next() {
+            let mut buf = [0u8; 4];
+            job.append(
+                ch.encode_utf8(&mut buf),
+                0.0,
+                egui::TextFormat {
+                    font_id: FontId::proportional(base_size),
+                    color: base_color,
+                    ..Default::default()
+                },
+            );
+            rest = chars.as_str();
+        } else {
+            break;
+        }
+    }
+
+    if let Some(url) = first_link {
+        let resp = ui.add(egui::Label::new(job).wrap().sense(Sense::click()));
+        if resp
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(&url)
+            .clicked()
+        {
+            open_external_url(&url);
+        }
+    } else {
+        ui.add(egui::Label::new(job).wrap());
+    }
+}
+
+pub(super) fn render_chat_markdown_block(
+    ui: &mut egui::Ui,
+    raw: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+) {
+    let mut in_code_block = false;
+    let mut code_lines: Vec<&str> = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim_start().starts_with("```") {
+            if in_code_block {
+                let code_text = code_lines.join("\n");
+                code_lines.clear();
+                in_code_block = false;
+                egui::Frame::none()
+                    .fill(pal.bg_input)
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::symmetric(10.0, 7.0))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(code_text)
+                                    .font(FontId::monospace(12.6))
+                                    .color(pal.primary_hover),
+                            )
+                            .wrap(),
+                        );
+                    });
+            } else {
+                in_code_block = true;
+            }
+            continue;
+        }
+        if in_code_block {
+            code_lines.push(line);
+            continue;
+        }
+        let t_start = trimmed.trim_start();
+        if let Some(h3) = t_start.strip_prefix("### ") {
+            render_markdown_inline_rich(ui, h3, 15.0, text_col, pal);
+        } else if let Some(h2) = t_start.strip_prefix("## ") {
+            render_markdown_inline_rich(ui, h2, 16.0, text_col, pal);
+        } else if let Some(h1) = t_start.strip_prefix("# ") {
+            render_markdown_inline_rich(ui, h1, 17.0, text_col, pal);
+        } else if let Some(quote) = t_start.strip_prefix("> ") {
+            ui.horizontal(|ui| {
+                let (bar_r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(bar_r, Rounding::same(1.5), pal.primary_hover);
+                render_markdown_inline_rich(
+                    ui,
+                    quote,
+                    13.8,
+                    text_col.linear_multiply(0.88),
+                    pal,
+                );
+            });
+        } else if let Some(bullet) = t_start
+            .strip_prefix("- ")
+            .or_else(|| t_start.strip_prefix("* "))
+        {
+            let bullet_line = format!("• {bullet}");
+            render_markdown_inline_rich(ui, &bullet_line, 14.0, text_col, pal);
+        } else {
+            render_markdown_inline_rich(ui, trimmed, 14.0, text_col, pal);
+        }
+    }
+    if !code_lines.is_empty() {
+        let code_text = code_lines.join("\n");
+        egui::Frame::none()
+            .fill(pal.bg_input)
+            .stroke(Stroke::new(1.0_f32, pal.border))
+            .rounding(Rounding::same(6.0))
+            .inner_margin(Margin::symmetric(10.0, 7.0))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(code_text)
+                            .font(FontId::monospace(12.6))
+                            .color(pal.primary_hover),
+                    )
+                    .wrap(),
+                );
+            });
+    }
+}
+
 pub(super) fn same_message_cluster(a: &ChatMessage, b: &ChatMessage) -> bool {
     if is_system_notice_message(a) || is_system_notice_message(b) {
         return false;
@@ -1164,12 +1496,10 @@ pub(super) fn render_message_body(
             }
             if let Some(cap) = msg.link_desc.as_deref().filter(|c| !c.trim().is_empty()) {
                 ui.add_space(5.0);
-                ui.add(egui::Label::new(RichText::new(cap).color(text_col).size(14.2)).wrap());
+                render_chat_markdown_block(ui, cap, text_col, pal);
             } else if !trimmed_text.starts_with("[Hình ảnh]") && !trimmed_text.is_empty() {
                 ui.add_space(5.0);
-                ui.add(
-                    egui::Label::new(RichText::new(trimmed_text).color(text_col).size(14.2)).wrap(),
-                );
+                render_chat_markdown_block(ui, trimmed_text, text_col, pal);
             }
             return body_action;
         }
@@ -1226,9 +1556,7 @@ pub(super) fn render_message_body(
     }
 
     let Some((caption, url, domain)) = extract_message_link_view(msg) else {
-        ui.add(
-            egui::Label::new(RichText::new(&msg.text).color(text_col).size(14.0)).wrap(),
-        );
+        render_chat_markdown_block(ui, &msg.text, text_col, pal);
         return None;
     };
 
@@ -1261,9 +1589,7 @@ pub(super) fn render_message_body(
 
     // 1. Optional user comment above the link
     if !caption.is_empty() && caption != url {
-        ui.add(
-            egui::Label::new(RichText::new(&caption).color(text_col).size(13.8)).wrap(),
-        );
+        render_chat_markdown_block(ui, &caption, text_col, pal);
         ui.add_space(4.0);
     }
 
@@ -1396,16 +1722,17 @@ pub(super) fn render_chat_bubble(
     let has_sticker = is_sticker_message(msg).is_some();
     let call_card_opt = extract_call_card_view(msg);
     let is_call_card = call_card_opt.is_some();
-    let is_photo_card = msg.link_src.as_deref() == Some("Hình ảnh Zalo")
-        || msg.text.trim() == "[Hình ảnh]"
-        || msg.text.trim().starts_with("[Hình ảnh] ");
+    let is_photo_card = !has_sticker
+        && (msg.link_src.as_deref() == Some("Hình ảnh Zalo")
+            || msg.text.trim() == "[Hình ảnh]"
+            || msg.text.trim().starts_with("[Hình ảnh] "));
     let is_file_card = matches!(
         msg.link_src.as_deref(),
         Some("Tập tin Zalo") | Some("Video Zalo")
     ) || msg.text.trim().starts_with("[Tập tin]")
         || msg.text.trim().starts_with("[Video]")
         || msg.text.trim().starts_with("[Tin nhắn thoại]");
-    let has_link_card = extract_message_link_view(msg).is_some();
+    let has_link_card = !has_sticker && extract_message_link_view(msg).is_some();
     let has_interactive_card = is_call_card || has_link_card || is_photo_card || is_file_card;
 
     let show_timestamp = !msg.time.is_empty()
@@ -1519,13 +1846,13 @@ pub(super) fn render_chat_bubble(
         }
     } else {
         let display_str = if msg.text.trim() == "[Tin nhắn đã thu hồi]" {
-            "  Tin nhắn đã được thu hồi"
+            "  Tin nhắn đã được thu hồi".to_string()
         } else {
-            msg.text.as_str()
+            strip_markdown_syntax_for_width(&msg.text)
         };
         let text_w = ui.fonts(|f| {
             f.layout(
-                display_str.to_string(),
+                display_str,
                 FontId::proportional(14.2),
                 Color32::WHITE,
                 max_text_width,

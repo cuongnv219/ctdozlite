@@ -110,6 +110,14 @@ async fn main() -> Result<()> {
                 .ok()
                 .and_then(|v| v.parse::<u16>().ok())
         });
+    let cli_proxy: Option<String> = args
+        .iter()
+        .position(|a| a == "--proxy")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| {
+            args.iter()
+                .find_map(|a| a.strip_prefix("--proxy=").map(str::to_string))
+        });
 
     if force_logout {
         let _ = std::fs::remove_file("session.json");
@@ -131,6 +139,14 @@ async fn main() -> Result<()> {
     }
 
     let mut s = Session::new(dev_mode, dump, dump_raw)?;
+    if let Some(ref p) = cli_proxy {
+        if let Some(norm) = s.set_proxy(Some(p))? {
+            println!(
+                "🌐 Đã kích hoạt Proxy cho phiên này: {}",
+                session::redact_proxy_url(&norm)
+            );
+        }
+    }
 
     // Attempt to restore persistent session from disk
     let session_restored = if !force_logout {

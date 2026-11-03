@@ -21,7 +21,6 @@ use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
 
-
 mod messages;
 mod modals;
 mod stickers;
@@ -29,11 +28,11 @@ mod theme;
 mod worker;
 mod workspace;
 
-pub use theme::{emoji_to_tex_key, load_app_icon, lucide, REACTION_LIST};
-pub use worker::WorkerCmd;
 use messages::*;
 use stickers::*;
 use theme::*;
+pub use theme::{emoji_to_tex_key, load_app_icon, lucide, REACTION_LIST};
+pub use worker::WorkerCmd;
 use worker::*;
 
 fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
@@ -182,8 +181,28 @@ pub enum GuiEvent {
     SocialProfileLoaded(Result<crate::feed::SocialUserProfile, String>),
     SocialAvatarsLoaded(Result<Vec<crate::feed::FeedMedia>, String>),
     SocialTimelineLoaded(
-        Result<(Vec<crate::feed::SocialUserProfile>, Vec<crate::feed::FeedItem>), String>,
+        Result<
+            (
+                Vec<crate::feed::SocialUserProfile>,
+                Vec<crate::feed::FeedItem>,
+            ),
+            String,
+        >,
     ),
+    MuteSnapshotSynced(HashMap<String, i64>),
+    MuteEventsReceived(Vec<crate::chat::MuteControlEvent>),
+    PhoneSyncProgress {
+        progress: f32,
+        status: String,
+    },
+    PhoneSyncFinished {
+        threads: Vec<Thread>,
+        added: usize,
+        active_threads: usize,
+        cancelled: bool,
+        error: Option<String>,
+    },
+    ProxyUpdated(Result<Option<String>, String>),
     LoggedOut,
 }
 
@@ -244,6 +263,14 @@ enum FeedModalTab {
     Avatars,
     Packet50001,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContactsSubTab {
+    Friends,
+    Groups,
+    FriendRequests,
+    GroupInvites,
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
@@ -305,6 +332,10 @@ struct AppSettings {
     // 9. Cập nhật tự động qua GitHub Releases API
     auto_check_updates: bool,
     skipped_update_version: String,
+    // 10. Proxy & Đa tài khoản (#64)
+    proxy_url: String,
+    multi_profile_name: String,
+    info_drawer_open: bool,
 }
 
 impl Default for AppSettings {
@@ -355,6 +386,9 @@ impl Default for AppSettings {
             thread_labels: HashMap::new(),
             auto_check_updates: true,
             skipped_update_version: String::new(),
+            proxy_url: String::new(),
+            multi_profile_name: "acc2".into(),
+            info_drawer_open: false,
         }
     }
 }
@@ -373,7 +407,6 @@ impl AppSettings {
         }
     }
 }
-
 
 /// A loaded-message jump stays bound to its conversation and exact reference.
 struct QuoteJump {
@@ -537,10 +570,15 @@ pub struct ZaloGuiApp {
     feed_pkt_tab: u32,
     feed_pkt_page: u32,
     feed_pkt_count: u32,
+    contacts_view_open: bool,
+    contacts_sub_tab: ContactsSubTab,
+    contacts_search_query: String,
     schedule_modal_open: bool,
     schedule_custom_input: String,
     schedule_editing_id: Option<i64>,
     scheduled_items: Vec<crate::scheduler::ScheduledMessage>,
+    phone_sync_progress: f32,
+    phone_sync_status: String,
 
     // Background channels
     event_rx: Receiver<GuiEvent>,
@@ -574,12 +612,19 @@ fn thread_texts(threads: &[Thread]) -> impl Iterator<Item = &str> {
 impl ZaloGuiApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        session: Session,
+        mut session: Session,
         dev_mode: bool,
         initial_threads: Vec<Thread>,
     ) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
-        let loaded_settings = AppSettings::load();
+        let mut loaded_settings = AppSettings::load();
+        if session.proxy_url.is_none() && !loaded_settings.proxy_url.trim().is_empty() {
+            let _ = session.set_proxy(Some(&loaded_settings.proxy_url));
+        } else if let Some(ref p) = session.proxy_url {
+            if loaded_settings.proxy_url.trim().is_empty() {
+                loaded_settings.proxy_url = p.clone();
+            }
+        }
         crate::media::set_selected_mic_device(&loaded_settings.selected_mic_device);
         crate::media::set_selected_camera_device(&loaded_settings.selected_camera_device);
         let dark_mode = loaded_settings.theme_mode != "light";
@@ -618,6 +663,18 @@ impl ZaloGuiApp {
                 }
             }
         }
+        let now_ts = crate::login::unix_now() as i64;
+        for t in threads.iter_mut() {
+            if let Some(&until) = loaded_settings.muted_threads.get(&t.id) {
+                if until == -1 || until > now_ts {
+                    t.presentation.muted = true;
+                    t.unread.muted = true;
+                    t.unread.muted_until = (until > 0).then_some(until);
+                }
+            } else if t.unread.is_muted() {
+                t.presentation.muted = true;
+            }
+        }
         crate::chat::deduplicate_threads(&mut threads, None);
 
         let selected_thread_index = threads
@@ -653,7 +710,7 @@ impl ZaloGuiApp {
             active_call: None,
             image_viewer: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
-            info_drawer_open: true,
+            info_drawer_open: loaded_settings.info_drawer_open,
             profile_menu_open: false,
             wipe_confirm_open: false,
             toast_notice: None,
@@ -743,11 +800,16 @@ impl ZaloGuiApp {
             feed_pkt_tab: 0,
             feed_pkt_page: 1,
             feed_pkt_count: 20,
+            contacts_view_open: false,
+            contacts_sub_tab: ContactsSubTab::Friends,
+            contacts_search_query: String::new(),
             schedule_modal_open: false,
             schedule_custom_input: String::new(),
             schedule_editing_id: None,
             scheduled_items: crate::scheduler::list_pending_scheduled("zalo_history.db", None)
                 .unwrap_or_default(),
+            phone_sync_progress: 0.0,
+            phone_sync_status: String::new(),
             event_rx: rx,
             event_tx: tx.clone(),
             chat_render_window: (String::new(), CHAT_RENDER_STEP),
@@ -839,11 +901,8 @@ impl ZaloGuiApp {
                     self.notification_authorization.finish(request_id, result);
                 }
                 GuiEvent::QrReady { qr_image, .. } => {
-                    self.qr_texture = Some(ctx.load_texture(
-                        "qr_code_tex",
-                        qr_image,
-                        TextureOptions::NEAREST,
-                    ));
+                    self.qr_texture =
+                        Some(ctx.load_texture("qr_code_tex", qr_image, TextureOptions::NEAREST));
                     self.qr_status = "Mở ứng dụng Zalo trên điện thoại và quét mã QR".into();
                     self.login_in_progress = false;
                 }
@@ -869,10 +928,7 @@ impl ZaloGuiApp {
                 GuiEvent::ThreadsUpdated(updates) => {
                     ensure_cjk_font(ctx, thread_texts(&updates));
                     if self.is_logged_in && !updates.is_empty() {
-                        let prev_selected = self
-                            .threads
-                            .get(self.selected_thread_index)
-                            .cloned();
+                        let prev_selected = self.threads.get(self.selected_thread_index).cloned();
                         let live_ids: HashSet<String> = self
                             .threads
                             .iter()
@@ -893,11 +949,37 @@ impl ZaloGuiApp {
                         let is_focused = ctx.input(|i| i.focused);
                         let mut new_incoming_alert = false;
 
-                        for nt in updates {
+                        let now_ts = crate::login::unix_now() as i64;
+                        for mut nt in updates {
+                            let settings_muted_until = self
+                                .settings
+                                .muted_threads
+                                .get(&nt.id)
+                                .copied()
+                                .filter(|&u| u == -1 || u > now_ts);
+                            if let Some(until) = settings_muted_until {
+                                nt.presentation.muted = true;
+                                nt.unread.muted = true;
+                                nt.unread.muted_until = (until > 0).then_some(until);
+                            } else if nt.unread.is_muted() {
+                                nt.presentation.muted = true;
+                            }
                             if let Some(existing) = self.threads.iter_mut().find(|t| t.id == nt.id)
                             {
+                                let is_thread_muted = settings_muted_until.is_some()
+                                    || existing.presentation.muted
+                                    || existing.unread.is_muted()
+                                    || nt.presentation.muted
+                                    || nt.unread.is_muted();
                                 let old_len = existing.messages.len();
                                 crate::chat::merge_thread_into(existing, nt, true);
+                                if is_thread_muted {
+                                    existing.presentation.muted = true;
+                                    existing.unread.muted = true;
+                                    if let Some(until) = settings_muted_until {
+                                        existing.unread.muted_until = (until > 0).then_some(until);
+                                    }
+                                }
                                 let added = existing.messages.len().saturating_sub(old_len);
                                 if added > 0 {
                                     let inc_cnt = existing
@@ -912,7 +994,9 @@ impl ZaloGuiApp {
                                             .unread_counts
                                             .entry(existing.id.clone())
                                             .or_insert(0) += inc_cnt;
-                                        new_incoming_alert = true;
+                                        if !is_thread_muted {
+                                            new_incoming_alert = true;
+                                        }
                                     }
                                 }
                             } else if let Some(existing) = self.threads.iter_mut().find(|t| {
@@ -934,11 +1018,9 @@ impl ZaloGuiApp {
                             };
                             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
                             if !is_focused {
-                                ctx.send_viewport_cmd(
-                                    egui::ViewportCommand::RequestUserAttention(
-                                        egui::UserAttentionType::Informational,
-                                    ),
-                                );
+                                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                                    egui::UserAttentionType::Informational,
+                                ));
                             }
                         }
                         crate::chat::deduplicate_threads(&mut self.threads, Some(&live_ids));
@@ -966,9 +1048,8 @@ impl ZaloGuiApp {
                 GuiEvent::SessionExpired(reason) => {
                     self.is_logged_in = false;
                     self.qr_texture = None;
-                    self.qr_status = format!(
-                        "{reason} — Quét mã QR bên dưới để khôi phục phiên trực tuyến."
-                    );
+                    self.qr_status =
+                        format!("{reason} — Quét mã QR bên dưới để khôi phục phiên trực tuyến.");
                     self.status_msg = format!("{reason} (Lịch sử tin nhắn vẫn được bảo toàn)");
                 }
                 GuiEvent::SessionUnreachable(reason) => {
@@ -1178,7 +1259,11 @@ impl ZaloGuiApp {
                 } => {
                     self.loading_sticker_packs.remove(&cate_id);
                     let count = items.len();
-                    if !self.pinned_sticker_packs.iter().any(|(id, _)| *id == cate_id) {
+                    if !self
+                        .pinned_sticker_packs
+                        .iter()
+                        .any(|(id, _)| *id == cate_id)
+                    {
                         self.pinned_sticker_packs.insert(0, (cate_id, name.clone()));
                     }
                     self.sticker_pack_items.insert(cate_id, items);
@@ -1285,10 +1370,7 @@ impl ZaloGuiApp {
                     self.phone_lookup_loading = false;
                     self.phone_lookup_error = None;
                     self.phone_modal_open = true;
-                    self.show_toast(format!(
-                        "Đã tìm thấy tài khoản: {}",
-                        res.display_name
-                    ));
+                    self.show_toast(format!("Đã tìm thấy tài khoản: {}", res.display_name));
                     self.friend_status_map
                         .insert(res.user_id.clone(), res.friendship);
                     self.phone_lookup_result = Some(res);
@@ -1334,7 +1416,9 @@ impl ZaloGuiApp {
                                 "calling" | "ringing" => "Đang đổ chuông…".into(),
                                 "incoming_ringing" => "Cuộc gọi đến đang đổ chuông…".into(),
                                 "connecting" => "Đang kết nối luồng âm thanh/video…".into(),
-                                "incall" | "connected" => "Đang trong cuộc gọi (Pure-Rust VoIP)".into(),
+                                "incall" | "connected" => {
+                                    "Đang trong cuộc gọi (Pure-Rust VoIP)".into()
+                                }
                                 _ => format!("Đang kết nối ({state})…"),
                             };
                         }
@@ -1533,6 +1617,116 @@ impl ZaloGuiApp {
                         }
                     }
                 }
+                GuiEvent::MuteSnapshotSynced(mute_map) => {
+                    self.settings.muted_threads = mute_map.clone();
+                    self.settings.save();
+                    let now_ts = crate::login::unix_now() as i64;
+                    for t in &mut self.threads {
+                        if let Some(&until) = mute_map.get(&t.id) {
+                            let active = until == -1 || until > now_ts;
+                            t.presentation.muted = active;
+                            t.unread.muted = active;
+                            t.unread.muted_until = (until > 0).then_some(until);
+                            t.unread.settings_fresh = true;
+                            t.unread.fresh = true;
+                        } else {
+                            t.presentation.muted = false;
+                            t.unread.muted = false;
+                            t.unread.muted_until = None;
+                            t.unread.settings_fresh = true;
+                            t.unread.fresh = true;
+                        }
+                    }
+                    self.persist_threads_async();
+                }
+                GuiEvent::MuteEventsReceived(events) => {
+                    let mut changed = false;
+                    for ev in events {
+                        if ev.muted {
+                            let until_val = ev.muted_until.unwrap_or(-1);
+                            self.settings
+                                .muted_threads
+                                .insert(ev.thread_id.clone(), until_val);
+                        } else {
+                            self.settings.muted_threads.remove(&ev.thread_id);
+                        }
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == ev.thread_id) {
+                            t.presentation.muted = ev.muted;
+                            t.unread.muted = ev.muted;
+                            t.unread.muted_until = ev.muted_until;
+                            t.unread.settings_fresh = true;
+                            t.unread.fresh = true;
+                        }
+                        changed = true;
+                    }
+                    if changed {
+                        self.settings.save();
+                        self.persist_threads_async();
+                    }
+                }
+                GuiEvent::PhoneSyncProgress { progress, status } => {
+                    self.phone_sync_progress = progress;
+                    self.phone_sync_status = status.clone();
+                    self.status_msg = status;
+                }
+                GuiEvent::PhoneSyncFinished {
+                    threads,
+                    added,
+                    active_threads,
+                    cancelled,
+                    error,
+                } => {
+                    self.phone_sync_progress = 0.0;
+                    if !threads.is_empty() {
+                        for nt in threads {
+                            if let Some(existing) = self.threads.iter_mut().find(|t| t.id == nt.id)
+                            {
+                                crate::chat::merge_thread_into(existing, nt, true);
+                            } else if !nt.id.is_empty() && nt.id != "0" {
+                                self.threads.push(nt);
+                            }
+                        }
+                        self.persist_threads_async();
+                    }
+                    let msg = if let Some(err) = error {
+                        format!("⚠️ Đồng bộ từ điện thoại thất bại: {err}")
+                    } else if cancelled {
+                        format!(
+                            "Đã dừng đồng bộ từ điện thoại (nhận {added} tin nhắn tại {active_threads} hội thoại)"
+                        )
+                    } else if added > 0 {
+                        format!(
+                            "✅ Đồng bộ từ điện thoại hoàn tất: nhận {added} tin nhắn ({active_threads} hội thoại)"
+                        )
+                    } else {
+                        "ℹ️ Không có tin nhắn mới được đẩy từ điện thoại (hãy mở Zalo trên điện thoại và xác nhận đồng bộ nếu có yêu cầu)".into()
+                    };
+                    self.phone_sync_status = msg.clone();
+                    self.status_msg = msg.clone();
+                    self.show_toast(msg);
+                }
+                GuiEvent::ProxyUpdated(res) => match res {
+                    Ok(Some(url)) => {
+                        let redacted = crate::session::redact_proxy_url(&url);
+                        self.settings.proxy_url = url;
+                        self.settings.save();
+                        let msg = format!("🌐 Đã áp dụng Proxy: {redacted}");
+                        self.status_msg = msg.clone();
+                        self.show_toast(msg);
+                    }
+                    Ok(None) => {
+                        self.settings.proxy_url.clear();
+                        self.settings.save();
+                        let msg = "🌐 Đã tắt Proxy (kết nối trực tiếp)".to_string();
+                        self.status_msg = msg.clone();
+                        self.show_toast(msg);
+                    }
+                    Err(e) => {
+                        let msg = format!("⚠️ Lỗi cấu hình Proxy: {e}");
+                        self.status_msg = msg.clone();
+                        self.show_toast(msg);
+                    }
+                },
             }
         }
     }
@@ -1541,7 +1735,6 @@ impl ZaloGuiApp {
 // ---------------------------------------------------------------------------
 // Lightweight Background Session Worker (2-thread Tokio pool, off-UI disk I/O)
 // ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // Main eframe::App Implementation
@@ -2262,19 +2455,40 @@ mod tests {
     #[test]
     fn delayed_local_ack_preserves_server_chronology() {
         let mut thread = crate::chat::Thread::default();
-        for (id, client, ts) in [("server-a", "client-a", 1000), ("server-b", "client-b", 2000)] {
+        for (id, client, ts) in [
+            ("server-a", "client-a", 1000),
+            ("server-b", "client-b", 2000),
+        ] {
             thread.messages.push(crate::chat::ChatMessage {
-                id: id.into(), client_message_id: client.into(), ts, time: ts.to_string(),
-                is_outgoing: true, ..Default::default()
+                id: id.into(),
+                client_message_id: client.into(),
+                ts,
+                time: ts.to_string(),
+                is_outgoing: true,
+                ..Default::default()
             });
         }
         for ack_id in ["out_client-a", "server-a"] {
-            super::merge_sent_message(&mut thread, crate::chat::ChatMessage {
-                id: ack_id.into(), client_message_id: "client-a".into(), ts: 3000, time: "3000".into(),
-                is_outgoing: true, ..Default::default()
-            });
-            let chronology: Vec<_> = thread.messages.iter().map(|message| (message.id.as_str(), message.ts, message.time.as_str())).collect();
-            assert_eq!(chronology, [("server-a", 1000, "1000"), ("server-b", 2000, "2000")]);
+            super::merge_sent_message(
+                &mut thread,
+                crate::chat::ChatMessage {
+                    id: ack_id.into(),
+                    client_message_id: "client-a".into(),
+                    ts: 3000,
+                    time: "3000".into(),
+                    is_outgoing: true,
+                    ..Default::default()
+                },
+            );
+            let chronology: Vec<_> = thread
+                .messages
+                .iter()
+                .map(|message| (message.id.as_str(), message.ts, message.time.as_str()))
+                .collect();
+            assert_eq!(
+                chronology,
+                [("server-a", 1000, "1000"), ("server-b", 2000, "2000")]
+            );
         }
     }
 

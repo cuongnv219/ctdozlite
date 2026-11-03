@@ -29,7 +29,35 @@ pub(super) struct PresetSticker {
 }
 
 /// Built-in featured Zalo sticker packs (`(cate_id, title)`).
+pub(super) const AMI_FAT_CAT_CATE_ID: u64 = 99901;
+
+pub(super) const AMI_FAT_CAT_ITEMS: &[(u64, &str, &[u8], &[u8])] = &[
+    (999001, "01. Múa bụng cười hả hê", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_01.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_01.gif")),
+    (999002, "02. Cúi chào tạm biệt (Bye)", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_02.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_02.gif")),
+    (999003, "03. Xoa tay cười gian xảo", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_03.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_03.gif")),
+    (999004, "04. Cười tít mắt cute", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_04.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_04.gif")),
+    (999005, "05. Dậm chân giận dỗi", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_05.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_05.gif")),
+    (999006, "06. Bắn tim yêu thương", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_06.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_06.gif")),
+    (999007, "07. Khóc nức nở dưới vòi sen", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_07.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_07.gif")),
+    (999008, "08. Nằm bẹp thở dài", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_08.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_08.gif")),
+    (999009, "09. Mắt lấp lánh cầu xin", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_09.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_09.gif")),
+    (999010, "10. Chống cằm mắt long lanh", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_10.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_10.gif")),
+    (999011, "11. Ngửa cổ cười nắc nẻ", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_11.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_11.gif")),
+    (999012, "12. Liếc xéo khó chịu", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_12.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_12.gif")),
+    (999013, "13. Bò lết lén lút", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_13.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_13.gif")),
+    (999014, "14. Ngồi trước bát ăn mặt kiêu", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_14.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_14.gif")),
+    (999015, "15. Nhảy lắc mông rung lắc", include_bytes!("../assets/ami_fat_cat/ami_fat_cat_15.png"), include_bytes!("../assets/ami_fat_cat/ami_fat_cat_15.gif")),
+];
+
+pub(super) fn get_ami_fat_cat_gif(sticker_id: u64) -> Option<(&'static str, &'static [u8], &'static [u8])> {
+    AMI_FAT_CAT_ITEMS
+        .iter()
+        .find(|&&(sid, _, _, _)| sid == sticker_id)
+        .map(|&(_, label, png, gif)| (label, png, gif))
+}
+
 pub(super) const FEATURED_PACK_TABS: &[(u64, &str)] = &[
+    (AMI_FAT_CAT_CATE_ID, "🐱 Mèo Ami Bụng Bự (GIF)"),
     (61900, "Zapy Dô Tri"),
     (12815, "Bé Hai"),
     (12748, "Cò Lõ Đi Làm"),
@@ -74,6 +102,19 @@ pub(super) fn export_custom_stickers_template(path: &str) -> std::io::Result<()>
 }
 
 pub(super) fn builtin_pack_stickers(cate_id: u64) -> Option<Vec<crate::chat::StickerItem>> {
+    if cate_id == AMI_FAT_CAT_CATE_ID {
+        return Some(
+            AMI_FAT_CAT_ITEMS
+                .iter()
+                .map(|&(sid, label, _, _)| crate::chat::StickerItem {
+                    sticker_id: sid,
+                    cate_id: AMI_FAT_CAT_CATE_ID,
+                    sticker_type: 7,
+                    label: label.to_string(),
+                })
+                .collect(),
+        );
+    }
     for custom in load_custom_sticker_packs() {
         if custom.cate_id == cate_id {
             return Some(
@@ -121,6 +162,10 @@ pub(super) fn builtin_pack_stickers(cate_id: u64) -> Option<Vec<crate::chat::Sti
 }
 
 pub(super) const POPULAR_STICKERS: &[PresetSticker] = &[
+    PresetSticker { sticker_id: 999001, cate_id: AMI_FAT_CAT_CATE_ID, sticker_type: 7, label: "Mèo Ami Múa bụng" },
+    PresetSticker { sticker_id: 999006, cate_id: AMI_FAT_CAT_CATE_ID, sticker_type: 7, label: "Mèo Ami Bắn tim" },
+    PresetSticker { sticker_id: 999007, cate_id: AMI_FAT_CAT_CATE_ID, sticker_type: 7, label: "Mèo Ami Khóc" },
+    PresetSticker { sticker_id: 999015, cate_id: AMI_FAT_CAT_CATE_ID, sticker_type: 7, label: "Mèo Ami Lắc mông" },
     PresetSticker { sticker_id: 18009, cate_id: 10130, sticker_type: 7, label: "Xin chào" },
     PresetSticker { sticker_id: 21458, cate_id: 10302, sticker_type: 7, label: "Vẫy tay" },
     PresetSticker { sticker_id: 21459, cate_id: 10302, sticker_type: 7, label: "Vui vẻ" },
@@ -595,6 +640,27 @@ pub(super) fn instant_contextual_stickers_exact(trimmed: &str) -> Option<(&'stat
                     (10242, 20065),
                 ],
             ),
+            "mèo" | "mèo ami" | "mèo béo" | "mèo bụng bự" => (
+                "mèo",
+                "Mèo Ami",
+                &[
+                    (AMI_FAT_CAT_CATE_ID, 999001),
+                    (AMI_FAT_CAT_CATE_ID, 999002),
+                    (AMI_FAT_CAT_CATE_ID, 999003),
+                    (AMI_FAT_CAT_CATE_ID, 999004),
+                    (AMI_FAT_CAT_CATE_ID, 999005),
+                    (AMI_FAT_CAT_CATE_ID, 999006),
+                    (AMI_FAT_CAT_CATE_ID, 999007),
+                    (AMI_FAT_CAT_CATE_ID, 999008),
+                    (AMI_FAT_CAT_CATE_ID, 999009),
+                    (AMI_FAT_CAT_CATE_ID, 999010),
+                    (AMI_FAT_CAT_CATE_ID, 999011),
+                    (AMI_FAT_CAT_CATE_ID, 999012),
+                    (AMI_FAT_CAT_CATE_ID, 999013),
+                    (AMI_FAT_CAT_CATE_ID, 999014),
+                    (AMI_FAT_CAT_CATE_ID, 999015),
+                ],
+            ),
             _ => return None,
         },
         _ => match low.as_str() {
@@ -793,6 +859,27 @@ pub(super) fn instant_contextual_stickers_exact(trimmed: &str) -> Option<(&'stat
                     (10655, 26307),
                     (10653, 26271),
                     (10242, 20065),
+                ],
+            ),
+            "ami" | "meo" | "meo ami" | "meo beo" | "cat" => (
+                "mèo",
+                "Mèo Ami",
+                &[
+                    (AMI_FAT_CAT_CATE_ID, 999001),
+                    (AMI_FAT_CAT_CATE_ID, 999002),
+                    (AMI_FAT_CAT_CATE_ID, 999003),
+                    (AMI_FAT_CAT_CATE_ID, 999004),
+                    (AMI_FAT_CAT_CATE_ID, 999005),
+                    (AMI_FAT_CAT_CATE_ID, 999006),
+                    (AMI_FAT_CAT_CATE_ID, 999007),
+                    (AMI_FAT_CAT_CATE_ID, 999008),
+                    (AMI_FAT_CAT_CATE_ID, 999009),
+                    (AMI_FAT_CAT_CATE_ID, 999010),
+                    (AMI_FAT_CAT_CATE_ID, 999011),
+                    (AMI_FAT_CAT_CATE_ID, 999012),
+                    (AMI_FAT_CAT_CATE_ID, 999013),
+                    (AMI_FAT_CAT_CATE_ID, 999014),
+                    (AMI_FAT_CAT_CATE_ID, 999015),
                 ],
             ),
             _ => return None,

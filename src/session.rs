@@ -350,6 +350,9 @@ pub struct SavedSession {
     /// until a fresh login replaces it. Absent in files from older builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expired_at: Option<i64>,
+    /// Optional HTTP/HTTPS/SOCKS5 proxy URL configured for this account/profile (#64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -374,6 +377,83 @@ pub struct Session {
     /// persists in `session.json` so the next start asks for a login instead of
     /// re-testing a dead session.
     pub expired_at: Option<i64>,
+    /// Optional outbound proxy URL (`http://`, `https://`, `socks5://`, `socks5h://`) for multi-account setups (#64).
+    pub proxy_url: Option<String>,
+}
+
+/// Normalize and validate a proxy URL string (`http://`, `https://`, `socks5://`, `socks5h://`, or `host:port`, #64).
+pub fn normalize_proxy_url(raw: &str) -> Result<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let parsed = reqwest::Url::parse(&with_scheme)
+        .map_err(|e| anyhow::anyhow!("Định dạng Proxy không hợp lệ ({e})"))?;
+    let scheme = parsed.scheme();
+    if !matches!(scheme, "http" | "https" | "socks5" | "socks5h") {
+        bail!("Giao thức Proxy không được hỗ trợ: '{scheme}://' (chỉ hỗ trợ http://, https://, socks5://)");
+    }
+    if parsed.host_str().unwrap_or("").is_empty() {
+        bail!("Địa chỉ Proxy thiếu tên miền hoặc IP máy chủ");
+    }
+    let _ = reqwest::Proxy::all(with_scheme.as_str())
+        .map_err(|e| anyhow::anyhow!("Không tạo được cấu hình Proxy: {e}"))?;
+    Ok(Some(with_scheme))
+}
+
+/// Mask `user:password@` credentials in a proxy URL so secrets never appear in logs or status text (#64).
+pub fn redact_proxy_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(mut parsed) = reqwest::Url::parse(trimmed) {
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            let _ = parsed.set_username("***");
+            let _ = parsed.set_password(Some("***"));
+            return parsed.to_string();
+        }
+    }
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if let Some((_, host_part)) = rest.rsplit_once('@') {
+            return format!("{scheme}://***:***@{host_part}");
+        }
+    }
+    trimmed.to_string()
+}
+
+fn build_http_client(jar: &Arc<Jar>, proxy_url: Option<&str>) -> Result<Client> {
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(REFERER, HeaderValue::from_static("https://chat.zalo.me/"));
+    default_headers.insert(ORIGIN, HeaderValue::from_static("https://chat.zalo.me"));
+    let mut builder = Client::builder()
+        .cookie_provider(Arc::clone(jar))
+        .default_headers(default_headers)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(35))
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
+        );
+    if let Some(raw_proxy) = proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(norm) = normalize_proxy_url(raw_proxy)? {
+            let mut proxy = reqwest::Proxy::all(&norm)?;
+            if let Ok(parsed) = reqwest::Url::parse(&norm) {
+                let user = parsed.username();
+                if !user.is_empty() {
+                    let pass = parsed.password().unwrap_or("");
+                    proxy = proxy.basic_auth(user, pass);
+                }
+            }
+            builder = builder.proxy(proxy);
+        }
+    }
+    Ok(builder.build()?)
 }
 
 /// `error_code` values Zalo answers when the stored credentials are no longer usable.
@@ -469,25 +549,11 @@ impl SessionStatus {
 impl Session {
     pub fn new(verbose: bool, dump: bool, dump_raw: bool) -> Result<Self> {
         let jar = Arc::new(Jar::default());
-        let mut default_headers = HeaderMap::new();
-        default_headers.insert(
-            REFERER,
-            HeaderValue::from_static("https://chat.zalo.me/"),
-        );
-        default_headers.insert(
-            ORIGIN,
-            HeaderValue::from_static("https://chat.zalo.me"),
-        );
-        let http = Client::builder()
-            .cookie_provider(Arc::clone(&jar))
-            .default_headers(default_headers)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(35))
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
-            )
-            .build()?;
+        let env_proxy = std::env::var("ZALO_PROXY")
+            .or_else(|_| std::env::var("CTDOZLITE_PROXY"))
+            .ok()
+            .and_then(|v| normalize_proxy_url(&v).ok().flatten());
+        let http = build_http_client(&jar, env_proxy.as_deref())?;
         Ok(Self {
             http,
             jar,
@@ -502,7 +568,23 @@ impl Session {
             dump,
             dump_raw,
             expired_at: None,
+            proxy_url: env_proxy,
         })
+    }
+
+    /// Configure or clear the HTTP/HTTPS/SOCKS5 proxy for this session, rebuilding the underlying
+    /// `reqwest::Client` while preserving all session cookies (`zpw_sek`, #64).
+    pub fn set_proxy(&mut self, proxy_url: Option<&str>) -> Result<Option<String>> {
+        let norm = match proxy_url {
+            Some(raw) => normalize_proxy_url(raw)?,
+            None => None,
+        };
+        self.http = build_http_client(&self.jar, norm.as_deref())?;
+        self.proxy_url = norm.clone();
+        if let Some(sek) = self.zpw_sek.clone() {
+            self.set_zpw_sek(sek);
+        }
+        Ok(norm)
     }
 
     /// Store `zpw_sek` session token, attach it to `self.login`, and insert the session cookie.
@@ -660,26 +742,7 @@ impl Session {
         self.secret_key = None;
         self.session_key = None;
         self.jar = Arc::new(Jar::default());
-        let mut default_headers = HeaderMap::new();
-        default_headers.insert(
-            REFERER,
-            HeaderValue::from_static("https://chat.zalo.me/"),
-        );
-        default_headers.insert(
-            ORIGIN,
-            HeaderValue::from_static("https://chat.zalo.me"),
-        );
-        if let Ok(c) = Client::builder()
-            .cookie_provider(Arc::clone(&self.jar))
-            .default_headers(default_headers)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(35))
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
-            )
-            .build()
-        {
+        if let Ok(c) = build_http_client(&self.jar, self.proxy_url.as_deref()) {
             self.http = c;
         }
     }
@@ -690,12 +753,16 @@ impl Session {
         let saved = SavedSession {
             imei: self.imei.clone(),
             computer_name: self.computer_name.clone(),
-            secret_key_b64: self.secret_key.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
+            secret_key_b64: self
+                .secret_key
+                .as_ref()
+                .map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
             session_key: self.session_key.clone(),
             zpw_sek: self.zpw_sek.clone(),
             login: self.login.clone(),
             domains: self.domains.clone(),
             expired_at: self.expired_at,
+            proxy_url: self.proxy_url.clone(),
         };
         let text = serde_json::to_string_pretty(&saved)?;
         crate::data_dir::write_private_atomic(std::path::Path::new(path), text.as_bytes())?;
@@ -708,6 +775,11 @@ impl Session {
         let text = std::fs::read_to_string(path)?;
         let saved: SavedSession = serde_json::from_str(&text)?;
 
+        if self.proxy_url.is_none() {
+            if let Some(ref p) = saved.proxy_url {
+                let _ = self.set_proxy(Some(p));
+            }
+        }
         self.imei = if saved.imei.len() == 69 {
             saved.imei
         } else {
@@ -786,8 +858,8 @@ impl Session {
 
         // Parse to a real JSON object so the dump nests properly instead of holding a
         // double-encoded string.
-        let body_json = serde_json::from_str::<Value>(body)
-            .unwrap_or_else(|_| Value::String(body.to_string()));
+        let body_json =
+            serde_json::from_str::<Value>(body).unwrap_or_else(|_| Value::String(body.to_string()));
 
         let doc = serde_json::json!({
             "method": method,
@@ -931,7 +1003,8 @@ impl Session {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no host candidates for endpoint {endpoint}")))
+        Err(last_err
+            .unwrap_or_else(|| anyhow::anyhow!("no host candidates for endpoint {endpoint}")))
     }
 
     /// Perform a `GET` request against `endpoint` with multi-candidate host failover (#27).
@@ -1029,7 +1102,15 @@ impl Session {
     async fn send(&self, m: Method, url: &str, body: Option<String>) -> Result<Value> {
         let start = std::time::Instant::now();
         if self.verbose {
-            eprintln!("→ {} {}", m, if self.dump_raw { url.to_string() } else { redact_url(url) });
+            eprintln!(
+                "→ {} {}",
+                m,
+                if self.dump_raw {
+                    url.to_string()
+                } else {
+                    redact_url(url)
+                }
+            );
             if let Some(b) = &body {
                 eprintln!("  body: {}", truncate(b, 400));
             }
@@ -1123,7 +1204,10 @@ impl Session {
         });
         let code = v.get("error_code").and_then(|c| c.as_i64()).unwrap_or(0);
         if code != 0 {
-            let msg = v.get("error_message").and_then(|m| m.as_str()).unwrap_or("");
+            let msg = v
+                .get("error_message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
             crate::logger::log_request(
                 &method,
                 url,
@@ -1165,7 +1249,10 @@ impl Session {
                 }
                 Err(e) => {
                     if self.verbose {
-                        eprintln!("  data decrypted but not JSON: {e} / {}", truncate(&pt, 200));
+                        eprintln!(
+                            "  data decrypted but not JSON: {e} / {}",
+                            truncate(&pt, 200)
+                        );
                     }
                     v
                 }
@@ -1217,7 +1304,8 @@ pub fn redact_secret(s: &str) -> String {
     format!("{prefix}…<redacted>")
 }
 
-pub fn urlencode(s: &str) -> String {    let mut out = String::with_capacity(s.len() * 3);
+pub fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
@@ -1611,5 +1699,40 @@ mod tests {
                 "error_code {code} must stop immediately without failover"
             );
         }
+    }
+
+    #[test]
+    fn proxy_url_normalization_and_credential_redaction() {
+        assert_eq!(normalize_proxy_url("   ").unwrap(), None);
+        assert_eq!(
+            normalize_proxy_url("127.0.0.1:8888").unwrap().as_deref(),
+            Some("http://127.0.0.1:8888")
+        );
+        assert_eq!(
+            normalize_proxy_url("http://user:secret123@10.0.0.2:3128")
+                .unwrap()
+                .as_deref(),
+            Some("http://user:secret123@10.0.0.2:3128")
+        );
+        assert!(normalize_proxy_url("ftp://127.0.0.1:21").is_err());
+
+        let redacted = redact_proxy_url("http://admin:super_secret_pw@192.168.1.10:8080");
+        assert!(!redacted.contains("super_secret_pw"));
+        assert!(!redacted.contains("admin"));
+        assert!(redacted.contains("192.168.1.10:8080"));
+    }
+
+    #[test]
+    fn session_set_proxy_rebuilds_client_and_preserves_zpw_sek() {
+        let mut s = Session::new(false, false, false).unwrap();
+        s.set_zpw_sek("sek_token_123".into());
+        let configured = s.set_proxy(Some("http://127.0.0.1:8080")).unwrap();
+        assert_eq!(configured.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(s.proxy_url.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(s.zpw_sek.as_deref(), Some("sek_token_123"));
+
+        let cleared = s.set_proxy(None).unwrap();
+        assert!(cleared.is_none());
+        assert!(s.proxy_url.is_none());
     }
 }

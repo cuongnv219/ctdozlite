@@ -654,7 +654,9 @@ pub fn avatar_file_key(avatar: Option<&str>) -> Option<String> {
     }
     let path = url.split('?').next()?;
     let fname = path.rsplit('/').next()?.trim();
-    if fname.len() >= 12 && (fname.ends_with(".jpg") || fname.ends_with(".png") || fname.ends_with(".webp")) {
+    if fname.len() >= 12
+        && (fname.ends_with(".jpg") || fname.ends_with(".png") || fname.ends_with(".webp"))
+    {
         Some(fname.to_ascii_lowercase())
     } else {
         None
@@ -810,8 +812,10 @@ fn wire_sender(value: Option<&Value>) -> Option<String> {
 fn server_message_id(message: &ChatMessage) -> Option<String> {
     let wire_server = wire_identity(message.wire_ref.server_id.as_ref());
     let wire_client = wire_identity(message.wire_ref.client_id.as_ref());
-    if message.id.starts_with("out_") || message.id.is_empty()
-        || wire_client.as_deref() == Some(message.id.as_str()) {
+    if message.id.starts_with("out_")
+        || message.id.is_empty()
+        || wire_client.as_deref() == Some(message.id.as_str())
+    {
         wire_server
     } else {
         wire_identity(Some(&Value::String(message.id.clone())))
@@ -915,10 +919,11 @@ impl MessageIdentityIndex {
             let client_only_replay = existing_server.is_none()
                 && incoming_server.is_none()
                 && (existing.id.is_empty() || incoming.id.is_empty());
-            return (client_only_replay || (existing.is_outgoing
-                && ((existing_local && incoming_server.is_some())
-                    || (incoming_local && existing_server.is_some()))))
-                .then_some(index);
+            return (client_only_replay
+                || (existing.is_outgoing
+                    && ((existing_local && incoming_server.is_some())
+                        || (incoming_local && existing_server.is_some()))))
+            .then_some(index);
         }
         None
     }
@@ -930,14 +935,22 @@ pub(crate) fn merge_sent_message(thread: &mut Thread, mut message: ChatMessage) 
     for (row, existing) in thread.messages.iter().enumerate() {
         identities.insert(existing, row);
     }
-    if identities.find(&thread.messages, &message)
+    if identities
+        .find(&thread.messages, &message)
         .is_some_and(|row| server_message_id(&thread.messages[row]).is_some())
     {
         // The acknowledgement receipt time is not the server's message timestamp.
         message.ts = 0;
         message.time.clear();
     }
-    merge_thread_into(thread, Thread { messages: vec![message], ..Default::default() }, false);
+    merge_thread_into(
+        thread,
+        Thread {
+            messages: vec![message],
+            ..Default::default()
+        },
+        false,
+    );
 }
 
 /// Merge `incoming` thread into `target`. When `incoming_id_is_authoritative` is `true`,
@@ -1056,7 +1069,8 @@ pub fn deduplicate_threads(
         }
         t.messages.retain(|m| m.text != "sendBubbleMessage");
         if let Some(newest) = t.messages.last() {
-            if !newest.text.is_empty() && (t.preview.is_empty() || t.preview == "sendBubbleMessage") {
+            if !newest.text.is_empty() && (t.preview.is_empty() || t.preview == "sendBubbleMessage")
+            {
                 t.preview = newest.text.replace('\n', " ");
                 t.time = newest.time.clone();
             }
@@ -1263,7 +1277,8 @@ fn parse_thread(v: &Value) -> Option<Thread> {
         .unwrap_or_else(|| id.clone());
     let avatar = pick_str(v, &["avatar", "avt", "profile_avatar"]);
     let is_group = is_group_flag(v);
-    let time = v.get("lastActionTime")
+    let time = v
+        .get("lastActionTime")
         .and_then(|val| match val {
             Value::Number(n) => n.as_i64(),
             Value::String(s) => s.parse::<i64>().ok(),
@@ -1316,6 +1331,168 @@ pub(crate) fn next_client_message_id() -> u64 {
     }
 }
 
+/// Convert inline Markdown (`**bold**`, `__underline__`, `~~strikethrough~~`, `*italic*`) and
+/// line-prefix styles (`## `, `- `, `1. `) into Zalo PC's native `(clean_text, Option<textProperties>)`
+/// format (`{"styles":[{"start":N,"len":M,"st":"b,i,u,s,f_18,lst_1,lst_2"}],"ver":0}` in `compact-app-pc.js`).
+pub fn extract_zalo_rtf_text_properties(raw: &str) -> (String, Option<String>) {
+    let mut out_text = String::with_capacity(raw.len());
+    let mut styles: Vec<Value> = Vec::new();
+
+    let lines: Vec<&str> = raw.split('\n').collect();
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        if line_idx > 0 {
+            out_text.push('\n');
+        }
+        let mut line = *raw_line;
+        let mut line_tags: Vec<&'static str> = Vec::new();
+        if let Some(rest) = line.strip_prefix("### ") {
+            line = rest;
+            line_tags.push("b");
+            line_tags.push("f_16");
+        } else if let Some(rest) = line.strip_prefix("## ") {
+            line = rest;
+            line_tags.push("b");
+            line_tags.push("f_18");
+        } else if let Some(rest) = line.strip_prefix("# ") {
+            line = rest;
+            line_tags.push("b");
+            line_tags.push("f_18");
+        } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            line = rest;
+            line_tags.push("lst_1");
+        } else if let Some(rest) = line.strip_prefix("1. ") {
+            line = rest;
+            line_tags.push("lst_2");
+        }
+
+        let line_start_u16 = out_text.encode_utf16().count();
+        let mut rest = line;
+        while !rest.is_empty() {
+            let mut matched_span = false;
+            for (delim, st_tag) in [("`", ""), ("**", "b"), ("__", "u"), ("~~", "s"), ("*", "i")] {
+                if rest.starts_with(delim) {
+                    let dlen = delim.len();
+                    let after = &rest[dlen..];
+                    if let Some(end_pos) = after.find(delim) {
+                        let inner = &after[..end_pos];
+                        if !inner.is_empty() && !inner.contains('\n') {
+                            let span_start = out_text.encode_utf16().count();
+                            let span_len = inner.encode_utf16().count();
+                            out_text.push_str(inner);
+                            if !st_tag.is_empty() && span_len > 0 {
+                                styles.push(json!({
+                                    "start": span_start,
+                                    "len": span_len,
+                                    "st": st_tag,
+                                }));
+                            }
+                            rest = &after[end_pos + dlen..];
+                            matched_span = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if matched_span {
+                continue;
+            }
+            let mut chars = rest.chars();
+            if let Some(ch) = chars.next() {
+                out_text.push(ch);
+                rest = chars.as_str();
+            } else {
+                break;
+            }
+        }
+        let line_len_u16 = out_text.encode_utf16().count().saturating_sub(line_start_u16);
+        if !line_tags.is_empty() && line_len_u16 > 0 {
+            styles.push(json!({
+                "start": line_start_u16,
+                "len": line_len_u16,
+                "st": line_tags.join(","),
+            }));
+        }
+    }
+
+    if styles.is_empty() {
+        (raw.to_string(), None)
+    } else {
+        let prop_str = json!({
+            "styles": styles,
+            "ver": 0,
+        })
+        .to_string();
+        (out_text, Some(prop_str))
+    }
+}
+
+/// Reconstruct Markdown markers from Zalo's incoming `rtf` object (`{"action":"rtf","title":...,"params":"{\"styles\":[...]}"}`)
+/// so incoming rich-text messages sent from official Zalo PC / Mobile render with bold, underline, strikethrough, and lists.
+fn format_incoming_zalo_rtf(title: &str, params_str: &str) -> String {
+    let Ok(p_val) = serde_json::from_str::<Value>(params_str.trim()) else {
+        return title.to_string();
+    };
+    let Some(styles) = p_val.get("styles").and_then(Value::as_array) else {
+        return title.to_string();
+    };
+    if styles.is_empty() {
+        return title.to_string();
+    }
+    let u16_units: Vec<u16> = title.encode_utf16().collect();
+    let mut spans: Vec<(usize, usize, String)> = styles
+        .iter()
+        .filter_map(|s| {
+            let start = s.get("start")?.as_u64()? as usize;
+            let len = s.get("len")?.as_u64()? as usize;
+            let st = s.get("st")?.as_str()?.to_string();
+            if len > 0 && start + len <= u16_units.len() {
+                Some((start, start + len, st))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if spans.is_empty() {
+        return title.to_string();
+    }
+    spans.sort_by_key(|x| x.0);
+    let mut out = String::with_capacity(title.len() + spans.len() * 4);
+    let mut cursor = 0usize;
+    for (s, e, st) in spans {
+        if s < cursor {
+            continue;
+        }
+        if s > cursor {
+            out.push_str(&String::from_utf16_lossy(&u16_units[cursor..s]));
+        }
+        let seg = String::from_utf16_lossy(&u16_units[s..e]);
+        let tags: Vec<&str> = st.split(',').collect();
+        let is_bold = tags.contains(&"b") || tags.iter().any(|t| t.starts_with("f_"));
+        let is_italic = tags.contains(&"i");
+        let is_under = tags.contains(&"u");
+        let is_strike = tags.contains(&"s");
+        let mut wrapped = seg;
+        if is_italic && !is_bold {
+            wrapped = format!("*{wrapped}*");
+        }
+        if is_bold {
+            wrapped = format!("**{wrapped}**");
+        }
+        if is_under {
+            wrapped = format!("__{wrapped}__");
+        }
+        if is_strike {
+            wrapped = format!("~~{wrapped}~~");
+        }
+        out.push_str(&wrapped);
+        cursor = e;
+    }
+    if cursor < u16_units.len() {
+        out.push_str(&String::from_utf16_lossy(&u16_units[cursor..]));
+    }
+    out
+}
+
 /// Send a 1-1 text message: `POST {domains.chat}/api/message/sms?{common}`
 pub async fn send_message(s: &Session, to_id: &str, text: &str) -> Result<Value> {
     send_message_with_client_id(s, to_id, text, next_client_message_id()).await
@@ -1331,12 +1508,16 @@ pub(crate) async fn send_message_with_client_id(
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let body = obj(&[
+    let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+    let mut body = obj(&[
         ("toid", json!(to_id)),
-        ("message", json!(text)),
+        ("message", json!(clean_text)),
         ("clientId", json!(now)),
         ("imei", json!(s.imei)),
     ]);
+    if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+        map.insert("textProperties".into(), json!(tp));
+    }
     let params = s.encoded_params(&body)?;
 
     let host = if s.domains.chat.contains("-msg-chat.")
@@ -1348,10 +1529,7 @@ pub(crate) async fn send_message_with_client_id(
         &s.domains.chat
     };
 
-    let url = format!(
-        "{host}/api/message/sms?{}",
-        s.common_params()
-    );
+    let url = format!("{host}/api/message/sms?{}", s.common_params());
     let form = format!("params={params}");
     let resp = s.post_form(&url, form).await?;
     let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
@@ -1386,15 +1564,23 @@ pub(crate) async fn send_group_message_with_client_id(
         .trim_start_matches("group_")
         .trim_start_matches('g')
         .trim_start_matches('G');
-    let body = obj(&[
+    let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+    let mut body = obj(&[
         ("grid", json!(clean_grid)),
-        ("message", json!(text)),
+        ("message", json!(clean_text)),
         ("clientId", json!(now)),
         ("imei", json!(s.imei)),
         ("visibility", json!(0)),
     ]);
+    if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+        map.insert("textProperties".into(), json!(tp));
+    }
     let params = s.encoded_params(&body)?;
-    let url = format!("{}/api/group/sendmsg?{}", s.domains.group, s.common_params());
+    let url = format!(
+        "{}/api/group/sendmsg?{}",
+        s.domains.group,
+        s.common_params()
+    );
     let form = format!("params={params}");
     let resp = s.post_form(&url, form).await?;
     let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
@@ -1535,9 +1721,12 @@ pub async fn send_attachment(
 
         let data_node = last_up_dec.get("data").unwrap_or(&last_up_dec);
         let photo_id = pick_str(data_node, &["photoId", "clientFileId"]);
-        let normal_url = pick_str(data_node, &["normalUrl", "hdUrl", "oriUrl", "url"]).unwrap_or_default();
-        let hd_url = pick_str(data_node, &["hdUrl", "normalUrl", "oriUrl"]).unwrap_or_else(|| normal_url.clone());
-        let thumb_url = pick_str(data_node, &["thumbUrl", "normalUrl", "hdUrl"]).unwrap_or_else(|| normal_url.clone());
+        let normal_url =
+            pick_str(data_node, &["normalUrl", "hdUrl", "oriUrl", "url"]).unwrap_or_default();
+        let hd_url = pick_str(data_node, &["hdUrl", "normalUrl", "oriUrl"])
+            .unwrap_or_else(|| normal_url.clone());
+        let thumb_url = pick_str(data_node, &["thumbUrl", "normalUrl", "hdUrl"])
+            .unwrap_or_else(|| normal_url.clone());
 
         let send_resp = if let Some(pid) = photo_id.filter(|_| !normal_url.is_empty()) {
             let send_ep = if is_group {
@@ -1545,7 +1734,10 @@ pub async fn send_attachment(
             } else {
                 "/api/message/photo_original/send"
             };
-            let pid_val = pid.parse::<u64>().map(|n| json!(n)).unwrap_or_else(|_| json!(pid));
+            let pid_val = pid
+                .parse::<u64>()
+                .map(|n| json!(n))
+                .unwrap_or_else(|_| json!(pid));
             let mut send_obj = serde_json::Map::new();
             send_obj.insert("photoId".into(), pid_val);
             send_obj.insert("clientId".into(), json!(client_id));
@@ -1646,7 +1838,10 @@ pub async fn send_attachment(
             is_outgoing: true,
             ts: client_id as i64,
             link_url: Some(final_url),
-            link_title: Some(format!("{file_name} ({width}×{height} · {})", format_file_size(total_size))),
+            link_title: Some(format!(
+                "{file_name} ({width}×{height} · {})",
+                format_file_size(total_size)
+            )),
             link_desc: if caption.trim().is_empty() {
                 None
             } else {
@@ -1720,7 +1915,10 @@ pub async fn send_attachment(
         } else {
             "/api/message/asyncfile/msg"
         };
-        let fid_val = fid.parse::<u64>().map(|n| json!(n)).unwrap_or_else(|_| json!(fid));
+        let fid_val = fid
+            .parse::<u64>()
+            .map(|n| json!(n))
+            .unwrap_or_else(|_| json!(fid));
         let mut msg_obj = serde_json::Map::new();
         msg_obj.insert("fileId".into(), fid_val);
         if !file_url.is_empty() {
@@ -1749,7 +1947,12 @@ pub async fn send_attachment(
         json!({ "error_code": -1 })
     };
 
-    if send_resp.get("error_code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+    if send_resp
+        .get("error_code")
+        .and_then(Value::as_i64)
+        .unwrap_or(-1)
+        != 0
+    {
         // Fallback to single-shot `/api/message/sharefile_full` or `/api/group/sharefile_full`
         let share_ep = if is_group {
             "/api/group/sharefile_full"
@@ -1757,9 +1960,15 @@ pub async fn send_attachment(
             "/api/message/sharefile_full"
         };
         let body = if is_group {
-            obj(&[("grid", json!(clean_target)), ("clientId", json!(client_id))])
+            obj(&[
+                ("grid", json!(clean_target)),
+                ("clientId", json!(client_id)),
+            ])
         } else {
-            obj(&[("toid", json!(clean_target)), ("clientId", json!(client_id))])
+            obj(&[
+                ("toid", json!(clean_target)),
+                ("clientId", json!(client_id)),
+            ])
         };
         let params = s.encoded_params(&body)?;
         let url = format!(
@@ -1837,7 +2046,9 @@ pub struct LinkMetadata {
 /// Extract the first `https://` or `http://` URL from a message text string.
 pub fn extract_first_url(text: &str) -> Option<String> {
     let trimmed = text.trim();
-    let pos = trimmed.find("https://").or_else(|| trimmed.find("http://"))?;
+    let pos = trimmed
+        .find("https://")
+        .or_else(|| trimmed.find("http://"))?;
     let after = &trimmed[pos..];
     let end = after.find(char::is_whitespace).unwrap_or(after.len());
     let url = after[..end].trim_end_matches(|c: char| matches!(c, ')' | ']' | ',' | ';'));
@@ -1945,10 +2156,7 @@ pub async fn scrape_opengraph_metadata(url: &str) -> Option<LinkMetadata> {
                 }
                 _ => {}
             }
-        } else if og_title.is_empty()
-            && tag.len() >= 6
-            && tag[1..6].eq_ignore_ascii_case("title")
-        {
+        } else if og_title.is_empty() && tag.len() >= 6 && tag[1..6].eq_ignore_ascii_case("title") {
             if let Some(close) = cursor.find("</") {
                 let raw_t = unescape_html_entities(&cursor[..close]);
                 if !raw_t.is_empty() {
@@ -2135,7 +2343,11 @@ pub(crate) async fn send_link_message_with_client_id(
                 ("imei", json!(s.imei)),
             ]);
             let params = s.encoded_params(&body)?;
-            let url = format!("{}/api/group/sendlink?{}", s.domains.group, s.common_params());
+            let url = format!(
+                "{}/api/group/sendlink?{}",
+                s.domains.group,
+                s.common_params()
+            );
             let resp = s.post_form(&url, format!("params={params}")).await?;
             let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
             if let Some(code) = dec.get("error_code").and_then(Value::as_i64) {
@@ -2247,7 +2459,11 @@ pub(crate) async fn send_sticker_with_client_id(
             ("zsource", json!(101)),
         ]);
         let params = s.encoded_params(&body)?;
-        let url = format!("{}/api/group/sticker?{}", s.domains.group, s.common_params());
+        let url = format!(
+            "{}/api/group/sticker?{}",
+            s.domains.group,
+            s.common_params()
+        );
         let form = format!("params={params}");
         let resp = s.post_form(&url, form).await?;
         let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
@@ -2406,10 +2622,7 @@ pub async fn fetch_sticker_store_packs(s: &Session) -> Result<Vec<StickerPackInf
         if name.is_empty() || name.to_lowercase().contains("test") {
             continue;
         }
-        let total_image = item
-            .get("totalImage")
-            .and_then(Value::as_u64)
-            .unwrap_or(16) as u32;
+        let total_image = item.get("totalImage").and_then(Value::as_u64).unwrap_or(16) as u32;
         let icon_url = item
             .get("iconUrl")
             .or_else(|| item.get("thumbImg"))
@@ -2525,13 +2738,17 @@ pub fn strip_vn_for_sticker_kw(s: &str) -> String {
     for raw in s.chars() {
         for c in raw.to_lowercase() {
             let mapped = match c {
-                'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă'
-                | 'ằ' | 'ắ' | 'ặ' | 'ẳ' | 'ẵ' => 'a',
-                'è' | 'é' | 'ẹ' | 'ẻ' | 'ẽ' | 'ê' | 'ề' | 'ế' | 'ệ' | 'ể' | 'ễ' => 'e',
+                'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă' | 'ằ'
+                | 'ắ' | 'ặ' | 'ẳ' | 'ẵ' => 'a',
+                'è' | 'é' | 'ẹ' | 'ẻ' | 'ẽ' | 'ê' | 'ề' | 'ế' | 'ệ' | 'ể' | 'ễ' => {
+                    'e'
+                }
                 'ì' | 'í' | 'ị' | 'ỉ' | 'ĩ' => 'i',
-                'ò' | 'ó' | 'ọ' | 'ỏ' | 'õ' | 'ô' | 'ồ' | 'ố' | 'ộ' | 'ổ' | 'ỗ' | 'ơ'
-                | 'ờ' | 'ớ' | 'ợ' | 'ở' | 'ỡ' => 'o',
-                'ù' | 'ú' | 'ụ' | 'ủ' | 'ũ' | 'ư' | 'ừ' | 'ứ' | 'ự' | 'ử' | 'ữ' => 'u',
+                'ò' | 'ó' | 'ọ' | 'ỏ' | 'õ' | 'ô' | 'ồ' | 'ố' | 'ộ' | 'ổ' | 'ỗ' | 'ơ' | 'ờ'
+                | 'ớ' | 'ợ' | 'ở' | 'ỡ' => 'o',
+                'ù' | 'ú' | 'ụ' | 'ủ' | 'ũ' | 'ư' | 'ừ' | 'ứ' | 'ự' | 'ử' | 'ữ' => {
+                    'u'
+                }
                 'ỳ' | 'ý' | 'ỵ' | 'ỷ' | 'ỹ' => 'y',
                 'đ' => 'd',
                 '\u{a0}' => ' ',
@@ -3002,9 +3219,10 @@ pub(crate) async fn send_quote_message_with_client_id(
                 .trim_start_matches("group_")
                 .trim_start_matches('g')
                 .trim_start_matches('G');
-            let body = obj(&[
+            let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+            let mut body = obj(&[
                 ("grid", json!(clean_grid)),
-                ("message", json!(text)),
+                ("message", json!(clean_text)),
                 ("clientId", json!(now)),
                 ("language", json!("vi")),
                 ("qmsgOwner", json!(qmsg_owner)),
@@ -3018,6 +3236,9 @@ pub(crate) async fn send_quote_message_with_client_id(
                 ("imei", json!(s.imei)),
                 ("zsource", json!(101)),
             ]);
+            if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+                map.insert("textProperties".into(), json!(tp));
+            }
             let params = s.encoded_params(&body)?;
             let url = format!("{}/api/group/quote?{}", s.domains.group, s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
@@ -3037,9 +3258,10 @@ pub(crate) async fn send_quote_message_with_client_id(
             } else {
                 &s.domains.chat
             };
-            let body = obj(&[
+            let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+            let mut body = obj(&[
                 ("toid", json!(to_id)),
-                ("message", json!(text)),
+                ("message", json!(clean_text)),
                 ("clientId", json!(now)),
                 ("qmsgOwner", json!(qmsg_owner)),
                 ("qmsgId", json!(qmsg_id_num)),
@@ -3051,6 +3273,9 @@ pub(crate) async fn send_quote_message_with_client_id(
                 ("ttl", json!(0)),
                 ("zsource", json!(101)),
             ]);
+            if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+                map.insert("textProperties".into(), json!(tp));
+            }
             let params = s.encoded_params(&body)?;
             let url = format!("{host}/api/message/quote?{}", s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
@@ -3162,9 +3387,8 @@ pub async fn send_reaction(
         .unwrap_or(0);
 
     let (r_icon, r_type) = reaction_code_and_type(reaction);
-    let is_local_id = msg.id.is_empty()
-        || msg.id.starts_with("out_")
-        || msg.id.starts_with("local_");
+    let is_local_id =
+        msg.id.is_empty() || msg.id.starts_with("out_") || msg.id.starts_with("local_");
     let g_msg_id_val = if is_local_id {
         json!("")
     } else {
@@ -3275,7 +3499,11 @@ pub async fn delete_message_for_me(
             ("onlyMe", json!(1)),
         ]);
         let params = s.encoded_params(&body)?;
-        let url = format!("{}/api/group/deletemsg?{}", s.domains.group, s.common_params());
+        let url = format!(
+            "{}/api/group/deletemsg?{}",
+            s.domains.group,
+            s.common_params()
+        );
         let resp = s.post_form(&url, format!("params={params}")).await?;
         Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
     } else {
@@ -3335,7 +3563,11 @@ pub async fn recall_message(
             ("imei", json!(s.imei)),
         ]);
         let params = s.encoded_params(&body)?;
-        let url = format!("{}/api/group/undomsg?{}", s.domains.group, s.common_params());
+        let url = format!(
+            "{}/api/group/undomsg?{}",
+            s.domains.group,
+            s.common_params()
+        );
         let resp = s.post_form(&url, format!("params={params}")).await?;
         Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
     } else {
@@ -3474,7 +3706,10 @@ pub async fn get_group_history_raw(s: &Session, grid: &str, count: u32) -> Resul
     let params = match s.encoded_params(&body) {
         Ok(p) => format!("params={p}"),
         Err(e) => {
-            crate::logger::log_error("chat::get_group_history_raw::encoded_params", &e.to_string());
+            crate::logger::log_error(
+                "chat::get_group_history_raw::encoded_params",
+                &e.to_string(),
+            );
             Session::plain_params(&body)
         }
     };
@@ -3494,7 +3729,10 @@ pub async fn get_group_history_raw(s: &Session, grid: &str, count: u32) -> Resul
 pub async fn fetch_group_profiles(
     s: &Session,
     group_ids: &[String],
-) -> Result<(serde_json::Map<String, Value>, std::collections::HashSet<String>)> {
+) -> Result<(
+    serde_json::Map<String, Value>,
+    std::collections::HashSet<String>,
+)> {
     if s.login.is_none() || group_ids.is_empty() {
         return Ok((serde_json::Map::new(), std::collections::HashSet::new()));
     }
@@ -3512,7 +3750,11 @@ pub async fn fetch_group_profiles(
     let gv_str = serde_json::to_string(&gv_zero)?;
     let body = obj(&[("gridVerMap", json!(gv_str)), ("imei", json!(s.imei))]);
     let params = s.encoded_params(&body)?;
-    let mg_url = format!("{}/api/group/getmg-v2?{}", s.domains.group, s.common_params());
+    let mg_url = format!(
+        "{}/api/group/getmg-v2?{}",
+        s.domains.group,
+        s.common_params()
+    );
     let mg_resp = s.post_form(&mg_url, format!("params={params}")).await?;
     let mut mg_dec = s.maybe_decrypt(mg_resp, s.session_key_bytes()).await;
     if let Some(d_str) = mg_dec.get("data").and_then(Value::as_str) {
@@ -3606,7 +3848,11 @@ fn format_multi_group_avatar(
         .collect();
     let mut slots: Vec<String> = Vec::new();
     for (idx, uid) in mem_ids.iter().take(4).enumerate() {
-        let mut m_name = fallback_names.get(idx).copied().unwrap_or("Thành viên").to_string();
+        let mut m_name = fallback_names
+            .get(idx)
+            .copied()
+            .unwrap_or("Thành viên")
+            .to_string();
         let mut m_ava = String::new();
         if let Some(p) = profiles.get(uid) {
             if let Some(n) = pick_str(p, &["zaloName", "displayName", "name", "display_name"]) {
@@ -3637,7 +3883,10 @@ fn format_multi_group_avatar(
                 .iter()
                 .position(|cand| {
                     let c_fold = strip_vn_for_sticker_kw(cand);
-                    !c_fold.is_empty() && (c_fold == s_fold || s_fold.contains(&c_fold) || c_fold.contains(&s_fold))
+                    !c_fold.is_empty()
+                        && (c_fold == s_fold
+                            || s_fold.contains(&c_fold)
+                            || c_fold.contains(&s_fold))
                 })
                 .unwrap_or(99)
         });
@@ -3651,7 +3900,11 @@ pub async fn get_groups(s: &Session) -> Result<Vec<Thread>> {
     if s.login.is_none() {
         return Ok(Vec::new());
     }
-    let url = format!("{}/api/group/getlg/v4?{}", s.domains.group, s.common_params());
+    let url = format!(
+        "{}/api/group/getlg/v4?{}",
+        s.domains.group,
+        s.common_params()
+    );
     let resp = s.get(&url).await?;
     let mut resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
     if let Some(d_str) = resp.get("data").and_then(Value::as_str) {
@@ -3722,7 +3975,8 @@ pub async fn get_groups(s: &Session) -> Result<Vec<Thread>> {
                         if g.avatar.is_none() {
                             if let Some(info) = info_map.get(&g.id) {
                                 let (mids, tot) = extract_group_member_ids(info);
-                                g.avatar = format_multi_group_avatar(&g.name, &mids, tot, &all_profiles);
+                                g.avatar =
+                                    format_multi_group_avatar(&g.name, &mids, tot, &all_profiles);
                             }
                         }
                     }
@@ -3741,7 +3995,10 @@ pub async fn get_groups(s: &Session) -> Result<Vec<Thread>> {
 /// Zalo's `/api/social/friend/getminiprofiles` returns `error_code = 114` for raw UID lists,
 /// whereas `/api/social/group/members` with `friend_pversion_map: ["<uid>_0", ...]` returns
 /// `data.profiles.<uid>.{displayName, zaloName, avatar}` with `error_code = 0`.
-pub async fn get_mini_profiles(s: &Session, user_ids: &[String]) -> Result<serde_json::Map<String, Value>> {
+pub async fn get_mini_profiles(
+    s: &Session,
+    user_ids: &[String],
+) -> Result<serde_json::Map<String, Value>> {
     if s.login.is_none() || user_ids.is_empty() {
         return Ok(serde_json::Map::new());
     }
@@ -3758,7 +4015,11 @@ pub async fn get_mini_profiles(s: &Session, user_ids: &[String]) -> Result<serde
         .collect();
     let body = obj(&[("friend_pversion_map", json!(versioned_ids))]);
     let params = s.encoded_params(&body)?;
-    let url = format!("{}/api/social/group/members?{}", s.domains.profile, s.common_params());
+    let url = format!(
+        "{}/api/social/group/members?{}",
+        s.domains.profile,
+        s.common_params()
+    );
     let form = format!("params={params}");
     let resp = s.post_form(&url, form).await?;
     let mut resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
@@ -3833,11 +4094,10 @@ pub async fn resolve_thread_names(s: &Session, threads: &mut [Thread]) {
             if let Ok((info_map, _)) = fetch_group_profiles(s, chunk).await {
                 let mut need_mem_uids: Vec<String> = Vec::new();
                 for t in threads.iter_mut() {
-                    let clean_id = t
-                        .id
-                        .trim_start_matches("group_")
-                        .trim_start_matches('g')
-                        .trim_start_matches('G');
+                    let clean_id =
+                        t.id.trim_start_matches("group_")
+                            .trim_start_matches('g')
+                            .trim_start_matches('G');
                     if let Some(info) = info_map.get(&t.id).or_else(|| info_map.get(clean_id)) {
                         if let Some(name) = pick_str(info, &["name", "groupName", "displayName"]) {
                             if !name.is_empty() {
@@ -3878,11 +4138,10 @@ pub async fn resolve_thread_names(s: &Session, threads: &mut [Thread]) {
                         if !t.is_group {
                             continue;
                         }
-                        let clean_id = t
-                            .id
-                            .trim_start_matches("group_")
-                            .trim_start_matches('g')
-                            .trim_start_matches('G');
+                        let clean_id =
+                            t.id.trim_start_matches("group_")
+                                .trim_start_matches('g')
+                                .trim_start_matches('G');
                         if let Some(info) = info_map.get(&t.id).or_else(|| info_map.get(clean_id)) {
                             let cur = t.avatar.as_deref().unwrap_or("");
                             if cur.is_empty() || cur.starts_with("multi:") {
@@ -3941,7 +4200,11 @@ pub async fn resolve_thread_names(s: &Session, threads: &mut [Thread]) {
                     })
                     .map(|(_, url)| url.as_str())
                     .unwrap_or("");
-                slots.push(format!("{}|{}", p.replace(';', " ").replace('|', " "), matched_url));
+                slots.push(format!(
+                    "{}|{}",
+                    p.replace(';', " ").replace('|', " "),
+                    matched_url
+                ));
             }
             let new_multi = format!("multi:{};{}", parts.len(), slots.join(";"));
             if should_replace_avatar(t.avatar.as_deref(), Some(&new_multi)) {
@@ -4307,7 +4570,17 @@ fn extract_content_text(v: &Value) -> Option<String> {
                 .get("href")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|h| !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://")));
+                .filter(|h| {
+                    !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://"))
+                });
+            if o.get("action").and_then(Value::as_str) == Some("rtf") {
+                if let Some(title) = o.get("title").and_then(Value::as_str) {
+                    if let Some(params_s) = o.get("params").and_then(Value::as_str) {
+                        return Some(format_incoming_zalo_rtf(title, params_s));
+                    }
+                    return Some(title.to_string());
+                }
+            }
             for k in ["description", "caption", "text", "msg", "title"] {
                 if let Some(Value::String(s)) = o.get(k) {
                     let t = s.trim();
@@ -4331,24 +4604,23 @@ fn extract_content_text(v: &Value) -> Option<String> {
 }
 
 fn normalize_msg_type(it: &Value) -> String {
-    let raw = it.get("msgType")
+    let raw = it
+        .get("msgType")
         .or_else(|| it.get("messageType"))
         .or_else(|| it.get("type"));
     match raw {
         Some(Value::String(s)) => s.to_ascii_lowercase(),
-        Some(Value::Number(n)) => {
-            match n.as_i64() {
-                Some(1) => "chat.text".into(),
-                Some(2) => "chat.photo".into(),
-                Some(3) => "chat.voice".into(),
-                Some(4) => "chat.video".into(),
-                Some(5) => "chat.sticker".into(),
-                Some(19) => "chat.file".into(),
-                Some(24) => "chat.location".into(),
-                Some(31) => "chat.undo".into(),
-                _ => n.to_string(),
-            }
-        }
+        Some(Value::Number(n)) => match n.as_i64() {
+            Some(1) => "chat.text".into(),
+            Some(2) => "chat.photo".into(),
+            Some(3) => "chat.voice".into(),
+            Some(4) => "chat.video".into(),
+            Some(5) => "chat.sticker".into(),
+            Some(19) => "chat.file".into(),
+            Some(24) => "chat.location".into(),
+            Some(31) => "chat.undo".into(),
+            _ => n.to_string(),
+        },
         _ => String::new(),
     }
 }
@@ -4386,7 +4658,11 @@ fn extract_sticker_info(v: &Value) -> Option<(u64, u64, u32)> {
                 .map(|t| t as u32)
                 .unwrap_or(7);
             if let Some(sid) = stk_id {
-                if cat_id.is_some() || o.contains_key("stickerId") || o.contains_key("catId") || o.contains_key("cateId") {
+                if cat_id.is_some()
+                    || o.contains_key("stickerId")
+                    || o.contains_key("catId")
+                    || o.contains_key("cateId")
+                {
                     return Some((sid, cat_id.unwrap_or(0), stk_type));
                 }
             }
@@ -4395,7 +4671,6 @@ fn extract_sticker_info(v: &Value) -> Option<(u64, u64, u32)> {
         _ => None,
     }
 }
-
 
 /// Extract rich link/media card metadata (`link_url`, `link_title`, `link_desc`, `link_thumb`, `link_src`)
 /// from a Zalo `chat.recommended` (`recommened.link`) or rich-object `content`.
@@ -4423,7 +4698,9 @@ fn extract_link_info(
                 .get("href")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|h| !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://")))
+                .filter(|h| {
+                    !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://"))
+                })
                 .map(str::to_string);
             let Some(url) = href else {
                 return (None, None, None, None, None);
@@ -4433,7 +4710,9 @@ fn extract_link_info(
                 .or_else(|| o.get("hd"))
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|t| !t.is_empty() && (t.starts_with("http://") || t.starts_with("https://")))
+                .filter(|t| {
+                    !t.is_empty() && (t.starts_with("http://") || t.starts_with("https://"))
+                })
                 .map(str::to_string);
             let mut title = o
                 .get("title")
@@ -4485,11 +4764,17 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
 
     let raw_content_val = it
         .get("content")
-        .or_else(|| it.get("message").and_then(|m| m.get("content")).or_else(|| it.get("message")))
+        .or_else(|| {
+            it.get("message")
+                .and_then(|m| m.get("content"))
+                .or_else(|| it.get("message"))
+        })
         .or_else(|| it.get("msg"));
 
     let mut sticker_meta = raw_content_val.and_then(extract_sticker_info);
-    if sticker_meta.is_none() && (msg_type == "chat.sticker" || msg_type == "sticker" || msg_type == "5") {
+    if sticker_meta.is_none()
+        && (msg_type == "chat.sticker" || msg_type == "sticker" || msg_type == "5")
+    {
         sticker_meta = extract_sticker_info(it);
     }
     let (link_url, link_title, link_desc, link_thumb, link_src) = raw_content_val
@@ -4506,6 +4791,26 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else if sticker_meta.is_some() && (content.is_empty() || content.starts_with('{')) {
         content = "[Nhãn dán]".to_string();
     }
+    if sticker_meta.is_none() {
+        let parse_ami = |s: &str| -> Option<(u64, u64, u32)> {
+            let pos = s.find("ami_fat_cat_")?;
+            let num_str = s.get(pos + 12..pos + 14)?;
+            let idx = num_str.parse::<u64>().ok()?;
+            if (1..=15).contains(&idx) {
+                Some((999000 + idx, 99901, 7))
+            } else {
+                None
+            }
+        };
+        if let Some(m) = parse_ami(&content)
+            .or_else(|| link_desc.as_deref().and_then(parse_ami))
+            .or_else(|| link_title.as_deref().and_then(parse_ami))
+            .or_else(|| link_url.as_deref().and_then(parse_ami))
+        {
+            sticker_meta = Some(m);
+            content = "[Nhãn dán]".to_string();
+        }
+    }
 
     if content.is_empty() {
         content = match msg_type.as_str() {
@@ -4521,7 +4826,10 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
             _ => {
                 let obj = it.get("content").or_else(|| it.get("message"));
                 if let Some(o) = obj {
-                    if o.get("catId").is_some() || o.get("stickerId").is_some() || o.get("id").is_some() {
+                    if o.get("catId").is_some()
+                        || o.get("stickerId").is_some()
+                        || o.get("id").is_some()
+                    {
                         "[Nhãn dán]".to_string()
                     } else if o.get("href").is_some() || o.get("thumb").is_some() {
                         "[Hình ảnh]".to_string()
@@ -4540,9 +4848,11 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let undo_target_id = if is_undo_type {
         raw_content_val.and_then(|rv| match rv {
             Value::Object(_) => pick_str(rv, &["globalMsgId", "msgId", "cliMsgId"]),
-            Value::String(s) if s.trim().starts_with('{') => serde_json::from_str::<Value>(s.trim())
-                .ok()
-                .and_then(|parsed| pick_str(&parsed, &["globalMsgId", "msgId", "cliMsgId"])),
+            Value::String(s) if s.trim().starts_with('{') => {
+                serde_json::from_str::<Value>(s.trim())
+                    .ok()
+                    .and_then(|parsed| pick_str(&parsed, &["globalMsgId", "msgId", "cliMsgId"]))
+            }
             _ => None,
         })
     } else {
@@ -4552,8 +4862,11 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     // Preserve the persisted canonical ID contract until a schema-aware migration
     // can replace legacy cliMsgId keys without duplicating cached messages.
     let msg_id = undo_target_id
-        .or_else(|| ["msgId", "cliMsgId", "globalMsgId", "lastMsgId", "id"].iter()
-            .find_map(|key| wire_identity(it.get(*key))))
+        .or_else(|| {
+            ["msgId", "cliMsgId", "globalMsgId", "lastMsgId", "id"]
+                .iter()
+                .find_map(|key| wire_identity(it.get(*key)))
+        })
         .unwrap_or_default();
 
     if content.is_empty() && msg_id.is_empty() {
@@ -4585,8 +4898,15 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
 
     let is_outgoing = uid_from == "0"
         || uid_from.is_empty()
-        || it.get("isOutgoing").and_then(Value::as_bool).unwrap_or(false)
-        || it.get("is_outgoing").and_then(Value::as_i64).map(|n| n == 1).unwrap_or(false);
+        || it
+            .get("isOutgoing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || it
+            .get("is_outgoing")
+            .and_then(Value::as_i64)
+            .map(|n| n == 1)
+            .unwrap_or(false);
 
     let ts = it
         .get("ts")
@@ -4607,21 +4927,26 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         crate::ui::clock()
     };
 
-    let (reply_to_id, reply_to_sender, reply_to_text) = if let Some(q) = it.get("quote").filter(|v| v.is_object()) {
-        let q_id = pick_str(q, &["cliMsgId", "globalMsgId", "msgId"]);
-        let q_sender = pick_str(q, &["fromD", "dName", "ownerId", "fromUid", "uidFrom"]);
-        let q_text = pick_str(q, &["msg", "message", "content"]).or_else(|| {
-            q.get("msg").or_else(|| q.get("content")).and_then(extract_content_text)
-        });
-        (q_id, q_sender, q_text)
-    } else {
-        (None, None, None)
-    };
+    let (reply_to_id, reply_to_sender, reply_to_text) =
+        if let Some(q) = it.get("quote").filter(|v| v.is_object()) {
+            let q_id = pick_str(q, &["cliMsgId", "globalMsgId", "msgId"]);
+            let q_sender = pick_str(q, &["fromD", "dName", "ownerId", "fromUid", "uidFrom"]);
+            let q_text = pick_str(q, &["msg", "message", "content"]).or_else(|| {
+                q.get("msg")
+                    .or_else(|| q.get("content"))
+                    .and_then(extract_content_text)
+            });
+            (q_id, q_sender, q_text)
+        } else {
+            (None, None, None)
+        };
 
     Some(ChatMessage {
         id: msg_id,
-        client_message_id: ["cliMsgId", "clientId", "client_message_id"].iter()
-            .find_map(|key| wire_identity(it.get(*key))).unwrap_or_default(),
+        client_message_id: ["cliMsgId", "clientId", "client_message_id"]
+            .iter()
+            .find_map(|key| wire_identity(it.get(*key)))
+            .unwrap_or_default(),
         wire_ref: crate::message_model::WireMessageRef::from_raw(it),
         sender: display_sender,
         text: content,
@@ -4718,7 +5043,10 @@ fn extract_message_thread_id_ext(
         }
     }
 
-    if !uid_from.is_empty() && uid_from != "0" && (id_to.is_empty() || id_to == "0" || Some(id_to.as_str()) == cloud_thread_id) {
+    if !uid_from.is_empty()
+        && uid_from != "0"
+        && (id_to.is_empty() || id_to == "0" || Some(id_to.as_str()) == cloud_thread_id)
+    {
         // Incoming 1-1 message: peer sent it to us -> thread ID is `uid_from`
         Some((uid_from, false))
     } else if !id_to.is_empty() && id_to != "0" {
@@ -4727,10 +5055,18 @@ fn extract_message_thread_id_ext(
     } else if !uid_from.is_empty() && uid_from != "0" {
         Some((uid_from, false))
     } else {
-        pick_str(m_val, &["threadId", "conversId", "userId", "friendId", "id"])
-            .or_else(|| pick_str(entry, &["threadId", "conversId", "userId", "friendId", "id"]))
-            .filter(|s| s != "0" && !s.is_empty())
-            .map(|s| (s, is_group))
+        pick_str(
+            m_val,
+            &["threadId", "conversId", "userId", "friendId", "id"],
+        )
+        .or_else(|| {
+            pick_str(
+                entry,
+                &["threadId", "conversId", "userId", "friendId", "id"],
+            )
+        })
+        .filter(|s| s != "0" && !s.is_empty())
+        .map(|s| (s, is_group))
     }
 }
 
@@ -4744,7 +5080,10 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
     let mut data_node = parsed_str_data
         .as_ref()
         .unwrap_or_else(|| resp.get("data").unwrap_or(resp));
-    if let Some(inner_data) = data_node.get("data").filter(|v| v.is_object() || v.is_array()) {
+    if let Some(inner_data) = data_node
+        .get("data")
+        .filter(|v| v.is_object() || v.is_array())
+    {
         data_node = inner_data;
     }
     let cloud_tid: Option<String> = threads
@@ -4844,7 +5183,9 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
             raw_msgs.push((obj, is_grp_bucket || is_group_flag(obj)));
         }
         if raw_msgs.is_empty()
-            && (entry.get("content").is_some() || entry.get("msg").is_some() || entry.get("msgId").is_some())
+            && (entry.get("content").is_some()
+                || entry.get("msg").is_some()
+                || entry.get("msgId").is_some())
         {
             raw_msgs.push((entry, is_grp_bucket));
         }
@@ -4964,7 +5305,10 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
     let mut data_node = parsed_str_data
         .as_ref()
         .unwrap_or_else(|| resp.get("data").unwrap_or(resp));
-    if let Some(inner_data) = data_node.get("data").filter(|v| v.is_object() || v.is_array()) {
+    if let Some(inner_data) = data_node
+        .get("data")
+        .filter(|v| v.is_object() || v.is_array())
+    {
         data_node = inner_data;
     }
 
@@ -5039,7 +5383,6 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FriendshipStatus {
     #[default]
@@ -5060,7 +5403,10 @@ pub fn parse_friendship_status_response(resp: &Value) -> FriendshipStatus {
     let is_friend = d
         .get("is_friend")
         .or_else(|| d.get("isFriend"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 })))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 }))
+        })
         .unwrap_or(0);
     if is_friend == 1 {
         return FriendshipStatus::Friend;
@@ -5068,7 +5414,10 @@ pub fn parse_friendship_status_response(resp: &Value) -> FriendshipStatus {
     let is_requesting = d
         .get("is_requesting")
         .or_else(|| d.get("isRequesting"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 })))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 }))
+        })
         .unwrap_or(0);
     if is_requesting == 1 {
         return FriendshipStatus::IncomingPending;
@@ -5076,7 +5425,10 @@ pub fn parse_friendship_status_response(resp: &Value) -> FriendshipStatus {
     let is_requested = d
         .get("is_requested")
         .or_else(|| d.get("isRequested"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 })))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 }))
+        })
         .unwrap_or(0);
     if is_requested == 1 {
         return FriendshipStatus::OutgoingPending;
@@ -5094,10 +5446,7 @@ pub async fn get_friend_request_status(s: &Session, fid: &str) -> Result<Value> 
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let body = obj(&[
-        ("fid", json!(fid)),
-        ("imei", json!(s.imei)),
-    ]);
+    let body = obj(&[("fid", json!(fid)), ("imei", json!(s.imei))]);
     let enc = s.encoded_params(&body)?;
     let host = if s.domains.friend.is_empty() {
         "https://tt-friend-wpa.chat.zalo.me"
@@ -5227,10 +5576,7 @@ pub async fn accept_friend_request(s: &Session, fid: &str) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let body = obj(&[
-        ("fid", json!(fid)),
-        ("language", json!("vi")),
-    ]);
+    let body = obj(&[("fid", json!(fid)), ("language", json!("vi"))]);
     let enc = s.encoded_params(&body)?;
     let host = if s.domains.friend.is_empty() {
         "https://tt-friend-wpa.chat.zalo.me"
@@ -5371,10 +5717,16 @@ pub async fn find_user_by_phone(s: &Session, raw_phone: &str) -> Result<PhoneLoo
     let Some(uid) = pick_str(data, &["uid", "userId", "id", "globalId"]) else {
         anyhow::bail!("Không tìm thấy tài khoản Zalo ứng với số điện thoại này");
     };
-    let display_name = pick_str(data, &["display_name", "displayName", "zalo_name", "zaloName"])
-        .unwrap_or_else(|| raw_phone.trim().to_string());
-    let zalo_name = pick_str(data, &["zalo_name", "zaloName", "display_name", "displayName"])
-        .unwrap_or_else(|| display_name.clone());
+    let display_name = pick_str(
+        data,
+        &["display_name", "displayName", "zalo_name", "zaloName"],
+    )
+    .unwrap_or_else(|| raw_phone.trim().to_string());
+    let zalo_name = pick_str(
+        data,
+        &["zalo_name", "zaloName", "display_name", "displayName"],
+    )
+    .unwrap_or_else(|| display_name.clone());
     let avatar = pick_str(data, &["avatar", "avt"]).unwrap_or_default();
     let status = pick_str(data, &["status"]).unwrap_or_default();
 
@@ -5471,11 +5823,7 @@ pub async fn set_unread_mark(
     };
     let outer = json!({ "param": inner.to_string() });
     let params = s.encoded_params(&outer)?;
-    let url = format!(
-        "{}{path}?{}",
-        s.domains.conversation,
-        s.common_params()
-    );
+    let url = format!("{}{path}?{}", s.domains.conversation, s.common_params());
     let resp = s.post_form(&url, format!("params={params}")).await?;
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
@@ -5507,12 +5855,244 @@ pub async fn set_mute_conversation(
         "imei": s.imei
     });
     let params = s.encoded_params(&body)?;
-    let url = format!(
-        "{}/api/social/profile/setmute?{}",
-        s.domains.profile,
+    let path = format!("/api/social/profile/setmute?{}", s.common_params());
+    let resp = s
+        .post_endpoint_form("profile", &path, format!("params={params}"))
+        .await?;
+    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
+/// Fetch the full mute snapshot (`chatEntries` + `groupChatEntries`) from Official Zalo PC
+/// (`getMuteConversations` @ `default-login-main-startup-shared-worker.js`, cmd `11280`, #67).
+pub async fn get_mute_conversations(s: &Session) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let body = json!({
+        "imei": s.imei
+    });
+    let params = s.encoded_params(&body)?;
+    let path = format!(
+        "/api/social/profile/getmute?{}&params={params}",
         s.common_params()
     );
-    let resp = s.post_form(&url, format!("params={params}")).await?;
+    let resp = s.get_endpoint("profile", &path).await?;
+    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
+/// Real-time mute/unmute control notification (`act_type: "mute"`, `act: "set" | "unset"`, #67).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MuteControlEvent {
+    /// Canonical thread ID (`g<id>` for groups, `<id>` for 1-1 peers).
+    pub thread_id: String,
+    pub is_group: bool,
+    pub muted: bool,
+    /// Expiry Unix timestamp (`Some(ts)`), or `None` when indefinite (`duration == -1`) or unmuted.
+    pub muted_until: Option<i64>,
+    /// Value for `AppSettings::muted_threads` (`Some(-1)` for indefinite, `Some(until)` for timed, `None` when unmuted).
+    pub settings_until: Option<i64>,
+}
+
+/// Parse `act_type: "mute"` items inside WebSocket `cmd 601`/`602`/`603` or `lp_control`
+/// payloads (`_processMuteConversations` in Zalo PC `app.asar`, #67).
+pub fn extract_mute_controls(data_node: &Value, now_unix: i64) -> Vec<MuteControlEvent> {
+    let mut out = Vec::new();
+    let mut candidates: Vec<&Value> = Vec::new();
+    if let Some(arr) = data_node.get("controls").and_then(Value::as_array) {
+        candidates.extend(arr.iter());
+    } else if let Some(arr) = data_node.as_array() {
+        for item in arr {
+            if let Some(sub) = item.get("controls").and_then(Value::as_array) {
+                candidates.extend(sub.iter());
+            } else {
+                candidates.push(item);
+            }
+        }
+    } else {
+        candidates.push(data_node);
+    }
+
+    for item in candidates {
+        let c = item.get("content").unwrap_or(item);
+        let act_type = c
+            .get("act_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if act_type != "mute" {
+            continue;
+        }
+        let act = c.get("act").and_then(Value::as_str).unwrap_or_default();
+        let raw_data = c.get("data").unwrap_or(c);
+        let parsed_data: Value;
+        let d = if let Some(s) = raw_data.as_str() {
+            if let Ok(v) = serde_json::from_str::<Value>(s) {
+                parsed_data = v;
+                &parsed_data
+            } else {
+                continue;
+            }
+        } else {
+            raw_data
+        };
+
+        let raw_id = d
+            .get("toId")
+            .or_else(|| d.get("toid"))
+            .or_else(|| d.get("id"))
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+            })
+            .unwrap_or_default();
+        let clean = raw_id
+            .trim()
+            .trim_start_matches("group_")
+            .trim_start_matches('g')
+            .trim_start_matches('G');
+        if clean.is_empty() || clean == "0" {
+            continue;
+        }
+
+        let mute_type = d
+            .get("muteType")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+            .unwrap_or(1);
+        let is_group = mute_type == 2 || raw_id.starts_with('g') || raw_id.starts_with("group_");
+        let thread_id = if is_group {
+            format!("g{clean}")
+        } else {
+            clean.to_string()
+        };
+
+        let duration = d
+            .get("duration")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+            .unwrap_or(-1);
+        let mute_mode = d
+            .get("muteMode")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+            .unwrap_or(1);
+        let start_time = d
+            .get("startTime")
+            .or_else(|| d.get("systemTime"))
+            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+            .unwrap_or(now_unix);
+
+        let is_set = match act {
+            "set" => mute_mode == 1 && duration != 0,
+            "unset" => false,
+            _ => {
+                let action_code = d.get("action").and_then(Value::as_i64).unwrap_or(1);
+                action_code == 1 && mute_mode == 1 && duration != 0
+            }
+        };
+
+        if !is_set {
+            out.push(MuteControlEvent {
+                thread_id,
+                is_group,
+                muted: false,
+                muted_until: None,
+                settings_until: None,
+            });
+            continue;
+        }
+
+        if duration < 0 {
+            out.push(MuteControlEvent {
+                thread_id,
+                is_group,
+                muted: true,
+                muted_until: None,
+                settings_until: Some(-1),
+            });
+        } else {
+            let until = start_time.saturating_add(duration);
+            if until > now_unix {
+                out.push(MuteControlEvent {
+                    thread_id,
+                    is_group,
+                    muted: true,
+                    muted_until: Some(until),
+                    settings_until: Some(until),
+                });
+            } else {
+                out.push(MuteControlEvent {
+                    thread_id,
+                    is_group,
+                    muted: false,
+                    muted_until: None,
+                    settings_until: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Request mobile message sync (`pullMobileMsg` @ `app.asar`, cmd `12000`, `file` endpoint, #68).
+/// Sends a wake-up/sync signal to the user's phone Zalo client to push recent messages.
+pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let body = json!({
+        "pc_name": s.computer_name,
+        "public_key": public_key,
+        "from_seq_id": 0,
+        "is_retry": 0,
+        "min_seq_id": 0,
+        "temp_key": "",
+        "imei": s.imei
+    });
+    let params = s.encoded_params(&body)?;
+    let path = format!(
+        "/api/message/pull_mobile_msg?{}&params={params}",
+        s.common_params()
+    );
+    let resp = s.get_endpoint("file", &path).await?;
+    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
+/// Request transfer-sync v2 from phone (`requestSyncMessage` @ `app.asar`, cmd `12888`, `file` endpoint, #68).
+pub async fn request_phone_sync_v2(s: &Session, public_key: &str) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let body = json!({
+        "pc_name": s.computer_name,
+        "public_key": public_key,
+        "version": 1,
+        "is_retry": 0,
+        "temp_key": "",
+        "imei": s.imei
+    });
+    let params = s.encoded_params(&body)?;
+    let path = format!(
+        "/api/transfer-sync-v2/request-sync?{}&params={params}",
+        s.common_params()
+    );
+    let resp = s.get_endpoint("file", &path).await?;
+    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
+/// Cancel an active mobile message sync request (`cancelTransferMessage` @ `app.asar`, cmd `12700`, #68).
+pub async fn cancel_phone_sync(s: &Session, public_key: &str) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let body = json!({
+        "public_key": public_key,
+        "imei": s.imei
+    });
+    let params = s.encoded_params(&body)?;
+    let path = format!(
+        "/api/message/cancel_pull_mobile_msg?{}&params={params}",
+        s.common_params()
+    );
+    let resp = s.get_endpoint("file", &path).await?;
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
@@ -5731,7 +6311,10 @@ mod tests {
             time: String::new(),
             avatar: None,
             is_group: false,
-            messages: vec![m("1", "chào", 1_000_000, false), m("out_9", "ok", 2_000_000, true)],
+            messages: vec![
+                m("1", "chào", 1_000_000, false),
+                m("out_9", "ok", 2_000_000, true),
+            ],
         };
         let incoming = Thread {
             messages: vec![
@@ -5988,7 +6571,10 @@ mod tests {
         assert_eq!(ps.last_action_id, "8399086511016");
         assert_eq!(ps.last_action_id_other, "8399036593265");
         assert_eq!(ps.queues.get("1").unwrap().last_id, "8399086511016");
-        assert_eq!(ps.queues.get("1").unwrap().ids, vec!["8399086511016".to_string()]);
+        assert_eq!(
+            ps.queues.get("1").unwrap().ids,
+            vec!["8399086511016".to_string()]
+        );
         // Socket-only queue "15" must NOT be added to HTTP polling queues
         assert!(!ps.queues.contains_key("15"));
     }
@@ -6064,7 +6650,10 @@ mod tests {
             "uidFrom": "user_b",
             "ts": 5000_i64
         });
-        assert_eq!(parse_chat_message(&undo).unwrap().text, "[Tin nhắn đã thu hồi]");
+        assert_eq!(
+            parse_chat_message(&undo).unwrap().text,
+            "[Tin nhắn đã thu hồi]"
+        );
     }
 
     #[test]
@@ -6167,7 +6756,10 @@ mod tests {
         assert_eq!(strip_vn_for_sticker_kw("Cảm ơn nhiều"), "cam on nhieu");
         assert_eq!(strip_vn_for_sticker_kw("Ngủ ngon nhé"), "ngu ngon nhe");
         assert_eq!(strip_vn_for_sticker_kw("Nguyễn Văn An"), "nguyen van an");
-        assert_eq!(normalize_sticker_keyword("  iu\u{a0}that\u{a0}  "), "iu that");
+        assert_eq!(
+            normalize_sticker_keyword("  iu\u{a0}that\u{a0}  "),
+            "iu that"
+        );
 
         let q1 = canonical_vn_sticker_queries("Mệt quá");
         assert!(q1.contains(&"mệt quá".to_string()));
@@ -6181,16 +6773,28 @@ mod tests {
     #[test]
     fn test_parse_friendship_status_response() {
         let r_friend = json!({"error_code": 0, "data": {"is_friend": 1, "is_requested": 0, "is_requesting": 0}});
-        assert_eq!(parse_friendship_status_response(&r_friend), FriendshipStatus::Friend);
+        assert_eq!(
+            parse_friendship_status_response(&r_friend),
+            FriendshipStatus::Friend
+        );
 
         let r_inc = json!({"error_code": 0, "data": {"is_friend": 0, "is_requested": 0, "is_requesting": 1}});
-        assert_eq!(parse_friendship_status_response(&r_inc), FriendshipStatus::IncomingPending);
+        assert_eq!(
+            parse_friendship_status_response(&r_inc),
+            FriendshipStatus::IncomingPending
+        );
 
         let r_out = json!({"error_code": 0, "data": {"is_friend": 0, "is_requested": 1, "is_requesting": 0}});
-        assert_eq!(parse_friendship_status_response(&r_out), FriendshipStatus::OutgoingPending);
+        assert_eq!(
+            parse_friendship_status_response(&r_out),
+            FriendshipStatus::OutgoingPending
+        );
 
         let r_stranger = json!({"error_code": 0, "data": {"is_friend": 0, "is_requested": 0, "is_requesting": 0}});
-        assert_eq!(parse_friendship_status_response(&r_stranger), FriendshipStatus::Stranger);
+        assert_eq!(
+            parse_friendship_status_response(&r_stranger),
+            FriendshipStatus::Stranger
+        );
     }
 
     #[test]
@@ -6277,7 +6881,9 @@ mod tests {
             name: "Nguyễn Văn A".into(),
             preview: "Xin chào từ người 1".into(),
             time: "09:00".into(),
-            avatar: Some("https://s120-ava-talk.zadn.vn/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg".into()),
+            avatar: Some(
+                "https://s120-ava-talk.zadn.vn/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg".into(),
+            ),
             is_group: false,
             messages: vec![ChatMessage {
                 id: "m_a".into(),
@@ -6508,5 +7114,79 @@ mod send_identity_tests {
         for (_, body) in requests {
             assert_eq!(body["clientId"], json!(client_id));
         }
+    }
+
+    #[test]
+    fn extract_mute_controls_parses_set_and_unset_events_for_peers_and_groups() {
+        let now = 1700000000_i64;
+        let payload = json!({
+            "controls": [
+                {
+                    "content": {
+                        "act_type": "mute",
+                        "act": "set",
+                        "data": {
+                            "toId": "123456789",
+                            "muteType": 1,
+                            "duration": -1,
+                            "startTime": now,
+                            "muteMode": 1
+                        }
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "mute",
+                        "act": "set",
+                        "data": "{\"toId\":\"987654321\",\"muteType\":2,\"duration\":3600,\"startTime\":1700000000,\"muteMode\":1}"
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "mute",
+                        "act": "unset",
+                        "data": {
+                            "toId": "123456789",
+                            "muteType": 1,
+                            "duration": 0,
+                            "muteMode": 0
+                        }
+                    }
+                }
+            ]
+        });
+
+        let events = extract_mute_controls(&payload, now);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[0],
+            MuteControlEvent {
+                thread_id: "123456789".into(),
+                is_group: false,
+                muted: true,
+                muted_until: None,
+                settings_until: Some(-1),
+            }
+        );
+        assert_eq!(
+            events[1],
+            MuteControlEvent {
+                thread_id: "g987654321".into(),
+                is_group: true,
+                muted: true,
+                muted_until: Some(now + 3600),
+                settings_until: Some(now + 3600),
+            }
+        );
+        assert_eq!(
+            events[2],
+            MuteControlEvent {
+                thread_id: "123456789".into(),
+                is_group: false,
+                muted: false,
+                muted_until: None,
+                settings_until: None,
+            }
+        );
     }
 }

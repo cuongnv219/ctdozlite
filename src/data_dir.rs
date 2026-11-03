@@ -18,6 +18,7 @@ pub fn resolve(
     macos: bool,
 ) -> Result<(PathBuf, bool)> {
     let mut explicit = None;
+    let mut profile_name = None;
     let mut i = 0;
     while i < args.len() {
         let value = if args[i] == "--data-dir" {
@@ -39,6 +40,30 @@ pub fn resolve(
                 bail!("--data-dir chỉ được chỉ định một lần");
             }
             explicit = Some(PathBuf::from(value));
+            i += 1;
+            continue;
+        }
+        let prof_val = if args[i] == "--profile" {
+            i += 1;
+            Some(
+                args.get(i)
+                    .filter(|value| !value.starts_with('-'))
+                    .context("--profile yêu cầu tên hồ sơ tài khoản")?
+                    .as_str(),
+            )
+        } else {
+            args[i].strip_prefix("--profile=")
+        };
+        if let Some(prof) = prof_val {
+            let safe: String = prof
+                .trim()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if safe.is_empty() {
+                bail!("--profile chỉ chấp nhận ký tự chữ, số, '-' hoặc '_'");
+            }
+            profile_name = Some(safe);
         }
         i += 1;
     }
@@ -59,14 +84,19 @@ pub fn resolve(
         .filter(|p| p.file_name().is_some_and(|n| n == "Contents"))
         .and_then(Path::parent)
         .is_some_and(|p| p.extension().is_some_and(|e| e == "app"));
-    if macos && bundled {
+    let (base, is_private) = if macos && bundled {
         let home = home.context("Cần HOME để xác định Application Support")?;
         if !home.is_absolute() && !home.to_str().is_some_and(|s| s.starts_with('/')) {
             bail!("HOME phải là đường dẫn tuyệt đối");
         }
-        return Ok((home.join("Library/Application Support/ctdozlite"), true));
+        (home.join("Library/Application Support/ctdozlite"), true)
+    } else {
+        (cwd.to_path_buf(), false)
+    };
+    if let Some(prof) = profile_name {
+        return Ok((base.join("profiles").join(prof), true));
     }
-    Ok((cwd.to_path_buf(), false))
+    Ok((base, is_private))
 }
 
 /// Validate storage before any persistent state is opened.
@@ -230,6 +260,17 @@ mod tests {
             true
         )
         .is_err());
+        assert_eq!(
+            resolve(
+                &["--profile".into(), "acc_2".into()],
+                cwd,
+                Path::new("/bin/ctdozlite"),
+                None,
+                true
+            )
+            .unwrap(),
+            (cwd.join("profiles").join("acc_2"), true)
+        );
     }
 
     #[test]

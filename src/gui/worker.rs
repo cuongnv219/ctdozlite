@@ -7,9 +7,13 @@ pub(super) static KNOWN_THREADS: std::sync::Mutex<Vec<(String, String, bool)>> =
 
 pub enum WorkerCmd {
     /// Read OS authorization without prompting.
-    ReadNotificationAuthorization { request_id: u64 },
+    ReadNotificationAuthorization {
+        request_id: u64,
+    },
     /// Request OS authorization following an explicit Settings click.
-    RequestNotificationAuthorization { request_id: u64 },
+    RequestNotificationAuthorization {
+        request_id: u64,
+    },
     RequestQr,
     LoginPassword {
         phone: String,
@@ -183,6 +187,12 @@ pub enum WorkerCmd {
         friend_uids: Vec<String>,
         shared_media_by_uid: std::collections::HashMap<String, Vec<crate::feed::FeedMedia>>,
     },
+    SyncPhoneMessages {
+        threads: Vec<Thread>,
+    },
+    SetProxy {
+        proxy_url: String,
+    },
 }
 
 pub(super) static WORKER_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<WorkerCmd>> =
@@ -299,8 +309,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
     let poll_state =
         std::sync::Arc::new(tokio::sync::Mutex::new(crate::chat::PollState::default()));
-    let ctrl_poll_state =
-        std::sync::Arc::new(tokio::sync::Mutex::new(crate::call::CtrlPollState::default()));
+    let ctrl_poll_state = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::call::CtrlPollState::default(),
+    ));
 
     std::thread::Builder::new()
         .name("zalo-worker".into())
@@ -487,6 +498,15 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             {
                                                 cb.handle_control_event(voip_ev);
                                             }
+                                            let mute_evs = crate::chat::extract_mute_controls(
+                                                data_node,
+                                                crate::login::unix_now() as i64,
+                                            );
+                                            if !mute_evs.is_empty() {
+                                                let _ = gui_tx_ws
+                                                    .send(GuiEvent::MuteEventsReceived(mute_evs));
+                                                ctx_ws.request_repaint();
+                                            }
                                             if ev.is_chat_ish() {
                                                 let mut ws_threads = Vec::new();
                                                 if let Some(li) = s_snap.login.as_ref() {
@@ -541,22 +561,29 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                     });
                 }
 
-                // 2) Background HTTP long-poll fallback for VoIP control events (`lp_control`)
+                // 2) Background HTTP long-poll fallback for VoIP & mute control events (`lp_control`)
                 {
                     let s_ctrl = session.clone();
                     let cps = ctrl_poll_state.clone();
                     let cb = call_bridge.clone();
+                    let gui_tx_ctrl = gui_tx.clone();
+                    let ctx_ctrl = egui_ctx.clone();
                     tokio::spawn(async move {
                         loop {
                             let s_snap = s_ctrl.lock().await.clone();
                             if s_snap.login.is_some() {
-                                let voip_res = {
+                                let ctrl_res = {
                                     let mut st = cps.lock().await;
-                                    crate::call::poll_voip_controls(&s_snap, &mut st).await
+                                    crate::call::poll_control_events(&s_snap, &mut st).await
                                 };
-                                if let Ok(events) = voip_res {
+                                if let Ok((events, mute_evs)) = ctrl_res {
                                     for ev in events {
                                         cb.handle_control_event(ev);
+                                    }
+                                    if !mute_evs.is_empty() {
+                                        let _ = gui_tx_ctrl
+                                            .send(GuiEvent::MuteEventsReceived(mute_evs));
+                                        ctx_ctrl.request_repaint();
                                     }
                                 } else {
                                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -681,6 +708,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             mute,
                         } => {
                             let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
                                 let _ = crate::chat::set_mute_conversation(
@@ -691,6 +720,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     mute,
                                 )
                                 .await;
+                                if let Ok(mute_resp) = crate::chat::get_mute_conversations(&s).await
+                                {
+                                    if let Some(mute_map) = crate::unread::extract_mute_map(
+                                        &mute_resp,
+                                        crate::login::unix_now() as i64,
+                                    ) {
+                                        let _ = gui_tx_clone
+                                            .send(GuiEvent::MuteSnapshotSynced(mute_map));
+                                        ctx_clone.request_repaint();
+                                    }
+                                }
                             });
                         }
                         WorkerCmd::HideThread {
@@ -871,6 +911,26 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             )
                                                             .await;
                                                         }
+                                                        if let Ok(mute_resp) =
+                                                            crate::chat::get_mute_conversations(&s)
+                                                                .await
+                                                        {
+                                                            crate::unread::merge_mute_metadata(
+                                                                &mut list, &mute_resp,
+                                                            );
+                                                            if let Some(mute_map) =
+                                                                crate::unread::extract_mute_map(
+                                                                    &mute_resp,
+                                                                    crate::login::unix_now() as i64,
+                                                                )
+                                                            {
+                                                                let _ = gui_tx_clone.send(
+                                                                    GuiEvent::MuteSnapshotSynced(
+                                                                        mute_map,
+                                                                    ),
+                                                                );
+                                                            }
+                                                        }
                                                         let _ = gui_tx_clone
                                                             .send(GuiEvent::ThreadsUpdated(list));
                                                         ctx_clone.request_repaint();
@@ -1044,6 +1104,18 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     {
                                         let mut ps = poll_clone.lock().await;
                                         *ps = fresh_ps;
+                                    }
+                                    if let Ok(mute_resp) =
+                                        crate::chat::get_mute_conversations(&s).await
+                                    {
+                                        crate::unread::merge_mute_metadata(&mut list, &mute_resp);
+                                        if let Some(mute_map) = crate::unread::extract_mute_map(
+                                            &mute_resp,
+                                            crate::login::unix_now() as i64,
+                                        ) {
+                                            let _ = gui_tx_clone
+                                                .send(GuiEvent::MuteSnapshotSynced(mute_map));
+                                        }
                                     }
                                     let total_msgs: usize =
                                         list.iter().map(|t| t.messages.len()).sum();
@@ -1808,6 +1880,75 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
+                            if cate_id == AMI_FAT_CAT_CATE_ID {
+                                if let Some((_lbl, png_bytes, gif_bytes)) =
+                                    get_ami_fat_cat_gif(sticker_id)
+                                {
+                                    tokio::spawn(async move {
+                                        let idx = sticker_id.saturating_sub(999000);
+                                        let _ = std::fs::create_dir_all("stickers_cache");
+                                        let gif_path = std::path::PathBuf::from(format!(
+                                            "stickers_cache/ami_fat_cat_{idx:02}.gif"
+                                        ));
+                                        if !gif_path.exists() {
+                                            let _ = std::fs::write(&gif_path, gif_bytes);
+                                        }
+                                        let key = format!("stk_{cate_id}_{sticker_id}");
+                                        if let Ok(dyn_img) = image::load_from_memory(png_bytes) {
+                                            let rgba = dyn_img.to_rgba8();
+                                            let size =
+                                                [rgba.width() as usize, rgba.height() as usize];
+                                            let pixels = rgba.as_flat_samples();
+                                            let color_img =
+                                                egui::ColorImage::from_rgba_unmultiplied(
+                                                    size,
+                                                    pixels.as_slice(),
+                                                );
+                                            let _ = gui_tx_clone
+                                                .send(GuiEvent::StickerImageReady {
+                                                    key,
+                                                    image: color_img,
+                                                });
+                                        }
+                                        let s = session_clone.lock().await.clone();
+                                        let client_id = crate::chat::next_client_message_id();
+                                        let ami_tag = format!("#ami_fat_cat_{idx:02}");
+                                        match crate::chat::send_attachment(
+                                            &s, &to_id, is_group, &gif_path, &ami_tag,
+                                        )
+                                        .await
+                                        {
+                                            Ok((_resp, cm)) => {
+                                                let _ = gui_tx_clone.send(GuiEvent::StickerSent {
+                                                    client_message_id: cm.client_message_id,
+                                                    thread_id: to_id,
+                                                    msg_id: cm.id,
+                                                    sticker_id,
+                                                    cate_id,
+                                                    sticker_type,
+                                                });
+                                            }
+                                            Err(e) => {
+                                                let err_s = e.to_string();
+                                                crate::logger::log_error(
+                                                    "gui::send_ami_sticker",
+                                                    &err_s,
+                                                );
+                                                let _ = gui_tx_clone.send(GuiEvent::StickerSent {
+                                                    client_message_id: client_id.to_string(),
+                                                    thread_id: to_id,
+                                                    msg_id: format!("out_{client_id}"),
+                                                    sticker_id,
+                                                    cate_id,
+                                                    sticker_type,
+                                                });
+                                            }
+                                        }
+                                        ctx_clone.request_repaint();
+                                    });
+                                    continue;
+                                }
+                            }
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
                                 let client_id = crate::chat::next_client_message_id();
@@ -1874,6 +2015,33 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
+                            if key.starts_with("stk_99901_") {
+                                if let Some(sid) = key
+                                    .strip_prefix("stk_99901_")
+                                    .and_then(|s| s.parse::<u64>().ok())
+                                {
+                                    if let Some((_lbl, png_bytes, _gif)) = get_ami_fat_cat_gif(sid)
+                                    {
+                                        if let Ok(dyn_img) = image::load_from_memory(png_bytes) {
+                                            let rgba = dyn_img.to_rgba8();
+                                            let size =
+                                                [rgba.width() as usize, rgba.height() as usize];
+                                            let pixels = rgba.as_flat_samples();
+                                            let color_img =
+                                                egui::ColorImage::from_rgba_unmultiplied(
+                                                    size,
+                                                    pixels.as_slice(),
+                                                );
+                                            let _ = gui_tx.send(GuiEvent::StickerImageReady {
+                                                key,
+                                                image: color_img,
+                                            });
+                                            egui_ctx.request_repaint();
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
                             tokio::spawn(async move {
                                 let cache_dir = std::path::Path::new("stickers_cache");
                                 let _ = std::fs::create_dir_all(cache_dir);
@@ -2422,6 +2590,26 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         )
                                                         .await;
                                                     }
+                                                    if let Ok(mute_resp) =
+                                                        crate::chat::get_mute_conversations(&s)
+                                                            .await
+                                                    {
+                                                        crate::unread::merge_mute_metadata(
+                                                            &mut list, &mute_resp,
+                                                        );
+                                                        if let Some(mute_map) =
+                                                            crate::unread::extract_mute_map(
+                                                                &mute_resp,
+                                                                crate::login::unix_now() as i64,
+                                                            )
+                                                        {
+                                                            let _ = gui_tx_clone.send(
+                                                                GuiEvent::MuteSnapshotSynced(
+                                                                    mute_map,
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
                                                     let _ = gui_tx_clone
                                                         .send(GuiEvent::ThreadsUpdated(list));
                                                     ctx_clone.request_repaint();
@@ -2546,6 +2734,80 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 ctx_clone.request_repaint();
                             });
                         }
+                        WorkerCmd::SyncPhoneMessages { mut threads } => {
+                            use std::sync::atomic::Ordering;
+                            if crate::history_sync::PHONE_SYNC_RUNNING.swap(true, Ordering::SeqCst)
+                            {
+                                continue;
+                            }
+                            crate::history_sync::PHONE_SYNC_CANCEL.store(false, Ordering::Relaxed);
+                            let session_clone = session.clone();
+                            let poll_clone = poll_state.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let s = session_clone.lock().await.clone();
+                                let gui_tx_prog = gui_tx_clone.clone();
+                                let ctx_prog = ctx_clone.clone();
+                                let res = crate::history_sync::sync_phone_messages(
+                                    &s,
+                                    &poll_clone,
+                                    &mut threads,
+                                    move |progress, status| {
+                                        let _ = gui_tx_prog.send(GuiEvent::PhoneSyncProgress {
+                                            progress,
+                                            status,
+                                        });
+                                        ctx_prog.request_repaint();
+                                    },
+                                )
+                                .await;
+                                let cancelled = crate::history_sync::PHONE_SYNC_CANCEL
+                                    .load(Ordering::Relaxed);
+                                match res {
+                                    Ok((added, active_threads)) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::PhoneSyncFinished {
+                                            threads,
+                                            added,
+                                            active_threads,
+                                            cancelled,
+                                            error: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::PhoneSyncFinished {
+                                            threads,
+                                            added: 0,
+                                            active_threads: 0,
+                                            cancelled,
+                                            error: Some(e.to_string()),
+                                        });
+                                    }
+                                }
+                                ctx_clone.request_repaint();
+                                crate::history_sync::PHONE_SYNC_RUNNING
+                                    .store(false, Ordering::SeqCst);
+                            });
+                        }
+                        WorkerCmd::SetProxy { proxy_url } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let res = {
+                                    let mut s = session_clone.lock().await;
+                                    let r = s
+                                        .set_proxy(Some(&proxy_url))
+                                        .map_err(|e| e.to_string());
+                                    if r.is_ok() {
+                                        let _ = s.save_to_file("session.json");
+                                    }
+                                    r
+                                };
+                                let _ = gui_tx_clone.send(GuiEvent::ProxyUpdated(res));
+                                ctx_clone.request_repaint();
+                            });
+                        }
                     }
                 }
             });
@@ -2581,8 +2843,7 @@ pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, S
     }
 
     if rel_json.is_none() {
-        let list_url =
-            format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=5");
+        let list_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=5");
         if let Ok(resp) = client
             .get(&list_url)
             .header("Accept", "application/vnd.github+json")
@@ -2639,8 +2900,7 @@ pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, S
         if let (Some(ref s_url), Some(ref b_name)) = (&meta.sha256sums_url, &meta.asset_name) {
             if let Ok(resp) = client.get(s_url).send().await {
                 if let Ok(txt) = resp.text().await {
-                    meta.expected_sha256 =
-                        crate::updater::parse_sha256sums_for_asset(&txt, b_name);
+                    meta.expected_sha256 = crate::updater::parse_sha256sums_for_asset(&txt, b_name);
                 }
             }
         }
@@ -2693,10 +2953,9 @@ async fn apply_github_release_update(
     .await?;
 
     let name_low = asset_name.to_lowercase();
-    let is_portable_bin = (cfg!(target_os = "windows")
-        && name_low.ends_with(".exe")
-        && !name_low.contains("setup"))
-        || (cfg!(target_os = "linux") && name_low.ends_with(".appimage"));
+    let is_portable_bin =
+        (cfg!(target_os = "windows") && name_low.ends_with(".exe") && !name_low.contains("setup"))
+            || (cfg!(target_os = "linux") && name_low.ends_with(".appimage"));
 
     if is_portable_bin {
         if let Ok(exe_path) = std::env::current_exe() {
@@ -2711,7 +2970,11 @@ async fn apply_github_release_update(
                     if std::fs::rename(&exe_path, &old_path).is_ok() {
                         if std::fs::rename(&new_path, &exe_path).is_ok() {
                             let args: Vec<String> = std::env::args().skip(1).collect();
-                            if std::process::Command::new(&exe_path).args(&args).spawn().is_ok() {
+                            if std::process::Command::new(&exe_path)
+                                .args(&args)
+                                .spawn()
+                                .is_ok()
+                            {
                                 return Ok(true);
                             }
                             let _ = std::fs::rename(&old_path, &exe_path);
@@ -2788,4 +3051,3 @@ async fn apply_github_release_update(
     )?;
     Ok(false)
 }
-

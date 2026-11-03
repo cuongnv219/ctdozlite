@@ -220,19 +220,39 @@ pub fn merge_read_points(threads: &mut [Thread], data: &Value) {
     }
 }
 
+fn unwrap_mute_payload<'a>(data: &'a Value, decoded: &'a mut Option<Value>) -> &'a Value {
+    let raw = data.get("data").unwrap_or(data);
+    if let Some(text) = raw.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+            *decoded = Some(parsed);
+            if let Some(ref d) = *decoded {
+                return d.get("data").unwrap_or(d);
+            }
+        }
+    }
+    raw
+}
+
 /// Complete read-only mute snapshots use mode 1 and duration -1 for indefinite mute.
 pub fn merge_mute_metadata(threads: &mut [Thread], data: &Value) {
+    let mut decoded = None;
+    let payload = unwrap_mute_payload(data, &mut decoded);
     let (Some(peers), Some(groups)) = (
-        data.get("chatEntries").and_then(Value::as_array),
-        data.get("groupChatEntries").and_then(Value::as_array),
+        payload.get("chatEntries").and_then(Value::as_array),
+        payload.get("groupChatEntries").and_then(Value::as_array),
     ) else {
         return;
     };
     for thread in threads {
         let entries = if thread.is_group { groups } else { peers };
+        let clean_tid = thread
+            .id
+            .trim_start_matches("group_")
+            .trim_start_matches('g')
+            .trim_start_matches('G');
         let entry = entries
             .iter()
-            .find(|e| string(e, "id").is_some_and(|id| id == thread.id.trim_start_matches('g')));
+            .find(|e| string(e, "id").is_some_and(|id| id.trim_start_matches('g') == clean_tid));
         let mode = entry
             .and_then(|e| e.get("muteMode"))
             .and_then(Value::as_i64);
@@ -242,22 +262,85 @@ pub fn merge_mute_metadata(threads: &mut [Thread], data: &Value) {
         let duration = entry
             .and_then(|e| e.get("duration"))
             .and_then(Value::as_i64);
-        let until = entry
-            .and_then(|e| e.get("startTime"))
-            .and_then(Value::as_i64)
-            .zip(duration)
-            .and_then(|(start, duration)| {
-                if duration >= 0 {
-                    start.checked_add(duration)
-                } else {
-                    None
-                }
-            });
-        thread.unread.muted = mode == Some(1);
+        let start = entry.and_then(|e| {
+            e.get("startTime")
+                .or_else(|| e.get("systemTime"))
+                .and_then(Value::as_i64)
+        });
+        let until = start.zip(duration).and_then(|(start, duration)| {
+            if duration >= 0 {
+                start.checked_add(duration)
+            } else {
+                None
+            }
+        });
+        let is_muted_mode = match mode {
+            Some(m) => m == 1,
+            None => entry.is_some() && duration.is_some_and(|d| d != 0),
+        };
+        thread.unread.muted = is_muted_mode;
         thread.unread.muted_until = until;
         thread.unread.settings_fresh = true;
         thread.unread.fresh = true;
+        thread.presentation.muted = thread.unread.is_muted();
     }
+}
+
+/// Extract an authoritative `thread_id -> until_unix` map (`-1` for indefinite mute) from a
+/// `/api/social/profile/getmute` payload so `AppSettings::muted_threads` stays synchronized
+/// with Official Zalo PC (#67).
+pub fn extract_mute_map(
+    data: &Value,
+    now_unix: i64,
+) -> Option<std::collections::HashMap<String, i64>> {
+    let mut decoded = None;
+    let payload = unwrap_mute_payload(data, &mut decoded);
+    let (Some(peers), Some(groups)) = (
+        payload.get("chatEntries").and_then(Value::as_array),
+        payload.get("groupChatEntries").and_then(Value::as_array),
+    ) else {
+        return None;
+    };
+    let mut map = std::collections::HashMap::new();
+    for (entries, is_group) in [(peers, false), (groups, true)] {
+        for entry in entries {
+            let Some(raw_id) = string(entry, "id").filter(|s| !s.is_empty() && s != "0") else {
+                continue;
+            };
+            let mode = entry.get("muteMode").and_then(Value::as_i64).unwrap_or(1);
+            if mode != 1 {
+                continue;
+            }
+            let duration = entry.get("duration").and_then(Value::as_i64).unwrap_or(-1);
+            if duration == 0 {
+                continue;
+            }
+            let start = entry
+                .get("startTime")
+                .or_else(|| entry.get("systemTime"))
+                .and_then(Value::as_i64)
+                .unwrap_or(now_unix);
+            let until = if duration < 0 {
+                -1
+            } else {
+                let exp = start.saturating_add(duration);
+                if exp <= now_unix {
+                    continue;
+                }
+                exp
+            };
+            let clean = raw_id
+                .trim_start_matches("group_")
+                .trim_start_matches('g')
+                .trim_start_matches('G');
+            if is_group {
+                map.insert(format!("g{clean}"), until);
+            } else {
+                map.insert(clean.to_string(), until);
+            }
+        }
+    }
+    Some(map)
 }
 
 #[cfg(test)]
@@ -335,6 +418,51 @@ mod tests {
             &serde_json::json!({"chatEntries":[],"groupChatEntries":[]}),
         );
         assert!(!threads[0].unread.muted);
+        assert!(!threads[0].presentation.muted);
+    }
+
+    #[test]
+    fn unread_mute_snapshot_unwraps_data_envelope_and_extracts_mute_map() {
+        let mut threads = vec![
+            Thread {
+                presentation: Default::default(),
+                id: "12345".into(),
+                name: String::new(),
+                preview: String::new(),
+                time: String::new(),
+                avatar: None,
+                is_group: false,
+                messages: vec![],
+                unread: Default::default(),
+            },
+            Thread {
+                presentation: Default::default(),
+                id: "g999888".into(),
+                name: String::new(),
+                preview: String::new(),
+                time: String::new(),
+                avatar: None,
+                is_group: true,
+                messages: vec![],
+                unread: Default::default(),
+            },
+        ];
+        let payload = serde_json::json!({
+            "error_code": 0,
+            "data": {
+                "chatEntries": [{"id": "12345", "muteMode": 1, "duration": -1, "startTime": 1700000000}],
+                "groupChatEntries": [{"id": "999888", "muteMode": 1, "duration": 3600, "startTime": 4000000000_i64}]
+            }
+        });
+        merge_mute_metadata(&mut threads, &payload);
+        assert!(threads[0].unread.is_muted());
+        assert!(threads[0].presentation.muted);
+        assert!(threads[1].unread.is_muted());
+        assert!(threads[1].presentation.muted);
+
+        let map = extract_mute_map(&payload, 1700000100).expect("valid mute snapshot");
+        assert_eq!(map.get("12345"), Some(&-1));
+        assert_eq!(map.get("g999888"), Some(&(4000000000_i64 + 3600)));
     }
     #[test]
     fn unread_zero_and_subchat_cursors_do_not_fabricate_read_points() {
