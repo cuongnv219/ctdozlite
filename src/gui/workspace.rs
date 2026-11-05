@@ -132,6 +132,42 @@ impl ZaloGuiApp {
                             pal.text_secondary
                         },
                     );
+                    let nav_unread: usize = self.unread_counts.values().sum();
+                    if nav_unread > 0 {
+                        let badge_txt = if nav_unread > 99 {
+                            "99+".to_string()
+                        } else {
+                            nav_unread.to_string()
+                        };
+                        let bw = if badge_txt.len() >= 3 {
+                            24.0
+                        } else if badge_txt.len() == 2 {
+                            19.0
+                        } else {
+                            15.0
+                        };
+                        let badge_rect = Rect::from_center_size(
+                            Pos2::new(nav1_rect.right() - 6.0, nav1_rect.top() + 7.0),
+                            Vec2::new(bw, 15.0),
+                        );
+                        ui.painter().rect_filled(
+                            badge_rect,
+                            Rounding::same(7.5),
+                            Color32::from_rgb(239, 56, 56),
+                        );
+                        ui.painter().rect_stroke(
+                            badge_rect,
+                            Rounding::same(7.5),
+                            Stroke::new(1.2_f32, pal.bg_app),
+                        );
+                        ui.painter().text(
+                            badge_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            badge_txt,
+                            FontId::proportional(9.8),
+                            Color32::WHITE,
+                        );
+                    }
                     if nav1_resp
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .on_hover_text("Tin nhắn")
@@ -316,16 +352,21 @@ impl ZaloGuiApp {
                     if sync_resp
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .on_hover_text(format!(
-                            "Trạng thái: {} · {} hội thoại (Bấm để làm mới hội thoại)",
-                            self.status_msg,
-                            self.threads.len()
+                            "📲 Đồng bộ tin nhắn từ điện thoại & Làm mới (Bấm để đồng bộ) · {}",
+                            self.status_msg
                         ))
                         .clicked()
                     {
+                        self.phone_sync_progress = 0.05;
+                        self.phone_sync_status = "📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…".into();
+                        let threads = self.threads.clone();
                         if let Some(tx) = WORKER_TX.get() {
-                            let _ = tx.send(WorkerCmd::RefreshThreadsManual);
+                            let _ = tx.send(WorkerCmd::SyncPhoneMessages {
+                                threads,
+                                send_phone_prompt: true,
+                            });
                         }
-                        self.status_msg = "⏳ Đang làm mới danh sách hội thoại…".into();
+                        self.show_toast("📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…");
                     }
 
                     ui.add_space(6.0);
@@ -1593,6 +1634,8 @@ impl ZaloGuiApp {
                     if self.selected_thread_index != resolved_idx {
                         self.replying_to = None;
                         self.filter_starred_only = false;
+                        self.force_scroll_to_bottom = true;
+                        self.chat_render_window = (tid.clone(), CHAT_RENDER_STEP);
                     }
                     self.selected_thread_index = resolved_idx;
                     if self.unread_counts.remove(&tid).is_some() {
@@ -1604,12 +1647,33 @@ impl ZaloGuiApp {
                         };
                         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
                     }
+                    if !self.settings.block_seen {
+                        let last_mid = self
+                            .threads
+                            .get(resolved_idx)
+                            .and_then(|t| t.messages.last())
+                            .map(|m| m.id.clone())
+                            .unwrap_or_default();
+                        if !last_mid.is_empty() {
+                            if let Some(tx) = WORKER_TX.get() {
+                                let _ = tx.send(WorkerCmd::SendSeen {
+                                    thread_id: tid.clone(),
+                                    is_group,
+                                    last_msg_id: last_mid,
+                                });
+                            }
+                        }
+                    }
                     let is_cloud = self
                         .threads
                         .get(resolved_idx)
                         .map(|t| t.name.contains("Cloud của tôi"))
                         .unwrap_or(false);
-                    if is_group || is_cloud {
+                    let needs_history = self
+                        .threads
+                        .get(resolved_idx)
+                        .map_or(true, |t| t.messages.is_empty());
+                    if (is_group || is_cloud) && needs_history {
                         if let Some(tx) = WORKER_TX.get() {
                             let _ = tx.send(WorkerCmd::LoadGroupHistory {
                                 group_id: tid,
@@ -2498,6 +2562,8 @@ impl ZaloGuiApp {
                                             is_incoming_ringing: false,
                                             error_code: None,
                                             error_reason: None,
+                                            speaker_view: false,
+                                            pinned_tile_idx: 0,
                                         });
                                         if let Some(tx) = WORKER_TX.get() {
                                             let _ = tx.send(WorkerCmd::StartCall {
@@ -2549,6 +2615,8 @@ impl ZaloGuiApp {
                                             is_incoming_ringing: false,
                                             error_code: None,
                                             error_reason: None,
+                                            speaker_view: false,
+                                            pinned_tile_idx: 0,
                                         });
                                         if let Some(tx) = WORKER_TX.get() {
                                             let _ = tx.send(WorkerCmd::StartCall {
@@ -3170,7 +3238,7 @@ impl ZaloGuiApp {
                         });
                     let mut pending_action: Option<(usize, BubbleAction)> = None;
                     let mut load_older_clicked = false;
-                    // Render only the newest `render_limit` bubbles: egui lays out every bubble
+                    let mut custom_toast: Option<String> = None;
                     // each frame, so a 2 000-message group re-laid out 2 000 galleys per repaint.
                     // "Tải thêm tin nhắn cũ" widens the window before asking the server.
                     if self.chat_render_window.0 != thread_id {
@@ -3225,7 +3293,7 @@ impl ZaloGuiApp {
                         - composer_extra_h
                         - picker_reserve)
                         .max(100.0);
-                    egui::ScrollArea::vertical()
+                    let chat_scroll_out = egui::ScrollArea::vertical()
                         .id_salt(Id::new(("chat_scroll", &thread_id)))
                         .max_height(msg_area_height)
                         .auto_shrink([false, false])
@@ -3252,43 +3320,60 @@ impl ZaloGuiApp {
                                             if !self.in_chat_search_open
                                                 && !self.filter_starred_only
                                             {
-                                                ui.vertical_centered(|ui| {
-                                                    let hist_btn = egui::Button::new(
-                                                        RichText::new(format!(
-                                                            "{} Tải thêm tin nhắn cũ",
-                                                            lucide::REFRESH
-                                                        ))
-                                                        .size(11.5)
-                                                        .color(pal.text_secondary),
-                                                    )
-                                                    .fill(pal.bg_elevated)
-                                                    .stroke(Stroke::new(1.0_f32, pal.border))
-                                                    .rounding(Rounding::same(12.0));
-                                                    if ui
-                                                        .add(hist_btn)
-                                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                                        .on_hover_text(
-                                                            "Đồng bộ thêm lịch sử tin nhắn cũ từ máy chủ Zalo",
+                                                let has_more_in_memory = thread.messages.len() > render_limit;
+                                                let reached_start = self.history_reached_start.contains(&thread_id);
+
+                                                if reached_start && !has_more_in_memory {
+                                                    ui.vertical_centered(|ui| {
+                                                        ui.add_space(8.0);
+                                                        ui.label(
+                                                            RichText::new("— Đây là tin nhắn đầu tiên của cuộc trò chuyện —")
+                                                                .size(11.5)
+                                                                .color(pal.text_muted),
+                                                        );
+                                                        ui.add_space(8.0);
+                                                    });
+                                                } else {
+                                                    ui.vertical_centered(|ui| {
+                                                        let hist_btn = egui::Button::new(
+                                                            RichText::new(format!(
+                                                                "{} Tải thêm tin nhắn cũ",
+                                                                lucide::REFRESH
+                                                            ))
+                                                            .size(11.5)
+                                                            .color(pal.text_secondary),
                                                         )
-                                                        .clicked()
-                                                    {
-                                                        if thread.messages.len() > render_limit {
-                                                            widen_window = true;
-                                                        } else {
-                                                            if let Some(tx) = WORKER_TX.get() {
-                                                                let _ = tx.send(
-                                                                    WorkerCmd::LoadGroupHistory {
-                                                                        group_id: thread_id.clone(),
-                                                                        is_group,
-                                                                        have: thread.messages.len(),
-                                                                    },
-                                                                );
+                                                        .fill(pal.bg_elevated)
+                                                        .stroke(Stroke::new(1.0_f32, pal.border))
+                                                        .rounding(Rounding::same(12.0));
+                                                        if ui
+                                                            .add(hist_btn)
+                                                            .on_hover_cursor(CursorIcon::PointingHand)
+                                                            .on_hover_text(
+                                                                "Đồng bộ thêm lịch sử tin nhắn cũ từ máy chủ Zalo",
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            if has_more_in_memory {
+                                                                widen_window = true;
+                                                                let new_count = (render_limit + CHAT_RENDER_STEP).min(thread.messages.len());
+                                                                custom_toast = Some(format!("Đã hiển thị thêm tin nhắn cũ ({new_count}/{})", thread.messages.len()));
+                                                            } else {
+                                                                if let Some(tx) = WORKER_TX.get() {
+                                                                    let _ = tx.send(
+                                                                        WorkerCmd::LoadGroupHistory {
+                                                                            group_id: thread_id.clone(),
+                                                                            is_group,
+                                                                            have: thread.messages.len(),
+                                                                        },
+                                                                    );
+                                                                }
+                                                                load_older_clicked = true;
                                                             }
-                                                            load_older_clicked = true;
                                                         }
-                                                    }
-                                                    ui.add_space(6.0);
-                                                });
+                                                        ui.add_space(6.0);
+                                                    });
+                                                }
                                             }
                                             let only_starred = self.filter_starred_only;
                                             let in_chat_q = if self.in_chat_search_open {
@@ -3422,10 +3507,62 @@ impl ZaloGuiApp {
                                                     jump_scrolled |= jump_scroll_pending;
                                                 }
                                             }
+                                            let (bottom_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 1.0), Sense::hover());
+                                            if self.force_scroll_to_bottom {
+                                                ui.scroll_to_rect(bottom_rect, Some(Align::BOTTOM));
+                                                self.force_scroll_to_bottom = false;
+                                            }
                                         }
                                     }
                                 });
                         });
+
+                    let dist_from_bottom = (chat_scroll_out.content_size.y
+                        - (chat_scroll_out.state.offset.y + chat_scroll_out.inner_rect.height()))
+                        .max(0.0);
+                    if dist_from_bottom > 180.0 {
+                        let btn_size = 36.0;
+                        let btn_pos = Pos2::new(
+                            chat_scroll_out.inner_rect.right() - btn_size - 22.0,
+                            chat_scroll_out.inner_rect.bottom() - btn_size - 16.0,
+                        );
+                        egui::Area::new(Id::new(("auto_scroll_btn", &thread_id)))
+                            .order(egui::Order::Middle)
+                            .fixed_pos(btn_pos)
+                            .show(ctx, |ui| {
+                                egui::Frame::none()
+                                    .fill(pal.bg_elevated)
+                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                    .rounding(Rounding::same(btn_size / 2.0))
+                                    .shadow(egui::epaint::Shadow {
+                                        offset: Vec2::new(0.0, 2.0),
+                                        blur: 8.0,
+                                        spread: 0.0,
+                                        color: Color32::from_black_alpha(if pal.is_dark { 80 } else { 35 }),
+                                    })
+                                    .show(ui, |ui| {
+                                        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(btn_size), Sense::click());
+                                        if resp.hovered() {
+                                            ui.painter().circle_filled(rect.center(), btn_size / 2.0, pal.bg_hover);
+                                        }
+                                        draw_lucide_icon(
+                                            ui.painter(),
+                                            rect.center(),
+                                            lucide::CHEVRON_DOWN,
+                                            16.0,
+                                            if resp.hovered() { pal.primary_hover } else { pal.text_primary },
+                                        );
+                                        if resp
+                                            .on_hover_cursor(CursorIcon::PointingHand)
+                                            .on_hover_text("Cuộn xuống tin nhắn mới nhất")
+                                            .clicked()
+                                        {
+                                            self.force_scroll_to_bottom = true;
+                                            ui.ctx().request_repaint();
+                                        }
+                                    });
+                            });
+                    }
                     if jump_scrolled {
                         if let Some(jump) = &mut self.quote_jump {
                             jump.scroll_pending = false;
@@ -3434,10 +3571,11 @@ impl ZaloGuiApp {
                     if widen_window {
                         self.chat_render_window.1 += CHAT_RENDER_STEP;
                     }
-                    if load_older_clicked {
-                        self.show_toast("Đang tải thêm tin nhắn cũ từ máy chủ Zalo…");
+                    if let Some(msg) = custom_toast {
+                        self.show_toast(msg);
+                    } else if load_older_clicked {
+                        self.show_toast("Đang kiểm tra tin nhắn cũ từ máy chủ Zalo…");
                     }
-
                     if let Some((idx, action)) = pending_action {
                         let target = self
                             .threads
@@ -3538,6 +3676,8 @@ impl ZaloGuiApp {
                                         is_incoming_ringing: false,
                                         error_code: None,
                                         error_reason: None,
+                                        speaker_view: false,
+                                        pinned_tile_idx: 0,
                                     });
                                     if let Some(tx) = WORKER_TX.get() {
                                         let _ = tx.send(WorkerCmd::StartCall {
@@ -4077,6 +4217,34 @@ impl ZaloGuiApp {
                                                     .desired_width(input_w),
                                                 )
                                             };
+                                            if resp.changed()
+                                                && !self.input_message.trim().is_empty()
+                                                && !self.settings.block_typing
+                                            {
+                                                let should_emit = self
+                                                    .last_typing_sent_at
+                                                    .as_ref()
+                                                    .map(|(last_tid, t)| {
+                                                        last_tid != &thread_id
+                                                            || t.elapsed()
+                                                                >= std::time::Duration::from_millis(
+                                                                    3200,
+                                                                )
+                                                    })
+                                                    .unwrap_or(true);
+                                                if should_emit {
+                                                    self.last_typing_sent_at = Some((
+                                                        thread_id.clone(),
+                                                        std::time::Instant::now(),
+                                                    ));
+                                                    if let Some(tx) = WORKER_TX.get() {
+                                                        let _ = tx.send(WorkerCmd::SendTyping {
+                                                            thread_id: thread_id.clone(),
+                                                            is_group,
+                                                        });
+                                                    }
+                                                }
+                                            }
 
                                             // Schedule Send Button (`🕒`)
                                             let (sched_rect, sched_resp) = ui.allocate_exact_size(

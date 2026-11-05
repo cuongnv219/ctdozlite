@@ -1,6 +1,6 @@
 [package]
 name = "ctdozlite"
-version = "0.0.7"
+version = "0.0.8"
 edition = "2021"
 authors = ["TIPC1110 <tienichpc1110@gmail.com>"]
 description = "Lightweight, high-performance native Zalo PC client written in Rust (zero Node.js, zero Electron)"
@@ -35,6 +35,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 cpal = "0.15"
 opus = "0.3"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+rsa = "0.9.10"
+lzma-rs = "0.3.0"
+zstd = "0.14.3"
 
 [lib]
 name = "zalo_rust"
@@ -64,6 +67,10 @@ path = "src/bin/test_qr_tag.rs"
 name = "call_probe"
 path = "src/bin/call_probe.rs"
 
+[[bin]]
+name = "view_feed"
+path = "src/bin/view_feed.rs"
+
 [package.metadata.deb]
 name = "ctdozlite"
 maintainer = "TIPC1110 <tienichpc1110@gmail.com>"
@@ -91,3 +98,9 @@ winit = { path = "vendor/winit" }
 # Inno Setup installers do not trigger Microsoft Defender's stripped-PE ML heuristics (#58).
 # Linux release jobs run `strip` explicitly in CI.
 strip = "none"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

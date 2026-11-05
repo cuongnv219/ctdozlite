@@ -60,6 +60,45 @@ pub const CMD_PULL_MSG_518: u16 = 518;
 pub const CMD_HAS_MSG: u16 = 533;
 pub const CMD_PUSH_MISS_MSG: u16 = 534;
 pub const CMD_GET_MSG: u16 = 570;
+pub const CMD_SYNC_REQUEST: u16 = 590;
+pub const CMD_SYNC_ACK_DELETE: u16 = 591;
+pub const CMD_SYNC_MOBILE_WAKE_UP: u16 = 592;
+
+static WS_OUTBOUND_TX: std::sync::Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>> =
+    std::sync::Mutex::new(None);
+
+/// Send a raw encoded frame over the active `zpw_ws` WebSocket if connected.
+pub fn send_ws_frame(cmd: u16, sub_cmd: u8, version: u8, data: Option<&Value>) -> bool {
+    let frame = encode_frame(cmd, sub_cmd, version, data);
+    if let Ok(guard) = WS_OUTBOUND_TX.lock() {
+        if let Some(ref tx) = *guard {
+            return tx.send(frame).is_ok();
+        }
+    }
+    false
+}
+
+/// Emit `SYNC_MESSAGE.REQUEST_MOBILE_WAKE_UP` (`cmd 592`, `subCmd 0`) over the live WebSocket
+/// to wake up the user's phone Zalo client for cross-device message sync.
+pub fn send_mobile_wakeup(sync_id: &str) -> bool {
+    let req_id = format!("req_592_{}", now_ms());
+    let body = json!({
+        "reqId": req_id,
+        "syncId": sync_id,
+        "toDevice": 0
+    });
+    send_ws_frame(CMD_SYNC_MOBILE_WAKE_UP, 0, 1, Some(&body))
+}
+
+/// Emit `SYNC_MESSAGE.REQUEST` (`cmd 590`, `subCmd 0`) over the live WebSocket.
+pub fn send_sync_message_ws_request(payload: &Value) -> bool {
+    let req_id = format!("req_590_{}", now_ms());
+    let body = json!({
+        "reqId": req_id,
+        "data": payload
+    });
+    send_ws_frame(CMD_SYNC_REQUEST, 0, 1, Some(&body))
+}
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                   (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36";
 
@@ -421,6 +460,10 @@ async fn run_once(
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping.tick().await; // consume the immediate first tick
 
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    if let Ok(mut g) = WS_OUTBOUND_TX.lock() {
+        *g = Some(out_tx);
+    }
     loop {
         tokio::select! {
             _ = ping.tick() => {
@@ -429,6 +472,12 @@ async fn run_once(
                     let f = encode_frame(CMD_PING, SUB_KEEP_CONNECTION, 1, Some(&body));
                     ws.send(Message::Binary(f.into())).await?;
                     trace("-> ping");
+                }
+            }
+            Some(frame) = out_rx.recv() => {
+                if authed {
+                    ws.send(Message::Binary(frame.into())).await?;
+                    trace("-> outbound ws frame");
                 }
             }
             incoming = ws.next() => {

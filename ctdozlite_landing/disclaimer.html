@@ -212,51 +212,54 @@
 
 <main>
   <div class="wrap">
-    <div class="meta-tag">Thông tin pháp lý & Phạm vi dự án</div>
+    <div class="meta-tag">Thông tin pháp lý &amp; Phạm vi dự án phi thương mại</div>
     <h1>Tuyên bố miễn trừ trách nhiệm (Disclaimer)</h1>
-    <div class="updated">Cập nhật lần cuối: 31/10/2026</div>
+    <div class="updated">Cập nhật lần cuối: 04/11/2026 · Mục đích học thuật &amp; Tương thích giao thức mở</div>
 
     <div class="warning-box">
-      <strong>Lưu ý quan trọng:</strong> ctdozlite là một dự án nghiên cứu kỹ thuật mã nguồn mở độc lập (clean-room implementation), <strong>hoàn toàn KHÔNG liên kết, được tài trợ, ủy quyền hay chứng thực bởi VNG Corporation hoặc Zalo</strong>.
+      <strong>Lưu ý quan trọng:</strong> ctdozlite là một dự án nghiên cứu kỹ thuật mã nguồn mở độc lập (Clean-Room Protocol Research), <strong>hoàn toàn KHÔNG liên kết, không thuộc quyền sở hữu, không được tài trợ, ủy quyền hay chứng thực dưới bất kỳ hình thức nào bởi VNG Corporation hoặc Zalo</strong>. Dự án hoàn toàn phi thương mại (không bán phần mềm, không kinh doanh dịch vụ, không hiển thị quảng cáo và không nhận thù lao).
     </div>
 
-    <h2>1. Bản quyền nhãn hiệu & Thương hiệu</h2>
+    <h2>1. Quyền sở hữu trí tuệ, Nhãn hiệu &amp; Tham chiếu tương thích (Nominative Fair Use)</h2>
     <p>
-      Tên gọi "Zalo", logo Zalo và mọi nhãn hiệu thương mại liên quan thuộc quyền sở hữu trí tuệ độc quyền của Công ty Cổ phần VNG (VNG Corporation) tại Việt Nam và các quốc gia khác.
+      Tên gọi "Zalo", logo Zalo và mọi nhãn hiệu, biểu trưng thương mại liên quan thuộc quyền sở hữu trí tuệ độc quyền của Công ty Cổ phần VNG (VNG Corporation) tại Việt Nam và các quốc gia khác.
     </p>
     <p>
-      Mọi sự xuất hiện của từ khóa "Zalo" trong mã nguồn, tài liệu hướng dẫn hoặc trên trang web này chỉ nhằm mục đích tham chiếu kỹ thuật và mô tả khả năng tương thích của phần mềm, hoàn toàn không hàm ý quyền sở hữu hay quan hệ đối tác thương mại.
+      Mọi sự xuất hiện của từ khóa "Zalo" trong mã nguồn, tài liệu hướng dẫn kỹ thuật hoặc trên trang web này chỉ nhằm mục đích <strong>tham chiếu kỹ thuật mô tả khả năng tương thích của phần mềm</strong> (Nominative Fair Use / Mục đích tương thích hệ thống theo quy định của Luật Sở hữu trí tuệ Việt Nam). Dự án không nhận quyền sở hữu đối với bất kỳ nhãn hiệu nào của bên thứ ba.
     </p>
 
-    <h2>2. Bản chất nghiên cứu kỹ thuật độc lập</h2>
+    <h2>2. Bản chất nghiên cứu kỹ thuật độc lập (Clean-Room Implementation)</h2>
     <p>
-      ctdozlite được xây dựng theo phương pháp Clean-Room Reverse Engineering trên nền tảng Rust nhằm nghiên cứu tối ưu hóa hiệu năng, giảm tải tài nguyên bộ nhớ cho người dùng máy tính và cung cấp giao diện dòng lệnh cho môi trường máy chủ.
+      ctdozlite được nhóm phát triển xây dựng hoàn toàn độc lập bằng ngôn ngữ lập trình Rust nhằm mục đích học thuật, nghiên cứu kiến trúc phần mềm hệ thống hiệu năng cao và cung cấp giao diện dòng lệnh cho môi trường máy chủ:
     </p>
     <ul>
-      <li>Mã nguồn ctdozlite không tái sử dụng hay trích xuất bất kỳ tệp nhị phân gốc nào của Zalo PC.</li>
-      <li>Không bẻ khóa để vượt tường phí, không can thiệp gian lận hay phá hoại hạ tầng dịch vụ.</li>
+      <li>Mã nguồn ctdozlite <strong>không</strong> sao chép, trích xuất hay tái phân phối bất kỳ tệp nhị phân gốc (binary), tệp thư viện liên kết động (.dll, .so, .dylib) hay mã máy nào của Zalo PC.</li>
+      <li>Ứng dụng <strong>không</strong> can thiệp bẻ khóa tính năng, không vượt qua bất kỳ cơ chế tường phí (paywall) nào và không làm gián đoạn hay phá hoại hạ tầng máy chủ của nhà cung cấp dịch vụ mạng.</li>
+      <li>Giao tiếp mạng của ctdozlite dựa trên giao thức mở chuẩn HTTPS và WebSocket tương tự như một trình duyệt web tiêu chuẩn (WebPC Client), sử dụng phiên đăng nhập và định danh hợp lệ của chính người dùng.</li>
     </ul>
 
     <h2>3. Miễn trừ bảo hành (AS-IS)</h2>
     <p>
-      Phần mềm được cung cấp theo giấy phép mã nguồn mở MIT hoặc Apache-2.0 trên nguyên tắc <strong>"NGUYÊN TRẠNG" (AS-IS)</strong>, không đi kèm bất kỳ bảo đảm ngụ ý hay tường minh nào, bao gồm nhưng không giới hạn ở:
+      Phần mềm được cung cấp theo giấy phép mã nguồn mở MIT hoặc Apache-2.0 trên nguyên tắc <strong>"NGUYÊN TRẠNG" (AS-IS)</strong>, không đi kèm bất kỳ cam kết hay bảo đảm nào dù ngụ ý hay minh thị, bao gồm nhưng không giới hạn ở:
     </p>
     <ul>
-      <li>Khả năng tương thích vĩnh viễn với các thay đổi giao thức từ phía máy chủ Zalo trong tương lai.</li>
-      <li>Tính liên tục, không gián đoạn hoặc không có lỗi trong quá trình gửi, nhận tin nhắn hoặc gọi thoại.</li>
-      <li>Bảo đảm an toàn chống lại việc tài khoản của bạn bị server áp dụng các chính sách hạn chế tạm thời nếu server nhận diện hành vi bất thường từ client không chính thức.</li>
+      <li>Khả năng tương thích liên tục hoặc vĩnh viễn với các thay đổi giao thức, định dạng gói tin từ phía máy chủ trong tương lai.</li>
+      <li>Tính liên tục, không gián đoạn trong việc gửi nhận tin nhắn hoặc truyền tải tín hiệu âm thanh / hình ảnh cuộc gọi.</li>
+      <li>Bảo đảm an toàn chống lại việc tài khoản của bạn bị hệ thống bảo mật tự động của máy chủ áp dụng các biện pháp kiểm soát hoặc hạn chế tính năng khi phát hiện kết nối từ client của bên thứ ba.</li>
     </ul>
 
     <h2>4. Giới hạn trách nhiệm pháp lý</h2>
     <p>
-      Trong mọi trường hợp, nhóm tác giả (CTDOTEAM) và các cộng tác viên phát triển mã nguồn mở sẽ không chịu trách nhiệm pháp lý đối với bất kỳ thiệt hại trực tiếp, gián tiếp, ngẫu nhiên hoặc do hậu quả phát sinh từ việc cài đặt, biên dịch, sử dụng hoặc không thể sử dụng phần mềm này (bao gồm mất mát dữ liệu tin nhắn, gián đoạn kinh doanh, hoặc ảnh hưởng tới tài khoản của bạn).
+      Trong mọi trường hợp được pháp luật cho phép, nhóm tác giả và các cộng tác viên đóng góp mã nguồn mở sẽ không chịu trách nhiệm đối với bất kỳ thiệt hại trực tiếp, gián tiếp, ngẫu nhiên hoặc phái sinh nào (bao gồm việc mất mát dữ liệu tin nhắn, gián đoạn công việc, hoặc các ảnh hưởng liên quan đến tài khoản cá nhân của bạn) phát sinh từ việc tải về, biên dịch hoặc vận hành phần mềm này.
     </p>
     <p>
-      Người dùng tự chịu toàn bộ rủi ro và trách nhiệm khi quyết định biên dịch và vận hành phần mềm trên máy tính cá nhân của mình.
+      Người dùng tự chịu toàn bộ rủi ro và trách nhiệm pháp lý cá nhân khi quyết định sử dụng ctdozlite trên thiết bị của mình.
     </p>
 
     <div style="margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border);">
-      <p style="font-size: 13.5px;">Bằng cách tải về, sao chép hoặc chạy mã nguồn ctdozlite, bạn xác nhận đã đọc, hiểu và đồng ý vô điều kiện với tất cả các điều khoản nêu trên.</p>
+      <p style="font-size: 13.5px; color: var(--text-2);">
+        Bằng cách tải về, sao chép hoặc chạy mã nguồn ctdozlite, bạn xác nhận đã đọc, hiểu rõ bản chất nghiên cứu kỹ thuật và đồng ý vô điều kiện với tất cả các điều khoản nêu trên.
+      </p>
     </div>
   </div>
 </main>

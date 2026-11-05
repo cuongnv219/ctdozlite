@@ -1,3 +1,4 @@
+pub mod account_manager;
 pub mod audio;
 pub mod call;
 pub mod chat;

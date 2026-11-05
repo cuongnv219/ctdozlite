@@ -784,6 +784,155 @@ pub fn load_app_icon() -> Option<egui::IconData> {
     })
 }
 
+/// Render a dynamic 64x64 RGBA window/taskbar icon with a crisp anti-aliased red unread badge
+/// (`1`..`99+`) using a 3x5 bitmap pixel font renderer.
+pub fn load_app_icon_with_badge(unread_count: usize) -> Option<egui::IconData> {
+    if unread_count == 0 {
+        return load_app_icon();
+    }
+    let base = image::load_from_memory(APP_ICON_PNG).ok()?;
+    let size: u32 = 64;
+    let mut rgba = image::imageops::resize(
+        &base.to_rgba8(),
+        size,
+        size,
+        image::imageops::FilterType::Lanczos3,
+    )
+    .into_raw();
+
+    let label = if unread_count > 99 {
+        "99+".to_string()
+    } else {
+        unread_count.to_string()
+    };
+    let chars: Vec<char> = label.chars().collect();
+
+    let blend_pixel = |buf: &mut [u8], x: i32, y: i32, r: u8, g: u8, b: u8, alpha: u8| {
+        if x < 0 || y < 0 || x >= size as i32 || y >= size as i32 || alpha == 0 {
+            return;
+        }
+        let idx = ((y as u32 * size + x as u32) * 4) as usize;
+        let src_a = alpha as f32 / 255.0;
+        let dst_a = buf[idx + 3] as f32 / 255.0;
+        let out_a = src_a + dst_a * (1.0 - src_a);
+        if out_a <= 0.0 {
+            return;
+        }
+        buf[idx] = (((r as f32) * src_a + (buf[idx] as f32) * dst_a * (1.0 - src_a)) / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        buf[idx + 1] = (((g as f32) * src_a + (buf[idx + 1] as f32) * dst_a * (1.0 - src_a))
+            / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        buf[idx + 2] = (((b as f32) * src_a + (buf[idx + 2] as f32) * dst_a * (1.0 - src_a))
+            / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        buf[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+    };
+
+    let scale: f32 = 2.0;
+    let badge_radius: f32 = 6.5 * scale;
+    let half_span: f32 = if chars.len() >= 3 {
+        4.0 * scale
+    } else if chars.len() == 2 {
+        2.0 * scale
+    } else {
+        0.0
+    };
+    let border_w: f32 = 1.2 * scale;
+    let cx: f32 = (size as f32) - badge_radius - half_span - border_w.ceil();
+    let cy: f32 = badge_radius + border_w.floor();
+
+    let min_y = ((cy - badge_radius - border_w - 1.0).floor() as i32).max(0);
+    let max_y = ((cy + badge_radius + border_w + 2.0).ceil() as i32).min(size as i32);
+    let min_x = ((cx - half_span - badge_radius - border_w - 1.0).floor() as i32).max(0);
+    let max_x = ((cx + half_span + badge_radius + border_w + 2.0).ceil() as i32).min(size as i32);
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let fx = x as f32;
+            let fy = y as f32;
+            let clamped_x = fx.clamp(cx - half_span, cx + half_span);
+            let dist = (fx - clamped_x).hypot(fy - cy);
+            if dist <= badge_radius + border_w + 0.6 {
+                if dist <= badge_radius - 0.5 {
+                    blend_pixel(&mut rgba, x, y, 239, 56, 56, 255);
+                } else if dist <= badge_radius + 0.5 {
+                    let t = dist - (badge_radius - 0.5);
+                    let r = (239.0 * (1.0 - t) + 255.0 * t).round() as u8;
+                    let g = (56.0 * (1.0 - t) + 255.0 * t).round() as u8;
+                    let b = (56.0 * (1.0 - t) + 255.0 * t).round() as u8;
+                    blend_pixel(&mut rgba, x, y, r, g, b, 255);
+                } else if dist <= badge_radius + border_w - 0.3 {
+                    blend_pixel(&mut rgba, x, y, 255, 255, 255, 255);
+                } else {
+                    let a = ((badge_radius + border_w + 0.6 - dist) * 255.0)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                    blend_pixel(&mut rgba, x, y, 255, 255, 255, a);
+                }
+            }
+        }
+    }
+
+    let glyph_rows = |ch: char| -> [u8; 5] {
+        match ch {
+            '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+            '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+            '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+            '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+            '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+            '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+            '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+            '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
+            '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+            '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+            '+' => [0b000, 0b010, 0b111, 0b010, 0b000],
+            _ => [0; 5],
+        }
+    };
+
+    let px_scale: i32 = 2;
+    let glyph_w: i32 = 3 * px_scale;
+    let glyph_h: i32 = 5 * px_scale;
+    let gap: i32 = px_scale;
+    let total_w: i32 = (chars.len() as i32) * glyph_w + ((chars.len() as i32 - 1).max(0)) * gap;
+    let start_x: i32 = (cx - (total_w as f32) * 0.5).round() as i32;
+    let start_y: i32 = (cy - (glyph_h as f32) * 0.5).round() as i32;
+
+    for (idx, ch) in chars.iter().enumerate() {
+        let rows = glyph_rows(*ch);
+        let gx = start_x + (idx as i32) * (glyph_w + gap);
+        for (r, mask) in rows.iter().enumerate() {
+            for c in 0..3_i32 {
+                if (mask >> (2 - c)) & 1 == 1 {
+                    for dy in 0..px_scale {
+                        for dx in 0..px_scale {
+                            blend_pixel(
+                                &mut rgba,
+                                gx + c * px_scale + dx,
+                                start_y + (r as i32) * px_scale + dy,
+                                255,
+                                255,
+                                255,
+                                255,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(egui::IconData {
+        rgba,
+        width: size,
+        height: size,
+    })
+}
+
 pub(super) fn load_app_logo_texture(ctx: &egui::Context) -> Option<TextureHandle> {
     let img = image::load_from_memory(APP_ICON_PNG).ok()?.into_rgba8();
     let (w, h) = img.dimensions();

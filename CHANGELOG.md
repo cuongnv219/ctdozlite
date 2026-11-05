@@ -5,6 +5,9 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+### Fixed (Sửa lỗi)
+- **Gửi tập tin / video đính kèm thất bại với HTTP 405 ([#75](https://github.com/ctdoteam1110/ctdozlite/issues/75)):** `send_attachment` (`src/chat.rs`) chờ sự kiện điều khiển `file_done` (WebSocket `cmd 601`/`603` hoặc `lp_control`) để lấy `fileUrl` trước khi gọi `asyncfile/msg`, thay vì gửi thiếu `fileUrl` rồi rơi vào endpoint `sharefile_full` đã bị khai tử. Lỗi tải lên từng phần (chunk) nay được báo rõ thay vì bị bỏ qua.
+
 ## [0.0.7] - 2026-11-03
 
 ### Fixed (Sửa lỗi & Tinh chỉnh giao diện)

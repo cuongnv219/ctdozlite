@@ -6,6 +6,9 @@ dist/
 session.json
 session*.json
 session*.bak
+accounts/
+accounts/*.json
+accounts/*_threads.json
 
 # Local message caches & databases
 threads_cache.json
@@ -19,6 +22,35 @@ autoreply_rules.json
 *.db-wal
 zalo_history.db
 
+# Cryptographic keys, secrets & decrypted containers
+*.pem
+*.key
+*.bin
+*.crypt
+backup_aes_key.bin
+decrypted_container.bin
+downloaded_backup.bin
+real_backup.db.crypt
+real_decompressed_db.bin
+sync_rsa_priv.pem
+
+# Phone dumps, private UI screenshots & screen captures
+phone_*.png
+*.xml
+dtc_*.png
+dtc_*.json
+phone_ui.xml
+
+# Test lab artifacts, dumps & extracted databases
+test_lab/
+test_lab/captured_requests.jsonl
+test_lab/live_zalo.flow
+test_lab/*.xml
+test_lab/*.png
+test_lab/*.json
+test_lab/*.bin
+test_lab/*.html
+
 # Media and packet capture caches
 stickers_cache/
 dump/
@@ -31,6 +63,7 @@ call_trace.log
 # Generated graph/tooling output
 graphify-out/
 /book/
+book/
 
 # Local agent tooling & skill kit (machine-specific, symlinked paths)
 .claude/
@@ -40,10 +73,11 @@ graphify-out/
 .engineered-config.json
 .scratch/
 
-# Temporary and backup files
+# Temporary, log and backup files
 *.tmp
 *.bak
 *.log
+*.log.*
 src.bak*
 *.zip
 .env
@@ -55,6 +89,3 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
-
-# mdBook output (docs site)
-book/

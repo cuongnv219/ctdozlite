@@ -18,6 +18,61 @@ pub const ZPW_VER: &str = "694";
 pub const ZPW_TYPE: &str = "30";
 pub const CONFIG_DOMAIN: &str = "zaloapp.com";
 
+
+// ---------------------------------------------------------------------------
+// Client-Side Privacy Blocker (block outbound typing / delivered / seen)
+// ---------------------------------------------------------------------------
+static PRIVACY_BLOCK_TYPING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static PRIVACY_BLOCK_DELIVERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static PRIVACY_BLOCK_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Update the active client-side privacy blocker switches (`block_typing`, `block_delivered`, `block_seen`).
+pub fn set_privacy_blocker(block_typing: bool, block_delivered: bool, block_seen: bool) {
+    use std::sync::atomic::Ordering;
+    PRIVACY_BLOCK_TYPING.store(block_typing, Ordering::Relaxed);
+    PRIVACY_BLOCK_DELIVERED.store(block_delivered, Ordering::Relaxed);
+    PRIVACY_BLOCK_SEEN.store(block_seen, Ordering::Relaxed);
+}
+
+/// Return `(block_typing, block_delivered, block_seen)`.
+pub fn privacy_blocker_state() -> (bool, bool, bool) {
+    use std::sync::atomic::Ordering;
+    (
+        PRIVACY_BLOCK_TYPING.load(Ordering::Relaxed),
+        PRIVACY_BLOCK_DELIVERED.load(Ordering::Relaxed),
+        PRIVACY_BLOCK_SEEN.load(Ordering::Relaxed),
+    )
+}
+
+/// Check whether `url` matches an outbound typing / delivered / seen telemetry endpoint
+/// that the user has actively blocked in Privacy Guard.
+pub fn is_url_blocked_by_privacy(url: &str) -> bool {
+    use std::sync::atomic::Ordering;
+    if PRIVACY_BLOCK_TYPING.load(Ordering::Relaxed)
+        && (url.contains("/api/message/typing") || url.contains("/api/group/typing"))
+    {
+        return true;
+    }
+    if PRIVACY_BLOCK_DELIVERED.load(Ordering::Relaxed)
+        && (url.contains("/api/message/delivered")
+            || url.contains("/api/group/delivered")
+            || url.contains("/api/e2ee/pc/t/message/delivered"))
+    {
+        return true;
+    }
+    if PRIVACY_BLOCK_SEEN.load(Ordering::Relaxed)
+        && (url.contains("/api/message/seen")
+            || url.contains("/api/group/seen")
+            || url.contains("/api/e2ee/pc/t/message/seen")
+            || url.contains("/api/e2ee/pc/t/group/seen"))
+    {
+        return true;
+    }
+    false
+}
 /// Domain table.
 ///
 /// [O] **Live-verified** against a QR-authenticated Zalo Web session on 2026-10-21.
@@ -297,6 +352,10 @@ impl Domains {
         }
         if let Some(saved) = self.saved_candidates.get(canonical) {
             push_unique_host(&mut list, saved);
+        }
+        if canonical == "group_cloud_message" {
+            push_unique_host(&mut list, "https://tt-group-cm.chat.zalo.me");
+            push_unique_host(&mut list, "https://tt-group-cm.api.zaloapp.com");
         }
         if canonical == "friend" {
             push_unique_host(&mut list, &self.profile);
@@ -1101,6 +1160,23 @@ impl Session {
 
     async fn send(&self, m: Method, url: &str, body: Option<String>) -> Result<Value> {
         let start = std::time::Instant::now();
+        if is_url_blocked_by_privacy(url) {
+            let method = m.as_str().to_string();
+            crate::logger::log_request(
+                &method,
+                url,
+                Some(200),
+                0,
+                body.as_deref().unwrap_or(""),
+                Some(r#"{"error_code":0,"error_message":"Blocked by Privacy Guard","data":{}}"#),
+                None,
+            );
+            return Ok(serde_json::json!({
+                "error_code": 0,
+                "error_message": "Blocked by Privacy Guard",
+                "data": {}
+            }));
+        }
         if self.verbose {
             eprintln!(
                 "→ {} {}",
@@ -1606,7 +1682,7 @@ mod tests {
         assert_eq!(
             list,
             vec![
-                "https://tt-chat3-wpa.api.zaloapp.com",
+                "https://tt-chat3-wpa.chat.zalo.me",
                 "https://tt-chat4-wpa.api.zaloapp.com",
                 "https://tt-chat5-wpa.api.zaloapp.com",
                 "https://legacy-saved-chat.zaloapp.com",
@@ -1631,7 +1707,7 @@ mod tests {
                 let tried_inner = tried_c.clone();
                 async move {
                     tried_inner.lock().unwrap().push(url.clone());
-                    if url.starts_with("https://tt-chat3-wpa.api.zaloapp.com") {
+                    if url.starts_with("https://tt-chat3-wpa.chat.zalo.me") {
                         anyhow::bail!("HTTP 404 Not Found from {url}: nginx")
                     } else {
                         Ok(serde_json::json!({ "error_code": 0, "winner": url }))
@@ -1648,7 +1724,7 @@ mod tests {
         assert_eq!(
             *tried.lock().unwrap(),
             vec![
-                "https://tt-chat3-wpa.api.zaloapp.com/api/message/sms?zpw_ver=694",
+                "https://tt-chat3-wpa.chat.zalo.me/api/message/sms?zpw_ver=694",
                 "https://tt-chat4-wpa.api.zaloapp.com/api/message/sms?zpw_ver=694",
             ]
         );
@@ -1734,5 +1810,37 @@ mod tests {
         let cleared = s.set_proxy(None).unwrap();
         assert!(cleared.is_none());
         assert!(s.proxy_url.is_none());
+    }
+
+    #[test]
+    fn privacy_blocker_intercepts_typing_delivered_and_seen_endpoints() {
+        set_privacy_blocker(false, false, false);
+        assert!(!is_url_blocked_by_privacy(
+            "https://tt-chat1-wpa.chat.zalo.me/api/message/typing?zpw_ver=694"
+        ));
+        assert!(!is_url_blocked_by_privacy(
+            "https://tt-chat1-wpa.chat.zalo.me/api/message/seenv2?zpw_ver=694"
+        ));
+
+        set_privacy_blocker(true, false, true);
+        assert!(is_url_blocked_by_privacy(
+            "https://tt-chat1-wpa.chat.zalo.me/api/message/typing?zpw_ver=694"
+        ));
+        assert!(is_url_blocked_by_privacy(
+            "https://tt-group-wpa.chat.zalo.me/api/group/typing?zpw_ver=694"
+        ));
+        assert!(is_url_blocked_by_privacy(
+            "https://tt-chat1-wpa.chat.zalo.me/api/message/seenv2?zpw_ver=694"
+        ));
+        assert!(is_url_blocked_by_privacy(
+            "https://tt-group-wpa.chat.zalo.me/api/group/seenv2?zpw_ver=694"
+        ));
+        assert!(!is_url_blocked_by_privacy(
+            "https://tt-chat1-wpa.chat.zalo.me/api/message/deliveredv2?zpw_ver=694"
+        ));
+        assert!(!is_url_blocked_by_privacy(
+            "https://tt-chat1-wpa.chat.zalo.me/api/message/sms?zpw_ver=694"
+        ));
+        set_privacy_blocker(false, false, false);
     }
 }

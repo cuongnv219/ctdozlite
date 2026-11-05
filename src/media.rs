@@ -21,6 +21,42 @@ static SELECTED_CAMERA_DEVICE: Mutex<String> = Mutex::new(String::new());
 static CACHED_DEVICES: Mutex<Option<(Vec<String>, Vec<String>)>> = Mutex::new(None);
 static SHARED_CAM_H264: Mutex<(u64, Vec<u8>, Vec<u8>)> =
     Mutex::new((0, Vec::new(), Vec::new()));
+static MIC_GAIN_PERCENT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(100);
+static MIC_LEVEL_PERMILLE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+static REMOTE_AUDIO_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Set real-time microphone input gain (`0..=200` percent, `100` = unity gain).
+pub fn set_mic_gain_percent(pct: u32) {
+    MIC_GAIN_PERCENT.store(pct.min(200), Ordering::Relaxed);
+}
+
+/// Get current microphone input gain (`0..=200` percent).
+pub fn mic_gain_percent() -> u32 {
+    MIC_GAIN_PERCENT.load(Ordering::Relaxed)
+}
+
+/// Get instantaneous microphone peak level (`0..=1000` permille) for the live Call UI meter.
+pub fn mic_level_permille() -> u32 {
+    MIC_LEVEL_PERMILLE.load(Ordering::Relaxed)
+}
+
+/// Whether remote peer audio is currently above the speaking threshold.
+pub fn is_remote_speaking() -> bool {
+    REMOTE_AUDIO_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Filter out infrared/Windows Hello depth cameras and virtual audio monitor loopbacks.
+pub fn is_ignored_virtual_or_ir_device(name: &str) -> bool {
+    let low = name.trim().to_lowercase();
+    low.contains("ir camera")
+        || low.contains("infrared")
+        || low.contains("windows hello")
+        || low.contains("depth camera")
+        || low.starts_with("monitor of ")
+}
 pub fn set_selected_mic_device(name: &str) {
     if let Ok(mut g) = SELECTED_MIC_DEVICE.lock() {
         *g = name.trim().to_string();
@@ -74,7 +110,10 @@ pub fn list_media_devices(refresh: bool) -> (Vec<String>, Vec<String>) {
         for d in devs {
             if let Ok(name) = d.name() {
                 let trimmed = name.trim().to_string();
-                if !trimmed.is_empty() && !mics.contains(&trimmed) {
+                if !trimmed.is_empty()
+                    && !is_ignored_virtual_or_ir_device(&trimmed)
+                    && !mics.contains(&trimmed)
+                {
                     mics.push(trimmed);
                 }
             }
@@ -106,7 +145,10 @@ fn enumerate_ffmpeg_cameras() -> Vec<String> {
                     let parts: Vec<&str> = line.split('"').collect();
                     if parts.len() >= 2 {
                         let name = parts[1].trim().to_string();
-                        if !name.is_empty() && !cams.contains(&name) {
+                        if !name.is_empty()
+                            && !is_ignored_virtual_or_ir_device(&name)
+                            && !cams.contains(&name)
+                        {
                             cams.push(name);
                         }
                     }
@@ -121,7 +163,10 @@ fn enumerate_ffmpeg_cameras() -> Vec<String> {
                         let parts: Vec<&str> = line.split('"').collect();
                         if parts.len() >= 2 {
                             let name = parts[1].trim().to_string();
-                            if !name.is_empty() && !cams.contains(&name) {
+                            if !name.is_empty()
+                                && !is_ignored_virtual_or_ir_device(&name)
+                                && !cams.contains(&name)
+                            {
                                 cams.push(name);
                             }
                         }
@@ -1552,9 +1597,17 @@ fn run_media_loop(
         }
         if frame.len() == FRAME_SAMPLES {
             last_rtp_tx = std::time::Instant::now();
-            if mic_muted.load(Ordering::Relaxed) {
+            let gain = (MIC_GAIN_PERCENT.load(Ordering::Relaxed) as f32 / 100.0).clamp(0.0, 2.0);
+            let mut peak = 0.0_f32;
+            if mic_muted.load(Ordering::Relaxed) || gain <= 0.001 {
                 frame.fill(0.0);
+            } else {
+                for s in &mut frame {
+                    *s = (*s * gain).clamp(-1.0, 1.0);
+                    peak = peak.max(s.abs());
+                }
             }
+            MIC_LEVEL_PERMILLE.store((peak * 1000.0).clamp(0.0, 1000.0) as u32, Ordering::Relaxed);
             mix_peer_bridge_audio(slot_idx, &mut frame);
             let mut out = vec![0u8; 4000];
             match encoder.encode_float(&frame, &mut out) {
@@ -1952,7 +2005,7 @@ fn run_media_loop(
                     if pt == 112 {
                         rx_audio.update(h.seq);
                         peer_ssrc = h.ssrc;
-                    } else if pt == 96 || pt == 97 || pt == VIDEO_PT_FRAG {
+                    } else if matches!(pt, 96 | 97 | VIDEO_PT_FRAG | 121 | 122) {
                         if rx_video.update(h.seq) {
                             pli_gap = true; // hole in the peer's video: ask for a keyframe
                         }
@@ -1975,13 +2028,15 @@ fn run_media_loop(
                     if let Some(payload) = extract_rtp_opus_payload(inner_rtp) {
                         let mut pcm = vec![0f32; FRAME_SAMPLES];
                         if decoder.decode_float(payload, &mut pcm, false).is_ok() {
+                            let r_peak = pcm.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+                            REMOTE_AUDIO_ACTIVE.store(r_peak > 0.025, Ordering::Relaxed);
                             push_peer_bridge_audio(slot_idx, &pcm);
                             if let Ok(mut b) = output_buf.lock() {
                                 b.extend_from_slice(&pcm);
                             }
                         }
                     }
-                } else if pt == 96 || pt == 97 || pt == VIDEO_PT_FRAG || raw_pkt[0] == 0x0E {
+                } else if matches!(pt, 96 | 97 | VIDEO_PT_FRAG | 121 | 122) || raw_pkt[0] == 0x0E {
                     let pkt_ssrc = crate::voip_log::parse_rtp(inner_rtp)
                         .map(|h| h.ssrc)
                         .unwrap_or(0);

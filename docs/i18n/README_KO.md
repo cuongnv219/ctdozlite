@@ -1,12 +1,12 @@
 # ctdozlite
 
-**[Tiếng Việt](README.md)** · **[English](README_EN.md)** · **[한국어](README_KO.md)** · **[日本語](README_JA.md)** · **[简体中文](README_ZH.md)**
+**[Tiếng Việt](../../README.md)** · **[English](README_EN.md)** · **[한국어](README_KO.md)** · **[日本語](README_JA.md)** · **[简体中文](README_ZH.md)**
 
 Electron이나 Chromium 없이 Rust(`eframe`/`egui` + `ratatui`)로 제작되어 Zalo Web/PC API 및 WebSocket과 직접 통신하는 순수 Rust 기반 Zalo 데스크톱 클라이언트입니다.
 
 - **프로젝트 공식 웹사이트 (다운로드):** [https://ctdozlite.ctdo.net/](https://ctdozlite.ctdo.net/)
 - **공식 릴리스 패키지:** [https://github.com/ctdoteam1110/ctdozlite/releases](https://github.com/ctdoteam1110/ctdozlite/releases)
-- **문서 및 문제 해결:** [기능 및 제한 사항](docs/TINH_NANG.md) · [알려진 문제](docs/DA_BIET.md) · [문제 해결 가이드](docs/KHAC_PHUC_SU_CO.md)
+- **문서 및 문제 해결:** [기능 및 제한 사항](../TINH_NANG.md) · [알려진 문제](../DA_BIET.md) · [문제 해결 가이드](../KHAC_PHUC_SU_CO.md)
 
 ---
 
@@ -92,7 +92,8 @@ cargo build --release
 ### 프로젝트 목적
 
 - 본 프로젝트는 **단 하나의 목적**을 위해 존재합니다: 학습 및 시스템 엔지니어링 연구, 즉 현대 메신저 애플리케이션이 네트워크 프로토콜, 암호화, 네이티브 데스크톱 아키텍처 계층에서 어떻게 동작하는지 이해하는 것입니다.
-- 모든 소스 코드는 Zalo Web/PC와 서버 간의 공개 데이터 흐름을 관찰하여 **Rust로 처음부터 작성**되었습니다. 본 프로젝트는 Zalo의 독점 자산(원본 아이콘, 스티커, 오디오, 이미지, JS/WASM 코드)을 **디컴파일하거나 추출하거나 재배포하지 않습니다**.
+- 모든 소스 코드는 **Rust로 처음부터 작성**되었습니다. 패킷 프레이밍, 요청 서명, 파라미터 인코딩 방식을 이해하기 위해 관리자는 **공개 배포된** Zalo 설치 패키지와 함께 제공되는 네이티브 라이브러리에 대한 **정적 분석**(열람 및 디컴파일)을 수행했습니다. 그 결과는 **독립적 재구현을 위한 참고 자료로만** 사용되었으며, Zalo의 기계어 코드, JS/WASM 소스, `.so`, `.dex`, APK 파일은 본 저장소에 복사·삽입·재배포되지 않습니다. 분석용으로 풀어둔 디렉터리(`xapk_extracted/`, `test_lab/`)는 저장소 **밖에** 있으며 커밋되지 않습니다.
+- **제3자 저작물 고지:** `src/assets/ami_fat_cat/` 에 포함된 스티커 세트는 **제3자(원작자)의 저작물**입니다. VNG/Zalo의 자산이 아니며 당사는 이에 대한 어떠한 권리도 주장하지 않습니다. UI 테스트 목적으로만 포함되었고, 권리자의 요청이 있으면 즉시 삭제합니다.
 - 당사는 `Zalo` 상표, 로고 또는 VNG의 지식재산권을 **소유하지 않으며 소유권을 주장하지 않습니다**. `Zalo`라는 이름은 본 소프트웨어가 **어떤 서비스의 프로토콜과 호환되는지**를 설명하기 위한 서술적 용도로만 사용됩니다.
 - 본 프로젝트는 **완전히 비상업적**입니다: 100% 오픈 소스, 요금 없음, 광고 없음, 데이터 판매 없음.
 
@@ -109,4 +110,4 @@ VNG Corporation 또는 Zalo의 권한 있는 대리인이 본 프로젝트와 �
 
 ## 📜 라이선스
 
-이 프로젝트는 **[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)** 듀얼 라이선스 하에 배포됩니다. 본 프로젝트는 순수 학술 및 시스템 프로그래밍 연구 목적으로 개발되었습니다.
+이 프로젝트는 **[MIT](../../LICENSE-MIT) OR [Apache-2.0](../../LICENSE-APACHE)** 듀얼 라이선스 하에 배포됩니다. 본 프로젝트는 순수 학술 및 시스템 프로그래밍 연구 목적으로 개발되었습니다.

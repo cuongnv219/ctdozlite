@@ -304,7 +304,7 @@ impl crate::session::Session {
     pub async fn fetch_timeline_feed(
         &self,
         friend_uids: &[String],
-        shared_media_by_uid: &std::collections::HashMap<String, Vec<FeedMedia>>,
+        _shared_media_by_uid: &std::collections::HashMap<String, Vec<FeedMedia>>,
     ) -> Result<(Vec<SocialUserProfile>, Vec<FeedItem>)> {
         let mut items: Vec<FeedItem> = Vec::new();
 
@@ -334,18 +334,18 @@ impl crate::session::Session {
                         display_name: my_name,
                         avatar_url: my_ava,
                     },
-                    date_str: "Kho ảnh Nhật ký".to_string(),
+                    date_str: "Kho ảnh cá nhân".to_string(),
                     content: format!(
-                        "Đã cập nhật {} ảnh trong Album Nhật ký cá nhân.",
+                        "Album ảnh đại diện mạng xã hội ({} ảnh)",
                         my_photos.len()
                     ),
-                    status_badge: Some("Album cá nhân".to_string()),
+                    status_badge: Some("Album ảnh".to_string()),
                     media_list: my_photos,
                     reaction: FeedReaction {
-                        like_count: 12,
-                        comment_count: 2,
+                        like_count: 0,
+                        comment_count: 0,
                         is_liked: false,
-                        top_reactions: vec!["❤️".to_string(), "👍".to_string()],
+                        top_reactions: Vec::new(),
                     },
                     comments: Vec::new(),
                 });
@@ -376,91 +376,171 @@ impl crate::session::Session {
         // Sắp xếp theo thời gian hoạt động gần nhất
         profiles.sort_by(|a, b| b.last_action_time.unwrap_or(0).cmp(&a.last_action_time.unwrap_or(0)));
 
-        for (idx, prof) in profiles.iter().enumerate() {
-            let mut media_list = Vec::new();
-            if !prof.cover_url.is_empty() && !prof.cover_url.ends_with("/default") {
-                media_list.push(FeedMedia {
-                    photo_id: format!("cov_{}", prof.uid),
-                    media_type: "image".to_string(),
-                    url: prof.cover_url.clone(),
-                    thumbnail: prof.cover_url.clone(),
-                    width: 800,
-                    height: 400,
-                });
-            }
-            if let Some(shared) = shared_media_by_uid.get(&prof.uid) {
-                for m in shared.iter().take(5) {
-                    if !media_list.iter().any(|x| x.url == m.url) {
-                        media_list.push(m.clone());
+        // 3. Nạp bài đăng Nhật ký từ cơ sở dữ liệu tin nhắn/nhật ký của chính ctdozlite
+        // Tuyệt đối không đọc đường dẫn cứng trong test_lab/ để không làm sai lệch dữ liệu của người dùng khác.
+        let local_db = std::env::var("ZALO_TIMELINE_DB")
+            .unwrap_or_else(|_| "zalo_history.db".to_string());
+        if std::path::Path::new(&local_db).exists() {
+            if let Ok(mut real_feeds) = load_real_timeline_from_sqlite(&local_db, "") {
+                if !real_feeds.is_empty() {
+                    for rf in &mut real_feeds {
+                        if let Some(prof) = profiles.iter().find(|p| {
+                            p.display_name.trim().eq_ignore_ascii_case(rf.author.display_name.trim())
+                                || p.zalo_name.trim().eq_ignore_ascii_case(rf.author.display_name.trim())
+                        }) {
+                            rf.author.uid = prof.uid.clone();
+                            if !prof.avatar_url.is_empty() {
+                                rf.author.avatar_url = prof.avatar_url.clone();
+                            }
+                        }
                     }
+                    items.append(&mut real_feeds);
                 }
             }
-            if media_list.is_empty()
-                && !prof.avatar_url.is_empty()
-                && !prof.avatar_url.ends_with("/default")
-            {
-                media_list.push(FeedMedia {
-                    photo_id: format!("ava_{}", prof.uid),
-                    media_type: "image".to_string(),
-                    url: prof.avatar_url.clone(),
-                    thumbnail: prof.avatar_url.clone(),
-                    width: 480,
-                    height: 480,
-                });
-            }
-
-            let content = if !prof.status.trim().is_empty() {
-                prof.status.trim().to_string()
-            } else if !prof.cover_url.is_empty() && !prof.cover_url.ends_with("/default") {
-                format!("{} đã cập nhật ảnh bìa Nhật ký mới.", prof.display_name)
-            } else if let Some(shared) = shared_media_by_uid.get(&prof.uid) {
-                if !shared.is_empty() {
-                    format!("Khoảnh khắc chia sẻ cùng {}.", prof.display_name)
-                } else {
-                    format!("Trang Nhật ký của {}.", prof.display_name)
-                }
-            } else {
-                continue;
-            };
-
-            let badge = if !prof.sdob.is_empty() {
-                Some(format!("🎂 {}", prof.sdob))
-            } else {
-                None
-            };
-
-            let date_str = match idx {
-                0..=2 => "Hôm nay".to_string(),
-                3..=6 => "1 ngày".to_string(),
-                7..=12 => "2 ngày".to_string(),
-                _ => "Gần đây".to_string(),
-            };
-
-            items.push(FeedItem {
-                feed_id: format!("feed_{}", prof.uid),
-                author: FeedAuthor {
-                    uid: prof.uid.clone(),
-                    display_name: prof.display_name.clone(),
-                    avatar_url: prof.avatar_url.clone(),
-                },
-                date_str,
-                content,
-                status_badge: badge,
-                media_list,
-                reaction: FeedReaction {
-                    like_count: ((prof.uid.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))) % 24)
-                        + 1,
-                    comment_count: ((prof.uid.bytes().fold(0u32, |a, b| a.wrapping_mul(3).wrapping_add(b as u32)))
-                        % 6),
-                    is_liked: false,
-                    top_reactions: vec!["❤️".to_string()],
-                },
-                comments: Vec::new(),
-            });
         }
 
+        // 4. Tuyệt đối không tự bịa bài viết hoặc tự tạo thẻ giả lập.
+        // Trả về đúng danh sách hồ sơ bạn bè và bài viết thực sự có trong database của user hiện tại.
         Ok((profiles, items))
     }
+}
+
+/// Nạp dữ liệu bài viết thật từ bảng `timeline_feed_1` trong cơ sở dữ liệu SQLite cục bộ
+pub fn load_real_timeline_from_sqlite(db_path: &str, target_uid: &str) -> Result<Vec<FeedItem>> {
+    let conn = rusqlite::Connection::open(db_path)?;
+    // Kiểm tra xem bảng timeline_feed_1 có tồn tại trong database này không
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='timeline_feed_1'",
+            [],
+            |row| row.get(0),
+        )
+        .map(|count: i64| count > 0)
+        .unwrap_or(false);
+
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare("SELECT content FROM timeline_feed_1")?;
+    let rows = stmt.query_map([], |row| {
+        let content_str: String = row.get(0)?;
+        Ok(content_str)
+    })?;
+
+    let mut feeds = Vec::new();
+    for r in rows {
+        let content_str = r?;
+        if let Ok(val) = serde_json::from_str::<Value>(&content_str) {
+            if let Some(item) = val.get("item") {
+                let author_uid = item
+                    .get("header")
+                    .and_then(|h| h.get("uid"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let author_dpn = item
+                    .get("header")
+                    .and_then(|h| h.get("dpn"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+
+                // Kiểm tra khớp UID hoặc khớp tên nếu có bộ lọc target_uid
+                let matches_target = target_uid.is_empty()
+                    || author_uid == target_uid
+                    || author_dpn.trim().eq_ignore_ascii_case(target_uid.trim());
+
+                if matches_target {
+                    let fid = item
+                        .get("fid")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let cts = item.get("cts").and_then(Value::as_i64).unwrap_or(0);
+                    let date_str = chrono::DateTime::from_timestamp_millis(cts)
+                        .map(|dt| dt.format("%d/%m/%Y lúc %H:%M:%S").to_string())
+                        .unwrap_or_else(String::new);
+
+                    let header = item.get("header").cloned().unwrap_or(json!({}));
+                    let author = FeedAuthor {
+                        uid: author_uid.to_string(),
+                        display_name: author_dpn.to_string(),
+                        avatar_url: header
+                            .get("avt")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    };
+
+                    let content_obj = item.get("content").cloned().unwrap_or(json!({}));
+                    let caption = content_obj
+                        .get("caption")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+
+                    let mut media_list = Vec::new();
+                    if let Some(photo) = content_obj.get("photo") {
+                        let photoid = photo
+                            .get("photoid")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let origin = photo
+                            .get("origin")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        if !origin.is_empty() {
+                            let origin_jpg = if origin.ends_with(".jxl") {
+                                format!("{}.jpg", &origin[..origin.len() - 4])
+                            } else {
+                                origin
+                            };
+                            let dim = content_obj
+                                .get("photo_dimension")
+                                .cloned()
+                                .unwrap_or(json!({}));
+                            let width = dim.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+                            let height = dim.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+                            media_list.push(FeedMedia {
+                                photo_id: photoid,
+                                media_type: "image".to_string(),
+                                url: origin_jpg.clone(),
+                                thumbnail: origin_jpg,
+                                width,
+                                height,
+                            });
+                        }
+                    }
+
+                    let footer = item.get("footer").cloned().unwrap_or(json!({}));
+                    let numlike = footer.get("numlike").and_then(Value::as_u64).unwrap_or(0) as u32;
+                    let numcmt = footer.get("numcmt").and_then(Value::as_u64).unwrap_or(0) as u32;
+
+                    feeds.push(FeedItem {
+                        feed_id: fid,
+                        author,
+                        date_str,
+                        content: caption,
+                        status_badge: None,
+                        media_list,
+                        reaction: FeedReaction {
+                            like_count: numlike,
+                            comment_count: numcmt,
+                            is_liked: false,
+                            top_reactions: vec!["Thích".to_string()],
+                        },
+                        comments: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Sắp xếp bài đăng mới nhất (cts lớn nhất) lên đầu danh sách
+    feeds.sort_by(|a, b| b.feed_id.cmp(&a.feed_id));
+
+    Ok(feeds)
 }
 
 #[cfg(test)]
@@ -494,5 +574,32 @@ mod tests {
         assert_eq!(p.display_name, "Nguyễn Thành");
         assert!(p.is_friend);
         assert_eq!(p.cover_url, "https://cover-talk.zadn.vn/c.jpg");
+    }
+
+    #[test]
+    fn load_real_dtc_timeline_from_sqlite_works() {
+        let db_path = "test_lab/databases/zalo";
+        if std::path::Path::new(db_path).exists() {
+            let feeds = load_real_timeline_from_sqlite(db_path, "257404931").unwrap();
+            assert_eq!(feeds.len(), 2, "Phải nạp được đúng 2 bài viết thật của Đtc");
+
+            // Kiểm tra bài đăng 1 (FPT University)
+            let f1 = feeds.iter().find(|f| f.feed_id == "18223066329").expect("Phải có feed 18223066329");
+            assert_eq!(f1.author.display_name, "Đtc");
+            assert_eq!(f1.reaction.like_count, 16);
+            assert_eq!(f1.reaction.comment_count, 6);
+            assert!(f1.content.contains("FPT University"));
+            assert!(!f1.media_list.is_empty());
+            assert!(f1.media_list[0].url.ends_with(".jpg"));
+
+            // Kiểm tra bài đăng 2 (Bão lũ an toàn)
+            let f2 = feeds.iter().find(|f| f.feed_id == "18193461996").expect("Phải có feed 18193461996");
+            assert_eq!(f2.author.display_name, "Đtc");
+            assert_eq!(f2.reaction.like_count, 6);
+            assert_eq!(f2.reaction.comment_count, 0);
+            assert!(f2.content.contains("an toàn"));
+            assert!(!f2.media_list.is_empty());
+            assert!(f2.media_list[0].url.ends_with(".jpg"));
+        }
     }
 }

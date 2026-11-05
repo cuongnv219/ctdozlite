@@ -211,64 +211,76 @@
 
 <main>
   <div class="wrap">
-    <div class="meta-tag">Chính sách minh bạch dữ liệu</div>
+    <div class="meta-tag">Chính sách minh bạch &amp; Bảo vệ dữ liệu cá nhân</div>
     <h1>Chính sách quyền riêng tư</h1>
-    <div class="updated">Cập nhật lần cuối: 31/10/2026</div>
+    <div class="updated">Cập nhật lần cuối: 04/11/2026 · Tuân thủ Luật Bảo vệ dữ liệu cá nhân số 91/2025/QH15 &amp; Nghị định 356/2025/NĐ-CP</div>
 
     <div class="card-box">
       <p style="margin-bottom: 0; color: var(--text); font-weight: 500;">
-        Cam kết cốt lõi: <strong>ctdozlite không sở hữu máy chủ trung gian, không thu thập dữ liệu phân tích hành vi (zero telemetry), và không lưu bất kỳ thông tin nào của bạn lên đám mây của bên thứ ba.</strong>
+        Cam kết cốt lõi: <strong>ctdozlite hoạt động theo mô hình xử lý hoàn toàn cục bộ (Local-first Processing), không thiết lập máy chủ thu thập dữ liệu trung gian, không tích hợp theo dõi hành vi (Zero Telemetry), và không truyền đưa bất kỳ dữ liệu cá nhân nào của bạn cho bên thứ ba.</strong>
       </p>
     </div>
 
-    <h2>1. Nguyên lý vận hành & Dữ liệu lưu trữ</h2>
+    <h2>1. Nguyên lý vận hành &amp; Vị trí lưu trữ dữ liệu</h2>
     <p>
-      ctdozlite là một client mã nguồn mở chạy hoàn toàn cục bộ trên máy tính của bạn. Mọi trao đổi mạng diễn ra trực tiếp giữa máy tính của bạn và các máy chủ chính thức của hệ thống Zalo (thông qua giao thức HTTPS và ZRTP UDP).
+      ctdozlite là client máy tính mã nguồn mở do người dùng tự cài đặt và vận hành trực tiếp trên thiết bị cá nhân. Mọi kết nối mạng được khởi tạo trực tiếp từ thiết bị của bạn tới hạ tầng máy chủ chính thức của hệ sinh thái Zalo (thông qua giao thức HTTPS bảo mật và ZRTP UDP cho cuộc gọi). Nhóm phát triển ctdozlite không đóng vai trò là bên kiểm soát hay xử lý dữ liệu trung gian.
     </p>
-    <p>Các dữ liệu được tạo và lưu trữ trên ổ đĩa của bạn bao gồm:</p>
+    <p>Các tệp dữ liệu được tạo và lưu trữ độc quyền trên ổ đĩa của bạn bao gồm:</p>
     <ul>
-      <li><code>session.json</code>: Chứa mã phiên (tokens), cookie xác thực và khóa mã hóa tạm thời do server trả về sau khi bạn quét QR hoặc đăng nhập. Tệp này nằm trực tiếp trong thư mục làm việc của bạn.</li>
-      <li><code>threads_cache.json</code>: Bản chụp bộ nhớ đệm danh sách hội thoại gần nhất nhằm tăng tốc độ tải cửa sổ khi khởi động lại.</li>
-      <li><code>zalo_history.db</code>: Cơ sở dữ liệu SQLite cục bộ lưu trữ các tin nhắn đã nhận và gửi. Bạn nắm quyền kiểm soát tuyệt đối tệp này.</li>
-      <li><code>call_trace.log</code>: Tệp nhật ký tín hiệu cuộc gọi chỉ được tạo khi bật chế độ chẩn đoán (dev mode) và lưu cục bộ trên máy.</li>
+      <li><code>session.json</code>: Chứa mã phiên (tokens), cookie xác thực tạm thời do máy chủ trả về sau khi bạn chủ động quét mã QR hoặc đăng nhập. File này được bảo vệ với quyền truy cập riêng tư (0600 trên Unix).</li>
+      <li><code>threads_cache.json</code>: Bản chụp bộ nhớ đệm danh sách hội thoại gần nhất nhằm tăng tốc độ tải giao diện khi khởi động lại ứng dụng.</li>
+      <li><code>zalo_history.db</code>: Cơ sở dữ liệu SQLite cục bộ lưu trữ các tin nhắn đã nhận và gửi. Bạn nắm quyền kiểm soát, sao lưu hoặc xóa bỏ tuyệt đối tệp này.</li>
+      <li><code>call_trace.log</code> / <code>voip.log</code>: Tệp nhật ký kỹ thuật cho tín hiệu cuộc gọi (chỉ ghi nhận khi bật chế độ chẩn đoán lập trình viên <code>--dev</code> hoặc <code>ZALO_VOIP_LOG</code>).</li>
     </ul>
 
-    <h2>2. Không thu thập Telemetry hay Dữ liệu quảng cáo</h2>
+    <h2>2. Không thu thập Telemetry, Quảng cáo hay Theo dõi hành vi</h2>
     <p>
-      Khác với các ứng dụng đóng gói bằng Chromium thương mại, ctdozlite:
+      Nhằm bảo vệ tối đa quyền riêng tư của người sử dụng theo Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15:
     </p>
     <ul>
-      <li>Không tích hợp Google Analytics, Crashlytics, Mixpanel hay bất kỳ SDK theo dõi hành vi nào.</li>
-      <li>Không có tiến trình báo cáo lỗi (crash-reporter) ngầm tự động gửi thông tin phần cứng về máy chủ của tác giả.</li>
-      <li>Không cài cắm quảng cáo hoặc thu thập danh bạ để phục vụ mục đích thương mại.</li>
+      <li>Ứng dụng hoàn toàn <strong>không</strong> tích hợp Google Analytics, Firebase, Crashlytics, Mixpanel hay bất kỳ SDK đo lường hành vi trực tuyến nào.</li>
+      <li>Không có tiến trình chạy ngầm gửi báo cáo cấu hình phần cứng, địa chỉ IP hay nhật ký sử dụng về máy chủ của nhóm phát triển.</li>
+      <li>Không thu thập, mua bán, chia sẻ hoặc khai thác danh bạ, vị trí hay thói quen nhắn tin của người dùng vì bất kỳ mục đích thương mại nào.</li>
     </ul>
 
-    <h2>3. Quyền hạn thiết bị (Permissions)</h2>
+    <h2>3. Quyền hạn thiết bị (Device Permissions)</h2>
     <p>
-      Ứng dụng chỉ yêu cầu quyền truy cập phần cứng khi cần thiết để thực hiện các chức năng bạn chỉ định:
+      Ứng dụng chỉ yêu cầu quyền truy cập phần cứng khi người dùng chủ động kích hoạt tính năng tương ứng:
     </p>
     <ul>
-      <li><strong>Microphone & Loa:</strong> Chỉ được kích hoạt qua thư viện âm thanh <code>cpal</code> khi bạn tham gia cuộc gọi thoại hoặc gọi video.</li>
-      <li><strong>Camera (Webcam):</strong> Chỉ mở khi bạn bật tính năng video call và có thể tắt bất cứ lúc nào.</li>
-      <li><strong>Kết nối mạng (Network):</strong> Chỉ kết nối tới các domain chính thức của Zalo được trả về từ lời gọi <code>getserverinfo</code>.</li>
+      <li><strong>Microphone &amp; Loa:</strong> Chỉ kích hoạt qua thư viện âm thanh <code>cpal</code> khi bạn bắt đầu hoặc nhận cuộc gọi thoại / video.</li>
+      <li><strong>Camera (Webcam):</strong> Chỉ kết nối tới thiết bị máy ảnh khi bạn chủ động mở chức năng gọi video và có thể ngắt kết nối bất cứ lúc nào.</li>
+      <li><strong>Kết nối mạng (Network):</strong> Chỉ giao tiếp tới các địa chỉ domain chính thức được trả về từ dịch vụ cấu hình hệ thống của Zalo.</li>
     </ul>
 
-    <h2>4. Trách nhiệm người dùng</h2>
+    <h2>4. Quyền của chủ thể dữ liệu &amp; Quyền xóa bỏ (Right to Erasure)</h2>
     <p>
-      Vì <code>session.json</code> và <code>zalo_history.db</code> lưu trữ trực tiếp trên máy của bạn ở định dạng không khóa mật khẩu phần cứng, bạn có trách nhiệm:
+      Theo quy định tại Điều 9 Luật Bảo vệ dữ liệu cá nhân số 91/2025/QH15, bạn có toàn quyền kiểm soát, trích xuất và xóa bỏ dữ liệu cá nhân của mình bất kỳ lúc nào:
     </p>
     <ul>
-      <li>Bảo vệ an toàn thư mục làm việc, không chia sẻ file <code>session.json</code> cho người khác vì tệp này tương đương với phiên đăng nhập của bạn.</li>
-      <li>Xóa các tệp phiên bằng lệnh <code>cargo run -- --logout</code> khi không còn sử dụng trên thiết bị công cộng.</li>
+      <li><strong>Xóa phiên đăng nhập:</strong> Chạy lệnh <code>ctdozlite --logout</code> để thu hồi phiên và xóa ngay lập tức các tệp <code>session.json</code>, <code>threads_cache.json</code>.</li>
+      <li><strong>Xóa triệt để toàn bộ dữ liệu cục bộ:</strong> Sử dụng chức năng <em>"Xóa toàn bộ dữ liệu cục bộ"</em> trong mục <strong>Cài đặt &rarr; Dữ liệu</strong> (hoặc xóa thủ công tệp <code>zalo_history.db</code> trong thư mục làm việc của ứng dụng).</li>
+      <li><strong>Thu hồi quyền truy cập từ xa:</strong> Bạn có thể mở ứng dụng Zalo trên điện thoại di động (<strong>Cài đặt &rarr; Tài khoản và bảo mật &rarr; Lịch sử đăng nhập</strong>) để đăng xuất phiên ctdozlite từ xa, vô hiệu hóa ngay lập tức mọi mã khóa phiên hiện tại.</li>
     </ul>
 
-    <h2>5. Mã nguồn mở & Xác minh độc lập</h2>
+    <h2>5. Trách nhiệm người dùng</h2>
     <p>
-      Toàn bộ mã nguồn của ctdozlite được công khai tại <a href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub Repository</a>. Bạn hoặc bất kỳ chuyên gia bảo mật nào đều có thể tự kiểm tra, đối chiếu mã nguồn và tự biên dịch để đảm bảo không có mã độc ẩn.
+      Vì dữ liệu phiên và lịch sử tin nhắn lưu trữ trực tiếp trên máy tính của bạn ở dạng cục bộ:
+    </p>
+    <ul>
+      <li>Bạn có trách nhiệm bảo vệ an toàn máy tính cá nhân, không chia sẻ thư mục chứa file <code>session.json</code> cho người khác.</li>
+      <li>Khuyến nghị kích hoạt tính năng mã hóa ổ đĩa của hệ điều hành (BitLocker trên Windows, FileVault trên macOS hoặc LUKS trên Linux) khi sử dụng trên thiết bị dùng chung.</li>
+    </ul>
+
+    <h2>6. Mã nguồn mở &amp; Giám sát độc lập</h2>
+    <p>
+      Toàn bộ mã nguồn của ctdozlite được công khai tại <a href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub Repository</a>. Bất kỳ ai cũng có thể tự do kiểm tra, rà soát mã nguồn (code audit) để đảm bảo ứng dụng không chứa bất kỳ backdoor hay tiến trình thu thập dữ liệu ngầm nào.
     </p>
 
     <div style="margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border);">
-      <p style="font-size: 13.5px;">Mọi thắc mắc liên quan đến tính minh bạch hoặc bảo mật, vui lòng mở issue trên repository GitHub chính thức của dự án.</p>
+      <p style="font-size: 13.5px; color: var(--text-2);">
+        ctdozlite là dự án phần mềm nguồn mở phi thương mại phục vụ mục đích nghiên cứu kỹ thuật hệ thống. Mọi câu hỏi hoặc đóng góp về an toàn thông tin, vui lòng gửi phản hồi qua hệ thống GitHub Issues chính thức.
+      </p>
     </div>
   </div>
 </main>

@@ -82,22 +82,94 @@ fn next_cursor(t: &Thread, current: &str) -> Option<String> {
     (oldest != current).then(|| oldest.to_string())
 }
 
-/// Generate a 32-byte base64 key token for `pullMobileMsg` (`cmd 12000`) / `requestSyncMessage` (`cmd 12888`).
-pub fn generate_sync_public_key() -> String {
-    use base64::Engine;
-    let hex = crate::param_cipher::random_hex(64);
-    let mut raw = Vec::with_capacity(32);
-    let bytes = hex.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        let hi = (bytes[i] as char).to_digit(16).unwrap_or(0) as u8;
-        let lo = (bytes[i + 1] as char).to_digit(16).unwrap_or(0) as u8;
-        raw.push((hi << 4) | lo);
-        i += 2;
+static LATEST_MOBILE_TEMP_KEY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Record a fresh `temp_key` received from a `transfer_after_login` control event.
+pub fn set_latest_mobile_temp_key(temp_key: &str) {
+    if let Ok(mut g) = LATEST_MOBILE_TEMP_KEY.lock() {
+        *g = temp_key.trim().to_string();
     }
+}
+
+/// Return the most recent `temp_key` issued by the user's phone on login (if any).
+pub fn latest_mobile_temp_key() -> String {
+    LATEST_MOBILE_TEMP_KEY
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+static LAST_MOBILE_SYNC_STATUS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record the latest status returned by the user's phone (`WaitingConfirmOnPhone`, `MobileBusyRestoring`, etc.).
+pub fn set_last_mobile_sync_status(status: Option<String>) {
+    if let Ok(mut g) = LAST_MOBILE_SYNC_STATUS.lock() {
+        *g = status;
+    }
+}
+
+/// Read the latest status returned by the user's phone during `sync_phone_messages`.
+pub fn last_mobile_sync_status() -> Option<String> {
+    LAST_MOBILE_SYNC_STATUS.lock().ok().and_then(|g| g.clone())
+}
+
+/// Generate a 33-byte (`0x05` curve type prefix + 32-byte key) Base64 public key
+/// matching `zprotoEd25519GenerateKeyPair` in `libzproto_wasm_bg.wasm` for Sync v2 (`cmd 590`).
+pub fn generate_sync_v2_ed25519_public_key(domain_tag: u8) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let seed = crate::param_cipher::random_hex(32);
+    let mut hasher = Sha256::new();
+    hasher.update([domain_tag]);
+    hasher.update(seed.as_bytes());
+    let digest = hasher.finalize();
+    let mut raw = [0u8; 33];
+    raw[0] = 0x05; // Signal / ZaloTrustedSynced25519 DJB_TYPE = 0x05
+    raw[1..].copy_from_slice(&digest);
+    raw[1] &= 0xF8;
+    raw[32] = (raw[32] & 0x7F) | 0x40;
     base64::engine::general_purpose::STANDARD.encode(raw)
 }
 
+static CURRENT_SYNC_KEYS: std::sync::Mutex<Option<(rsa::RsaPrivateKey, String)>> =
+    std::sync::Mutex::new(None);
+
+/// Retrieve the active RSA 2048 keys used for mobile sync decryption without consuming them.
+pub fn get_sync_keys() -> Option<(rsa::RsaPrivateKey, String)> {
+    CURRENT_SYNC_KEYS.lock().ok().and_then(|g| g.clone())
+}
+
+/// Retrieve the active RSA 2048 public key.
+pub fn get_sync_public_key() -> Option<String> {
+    CURRENT_SYNC_KEYS.lock().ok().and_then(|g| g.as_ref().map(|(_, pub_k)| pub_k.clone()))
+}
+/// Clear the active sync keys once sync is finalized.
+pub fn clear_sync_keys() {
+    if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
+        *g = None;
+    }
+}
+
+/// Generate a genuine 2048-bit RSA SubjectPublicKeyInfo (`SPKI`) DER Base64 key
+/// (`294 bytes` -> `392 chars` Base64 starting with `MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...`),
+/// matching `sync-message-key-generator` (`main-startup.js:598226`) for `pullMobileMsg` (`cmd 12000`).
+pub fn generate_sync_public_key() -> String {
+    use rsa::pkcs8::EncodePublicKey;
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use base64::Engine;
+
+    let mut rng = rsa::rand_core::OsRng;
+    if let Ok(priv_key) = RsaPrivateKey::new(&mut rng, 2048) {
+        let pub_key = RsaPublicKey::from(&priv_key);
+        if let Ok(der) = pub_key.to_public_key_der() {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
+            if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
+                *g = Some((priv_key, b64.clone()));
+            }
+            return b64;
+        }
+    }
+    String::new()
+}
 /// Synchronize 1-1 and group messages from the user's phone and Zalo cloud (`Đồng bộ tin nhắn từ điện thoại`, #68).
 ///
 /// Workflow:
@@ -114,6 +186,21 @@ pub async fn sync_phone_messages<F>(
     s: &Session,
     poll_state: &tokio::sync::Mutex<chat::PollState>,
     threads: &mut Vec<Thread>,
+    on_progress: F,
+) -> Result<(usize, usize)>
+where
+    F: FnMut(f32, String),
+{
+    sync_phone_messages_opts(s, poll_state, threads, true, on_progress).await
+}
+
+/// Synchronize messages with explicit control over whether to send a wake-up/pull prompt
+/// (`send_phone_prompt`) to the user's phone or only drain server/cloud queues.
+pub async fn sync_phone_messages_opts<F>(
+    s: &Session,
+    poll_state: &tokio::sync::Mutex<chat::PollState>,
+    threads: &mut Vec<Thread>,
+    send_phone_prompt: bool,
     mut on_progress: F,
 ) -> Result<(usize, usize)>
 where
@@ -125,22 +212,63 @@ where
     let pub_key = generate_sync_public_key();
     let before_total: usize = threads.iter().map(|t| t.messages.len()).sum();
 
-    // Phase 1: Send mobile wake-up / pull request to phone (`cmd 12000` + `cmd 12888`)
-    on_progress(
-        0.08,
-        "📲 Đang gửi tín hiệu đồng bộ tới Zalo trên điện thoại…".to_string(),
-    );
-    let _ = chat::request_phone_sync(s, &pub_key).await;
-    let _ = chat::request_phone_sync_v2(s, &pub_key).await;
+    if send_phone_prompt {
+        set_last_mobile_sync_status(None);
 
-    if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
-        let _ = chat::cancel_phone_sync(s, &pub_key).await;
-        return Ok((0, 0));
+        // Phase 1: Send mobile wake-up / pull request to phone (`cmd 12000` + WebSocket `cmd 592` & `cmd 590`)
+        on_progress(
+            0.10,
+            "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
+        );
+        let _ = chat::request_phone_sync(s, &pub_key).await;
+        let _ = chat::request_phone_sync_v2(s, &pub_key).await;
+
+        // Wait for user to confirm on phone (up to 90 seconds)
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut confirmed = false;
+        while std::time::Instant::now() < deadline {
+            if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
+                let _ = chat::cancel_phone_sync(s, &pub_key).await;
+                return Ok((0, 0));
+            }
+            if let Some(ref st) = last_mobile_sync_status() {
+                if st.contains("đã xác nhận")
+                    || st.contains("đang nén")
+                    || st.contains("giải mã")
+                    || st.contains("Đã nhận gói đồng bộ")
+                    || st.contains("thành công")
+                {
+                    confirmed = true;
+                    on_progress(0.40, st.clone());
+                    break;
+                } else if st.contains("từ chối") {
+                    on_progress(1.0, st.clone());
+                    return Ok((0, 0));
+                } else {
+                    on_progress(0.20, st.clone());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        if confirmed {
+            let finish_deadline = std::time::Instant::now() + Duration::from_secs(45);
+            while std::time::Instant::now() < finish_deadline {
+                if let Some(ref st) = last_mobile_sync_status() {
+                    if st.contains("thành công") {
+                        on_progress(1.0, st.clone());
+                        break;
+                    } else if st.contains("Không thể") || st.contains("thất bại") {
+                        on_progress(1.0, st.clone());
+                        break;
+                    } else {
+                        on_progress(0.70, st.clone());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
     }
-
-    // Brief pause to allow the phone/server queue to populate after wake-up signal
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
     // Phase 2: Drain `lp_chat` multi-batch action queues (`getChatFromPolling`)
     on_progress(
         0.22,
@@ -272,24 +400,612 @@ where
     chat::deduplicate_threads(threads, None);
 
     let snapshot = threads.clone();
+    let uin_str = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let db_path = store::db_path_for_account(&uin_str);
+    let db_path_clone = db_path.clone();
     let db_added = tokio::task::spawn_blocking(move || -> Result<usize> {
-        let mut st = MessageStore::open(DB_PATH)?;
+        let mut st = MessageStore::open(&db_path_clone)?;
         let n = store::persist_threads(&mut st, &snapshot)?;
         chat::save_threads_cache(&snapshot);
         Ok(n)
     })
     .await??;
-
     let after_total: usize = threads.iter().map(|t| t.messages.len()).sum();
     let added = db_added.max(after_total.saturating_sub(before_total));
     let active_threads = threads.iter().filter(|t| !t.messages.is_empty()).count();
-    on_progress(
-        1.0,
-        format!("✅ Đồng bộ hoàn tất: +{added} tin nhắn trên {active_threads} hội thoại"),
-    );
+    let final_msg = if let Some(phone_note) = last_mobile_sync_status() {
+        format!("{phone_note} · Đã đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại)")
+    } else {
+        format!("✅ Đã gửi yêu cầu tới điện thoại & đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại). Hãy mở Zalo trên điện thoại để xác nhận nếu muốn kéo tin nhắn 1-1 cũ.")
+    };
+    on_progress(1.0, final_msg);
     Ok((added, active_threads))
 }
 
+/// Download, decrypt, decompress and ingest a mobile backup container (.db.crypt)
+/// into `zalo_history.db` and hydrate `threads_cache.json`.
+pub async fn import_mobile_backup_container(
+    s: &Session,
+    url: &str,
+    encrypted_key: &str,
+) -> Result<usize> {
+    use aes::cipher::{BlockDecryptMut, KeyIvInit};
+    use base64::Engine;
+    use rsa::Pkcs1v15Encrypt;
+    use rusqlite::Connection;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::io::Cursor;
+    use crate::store::StoredMessage;
+
+    if url.is_empty() {
+        anyhow::bail!("empty backup url");
+    }
+
+    let (priv_key, pub_key_b64) = get_sync_keys()
+        .ok_or_else(|| anyhow::anyhow!("Không tìm thấy khoá RSA phiên đồng bộ hiện tại"))?;
+
+    let raw_key = if !encrypted_key.is_empty() {
+        let enc_bytes = base64::engine::general_purpose::STANDARD.decode(encrypted_key)?;
+        priv_key.decrypt(Pkcs1v15Encrypt, &enc_bytes)?
+    } else {
+        anyhow::bail!("encrypted_key is empty");
+    };
+
+    let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let sek = s.zpw_sek.clone().unwrap_or_default();
+    let cookie_hdr = format!("zpw_sek={sek}; zpw_uin={uin}");
+
+    let resp = s
+        .http
+        .get(url)
+        .header("Cookie", cookie_hdr)
+        .header("User-Agent", "ZaloPC-win32-26.10.11")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("failed to download backup: HTTP {}", resp.status());
+    }
+
+    let crypt_data = resp.bytes().await?;
+    if crypt_data.len() < 48 {
+        anyhow::bail!("backup file too small: {} bytes", crypt_data.len());
+    }
+
+    let hex_key: String = raw_key.iter().map(|b| format!("{:02X}", b)).collect();
+    let key_32 = &hex_key.as_bytes()[..32];
+    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+    let chunk_size = 65536;
+    let iv_zero = [0u8; 16];
+    let mut decrypted = Vec::with_capacity(crypt_data.len());
+
+    for chunk in crypt_data.chunks(chunk_size) {
+        let rem = chunk.len() % 16;
+        let aligned_len = chunk.len() - rem;
+        let mut buf = chunk[..aligned_len].to_vec();
+
+        let dec = Aes256CbcDec::new(key_32.into(), &iv_zero.into());
+        dec.decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut buf)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        decrypted.extend_from_slice(&buf);
+        if rem > 0 {
+            decrypted.extend_from_slice(&chunk[aligned_len..]);
+        }
+    }
+
+    let magic = decrypted.get(..7).unwrap_or_default();
+    if magic != b"ZDB4.0\0" {
+        anyhow::bail!("invalid backup container magic: {:?}", magic);
+    }
+
+    let mut offset = 14;
+    if offset + 4 > decrypted.len() {
+        anyhow::bail!("truncated container header");
+    }
+    let n_files = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
+    offset += 4;
+
+    let mut toc = Vec::new();
+    let mut fids = Vec::new();
+    let mut gids = Vec::new();
+
+    for _ in 0..n_files {
+        if offset + 4 > decrypted.len() {
+            break;
+        }
+        let name_len = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
+        offset += 4;
+        if offset + name_len > decrypted.len() {
+            break;
+        }
+        let name = String::from_utf8_lossy(&decrypted[offset..offset + name_len]).to_string();
+        offset += name_len;
+        if offset + 4 > decrypted.len() {
+            break;
+        }
+        let size = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
+        offset += 4;
+
+        let stem = name.trim_end_matches(".db");
+        if stem.starts_with("group_") {
+            if let Ok(gid) = stem[6..].parse::<i64>() {
+                gids.push(gid);
+            }
+        } else if let Ok(fid) = stem.parse::<i64>() {
+            fids.push(fid);
+        }
+
+        toc.push((name, size));
+    }
+    let toc_end = offset;
+
+    if toc_end >= decrypted.len() {
+        anyhow::bail!("corrupted container: toc extends beyond payload");
+    }
+    let xz_slice = &decrypted[toc_end..];
+    let end_pos = xz_slice
+        .windows(2)
+        .rposition(|w| w == b"YZ")
+        .ok_or_else(|| anyhow::anyhow!("XZ footer not found"))?
+        + 2;
+
+    let mut cursor = Cursor::new(&xz_slice[..end_pos]);
+    let mut payload = Vec::new();
+    lzma_rs::xz_decompress(&mut cursor, &mut payload)?;
+
+    let noise_body = json!({
+        "fids": fids,
+        "gids": gids
+    });
+    let enc_params = s.encoded_params(&noise_body)?;
+    let znoise_url = format!("https://zwid.api.zalo.me/api/znoise?{}", s.common_params());
+    let resp = s.post_form(&znoise_url, format!("params={enc_params}")).await?;
+    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    if let Some(data) = dec.get("data") {
+        if let Some(arr) = data.get("fids").and_then(|v| v.as_array()) {
+            for (fid, thread_id_val) in fids.iter().zip(arr.iter()) {
+                if let Some(tid) = thread_id_val.as_str() {
+                    id_map.insert(format!("{fid}.db"), tid.to_string());
+                }
+            }
+        }
+        if let Some(arr) = data.get("gids").and_then(|v| v.as_array()) {
+            for (gid, thread_id_val) in gids.iter().zip(arr.iter()) {
+                if let Some(tid) = thread_id_val.as_str() {
+                    id_map.insert(format!("group_{gid}.db"), tid.to_string());
+                }
+            }
+        }
+    }
+
+    let mut store = crate::store::MessageStore::open("zalo_history.db")?;
+    let temp_dir = std::env::temp_dir().join(format!("ctdozlite_sync_{}", crate::param_cipher::random_hex(8)));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let my_uin = 435550501_i64;
+    let my_uid = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
+
+    let mut curr_offset = 0;
+    let mut total_imported = 0;
+
+    for (name, size) in toc {
+        if curr_offset + size > payload.len() {
+            break;
+        }
+        let db_bytes = &payload[curr_offset..curr_offset + size];
+        curr_offset += size;
+
+        let Some(thread_id) = id_map.get(&name) else {
+            continue;
+        };
+
+        let temp_db_path = temp_dir.join(&name);
+        if std::fs::write(&temp_db_path, db_bytes).is_err() {
+            continue;
+        }
+
+        let Ok(conn) = Connection::open(&temp_db_path) else {
+            continue;
+        };
+
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT SenderId, CliMsgId, GlbMsgId, MsgStatus, MsgType, TimeStamp, MsgContent, BinNet 
+             FROM ChatContent ORDER BY TimeStamp ASC",
+        ) else {
+            continue;
+        };
+
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<Vec<u8>>>(7)?,
+            ))
+        }) else {
+            continue;
+        };
+
+        for r in rows.flatten() {
+            let (sender_id_num, cli_msg_id, glb_msg_id, _status, msg_type_num, ts, content_opt, bin_net_opt) = r;
+            let is_outgoing = sender_id_num == my_uin;
+            let sender_id = if is_outgoing { my_uid.clone() } else { thread_id.clone() };
+            let sender_name = if is_outgoing { my_name.clone() } else { String::new() };
+
+            let msg_id = if glb_msg_id > 0 {
+                glb_msg_id.to_string()
+            } else {
+                cli_msg_id.to_string()
+            };
+
+            let mut text = content_opt.unwrap_or_default().trim().to_string();
+            let mut msg_type = "webchat".to_string();
+
+            if text.is_empty() {
+                if let Some(bn) = &bin_net_opt {
+                    let s_latin = String::from_utf8_lossy(bn);
+                    if let Some(pos) = s_latin.find("maps.app.goo.gl") {
+                        msg_type = "chat.link".to_string();
+                        let sub = &s_latin[pos..];
+                        let end_url = sub.find(['"', '}', '\\', ' ']).unwrap_or(sub.len());
+                        let url = format!("https://{}", &sub[..end_url]);
+                        text = format!("Tôi đang trên đường tới. Bạn có thể xem tiến độ đi đường và thời gian đến của tôi trên Maps: {url}");
+                    } else if msg_type_num == 10 {
+                        msg_type = "chat.sticker".to_string();
+                        text = "[Nhãn dán]".to_string();
+                    } else if msg_type_num == 3 {
+                        msg_type = "chat.photo".to_string();
+                        text = "[Hình ảnh]".to_string();
+                    } else if msg_type_num == 12 {
+                        msg_type = "chat.link".to_string();
+                        text = "[Liên kết]".to_string();
+                    }
+                }
+            }
+
+            if text.is_empty() {
+                if msg_type_num == 10 {
+                    text = "[Nhãn dán]".to_string();
+                } else if msg_type_num == 3 {
+                    text = "[Hình ảnh]".to_string();
+                } else if msg_type_num == 12 {
+                    text = "[Liên kết]".to_string();
+                }
+            }
+
+            let sm = StoredMessage {
+                msg_id,
+                thread_id: thread_id.clone(),
+                sender_id,
+                sender_name,
+                text,
+                msg_type,
+                ts,
+                is_outgoing,
+                raw_json: String::new(),
+            };
+
+            if store.upsert_message(&sm).unwrap_or(false) {
+                total_imported += 1;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let mut cached_threads = crate::chat::load_threads_cache();
+    let _ = store.hydrate_threads(&mut cached_threads, 50);
+    crate::chat::save_threads_cache(&cached_threads);
+
+    // Notify Zalo server and phone that snapshot is downloaded, dismissing mobile spinner
+    let _ = crate::chat::clean_sync(s, &pub_key_b64).await;
+    clear_sync_keys();
+
+    Ok(total_imported)
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SyncV2Keys {
+    pub ik_pub: String,
+    pub ik_priv: String,
+    pub ek_pub: String,
+    pub ek_priv: String,
+}
+
+pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
+    let out = std::process::Command::new("node")
+        .arg("sync_v2_helper.js")
+        .arg("gen-keys")
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!("node sync_v2_helper.js gen-keys failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let keys: SyncV2Keys = serde_json::from_slice(&out.stdout)?;
+    Ok(keys)
+}
+
+pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<()> {
+    let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let sek = s.zpw_sek.clone().unwrap_or_default();
+    let cookie_hdr = format!("zpw_sek={sek}; zpw_uin={uin}");
+
+    let resp = s
+        .http
+        .get(url)
+        .header("Cookie", cookie_hdr)
+        .header("User-Agent", "ZaloPC-win32-26.10.11")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("failed to download v2 meta: HTTP {}", resp.status());
+    }
+
+    let bytes = resp.bytes().await?;
+    let temp_meta = std::env::temp_dir().join(format!("meta_{}.bin", crate::param_cipher::random_hex(6)));
+    std::fs::write(&temp_meta, &bytes)?;
+
+    let out = std::process::Command::new("node")
+        .arg("sync_v2_helper.js")
+        .arg("decrypt-meta")
+        .arg(&temp_meta)
+        .output()?;
+
+    let _ = std::fs::remove_file(&temp_meta);
+
+    if !out.status.success() {
+        anyhow::bail!("decrypt-meta failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+pub struct ParsedProtoMsg {
+    pub sender_id: String,
+    pub client_id: u64,
+    pub msg_status: i32,
+    pub msg_type: i32,
+    pub timestamp: u64,
+    pub global_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ParsedProtoPartition {
+    pub id: String,
+    pub messages: Vec<ParsedProtoMsg>,
+}
+
+fn parse_vli(buf: &[u8], mut offset: usize) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    while offset < buf.len() {
+        let b = buf[offset];
+        offset += 1;
+        result |= ((b & 0x7F) as u64) << shift;
+        if (b & 0x80) == 0 {
+            return Some((result, offset));
+        }
+        shift += 7;
+        if shift >= 64 { return None; }
+    }
+    None
+}
+
+fn parse_message(buf: &[u8]) -> Option<ParsedProtoMsg> {
+    let mut msg = ParsedProtoMsg::default();
+    let mut offset = 0;
+    while offset < buf.len() {
+        let (tag, next) = parse_vli(buf, offset)?;
+        offset = next;
+        let field_num = tag >> 3;
+        let wire_type = tag & 0x07;
+        match wire_type {
+            0 => {
+                let (val, next) = parse_vli(buf, offset)?;
+                offset = next;
+                match field_num {
+                    2 => msg.client_id = val,
+                    3 => msg.msg_status = val as i32,
+                    4 => msg.msg_type = val as i32,
+                    5 => msg.timestamp = val,
+                    _ => {}
+                }
+            }
+            2 => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next;
+                let len = len as usize;
+                if offset + len > buf.len() { return None; }
+                let bytes = &buf[offset..offset + len];
+                offset += len;
+                match field_num {
+                    1 => msg.sender_id = String::from_utf8_lossy(bytes).into_owned(),
+                    6 => msg.global_id = String::from_utf8_lossy(bytes).into_owned(),
+                    7 => msg.content = String::from_utf8_lossy(bytes).into_owned(),
+                    _ => {}
+                }
+            }
+            1 => offset += 8,
+            5 => offset += 4,
+            _ => return None,
+        }
+    }
+    Some(msg)
+}
+
+fn parse_partition(buf: &[u8]) -> Option<ParsedProtoPartition> {
+    let mut part = ParsedProtoPartition::default();
+    let mut offset = 0;
+    while offset < buf.len() {
+        let (tag, next) = parse_vli(buf, offset)?;
+        offset = next;
+        let field_num = tag >> 3;
+        let wire_type = tag & 0x07;
+        match (field_num, wire_type) {
+            (1, 2) => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next;
+                let len = len as usize;
+                if offset + len > buf.len() { return None; }
+                part.id = String::from_utf8_lossy(&buf[offset..offset + len]).into_owned();
+                offset += len;
+            }
+            (2, 2) => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next;
+                let len = len as usize;
+                if offset + len > buf.len() { return None; }
+                if let Some(m) = parse_message(&buf[offset..offset + len]) {
+                    part.messages.push(m);
+                }
+                offset += len;
+            }
+            (_, 0) => {
+                let (_, next) = parse_vli(buf, offset)?;
+                offset = next;
+            }
+            (_, 2) => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next + len as usize;
+            }
+            _ => return None,
+        }
+    }
+    Some(part)
+}
+
+pub fn parse_sync_chunk(buf: &[u8]) -> Option<Vec<ParsedProtoPartition>> {
+    let mut parts = Vec::new();
+    let mut offset = 0;
+    while offset < buf.len() {
+        let (tag, next) = parse_vli(buf, offset)?;
+        offset = next;
+        let field_num = tag >> 3;
+        let wire_type = tag & 0x07;
+        match (field_num, wire_type) {
+            (2, 2) => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next;
+                let len = len as usize;
+                if offset + len > buf.len() { return None; }
+                if let Some(p) = parse_partition(&buf[offset..offset + len]) {
+                    parts.push(p);
+                }
+                offset += len;
+            }
+            (_, 0) => {
+                let (_, next) = parse_vli(buf, offset)?;
+                offset = next;
+            }
+            (_, 2) => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next + len as usize;
+            }
+            _ => return None,
+        }
+    }
+    Some(parts)
+}
+
+pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
+    let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let sek = s.zpw_sek.clone().unwrap_or_default();
+    let cookie_hdr = format!("zpw_sek={sek}; zpw_uin={uin}");
+
+    let resp = s
+        .http
+        .get(url)
+        .header("Cookie", cookie_hdr)
+        .header("User-Agent", "ZaloPC-win32-26.10.11")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("failed to download v2 messages: HTTP {}", resp.status());
+    }
+
+    let bytes = resp.bytes().await?;
+    let temp_msg = std::env::temp_dir().join(format!("msg_{}.bin", crate::param_cipher::random_hex(6)));
+    std::fs::write(&temp_msg, &bytes)?;
+
+    let out = std::process::Command::new("node")
+        .arg("sync_v2_helper.js")
+        .arg("decrypt-message")
+        .arg(&temp_msg)
+        .output()?;
+
+    let _ = std::fs::remove_file(&temp_msg);
+
+    if !out.status.success() {
+        anyhow::bail!("decrypt-message failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    let decrypted_bytes = std::fs::read("sync_v2_message.bin")?;
+    let decompressed = match zstd::decode_all(std::io::Cursor::new(&decrypted_bytes)) {
+        Ok(d) => d,
+        Err(_) => decrypted_bytes,
+    };
+
+    let partitions = parse_sync_chunk(&decompressed).unwrap_or_default();
+    let db_path = crate::store::db_path_for_account(&uin);
+    let mut store = crate::store::MessageStore::open(&db_path)?;
+    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
+
+    let mut imported = 0;
+    for part in partitions {
+        let thread_id = part.id.clone();
+        for m in part.messages {
+            let is_outgoing = m.sender_id == uin;
+            let sender_name = if is_outgoing { my_name.clone() } else { String::new() };
+            let msg_id = if !m.global_id.is_empty() && m.global_id != "0" {
+                m.global_id
+            } else {
+                m.client_id.to_string()
+            };
+
+            let sm = crate::store::StoredMessage {
+                msg_id,
+                thread_id: thread_id.clone(),
+                sender_id: if is_outgoing { uin.clone() } else { thread_id.clone() },
+                sender_name,
+                text: m.content,
+                msg_type: "webchat".into(),
+                ts: m.timestamp as i64,
+                is_outgoing,
+                raw_json: String::new(),
+            };
+
+            if store.upsert_message(&sm).unwrap_or(false) {
+                imported += 1;
+            }
+        }
+    }
+
+    let mut cached_threads = crate::chat::load_threads_cache();
+    let _ = store.hydrate_threads(&mut cached_threads, 50);
+    crate::chat::save_threads_cache(&cached_threads);
+
+    if let Some(pub_k) = get_sync_public_key() {
+        let _ = crate::chat::clean_sync(s, &pub_k).await;
+    }
+
+    let _ = std::fs::remove_file("sync_v2_message.bin");
+    let _ = std::fs::remove_file("sync_v2_session.bin");
+    let _ = std::fs::remove_file("sync_v2_keys.json");
+
+    Ok(imported)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,14 +1050,78 @@ mod tests {
     }
 
     #[test]
-    fn generate_sync_public_key_produces_valid_32_byte_base64() {
+    fn generate_sync_public_key_produces_valid_rsa2048_spki_der_base64() {
         use base64::Engine;
         let k1 = generate_sync_public_key();
         let k2 = generate_sync_public_key();
         assert_ne!(k1, k2);
+        assert!(
+            k1.starts_with("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA"),
+            "must have valid ASN.1 RSA-2048 SPKI DER prefix: {k1}"
+        );
         let raw = base64::engine::general_purpose::STANDARD
             .decode(&k1)
             .expect("valid base64");
-        assert_eq!(raw.len(), 32);
+        assert_eq!(raw.len(), 294);
+        assert_eq!(&raw[raw.len() - 5..], &[0x02, 0x03, 0x01, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn generate_sync_v2_ed25519_public_key_produces_33_byte_djb_curve_key() {
+        use base64::Engine;
+        let ik = generate_sync_v2_ed25519_public_key(0xA1);
+        let ek = generate_sync_v2_ed25519_public_key(0xB2);
+        assert_ne!(ik, ek);
+        assert!(ik.starts_with("B"), "DJB 0x05 prefix must base64-encode to 'B': {ik}");
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&ik)
+            .expect("valid base64");
+        assert_eq!(raw.len(), 33);
+        assert_eq!(raw[0], 0x05);
+    }
+
+    #[test]
+    fn extract_mobile_sync_controls_parses_v1_and_v2_events() {
+        let payload = serde_json::json!({
+            "controls": [
+                {
+                    "content": {
+                        "act_type": "transfer_sync2",
+                        "act": "transfer_status",
+                        "data": "{\"syncId\":\"abc123\",\"fromDevice\":0,\"status\":3}"
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "syncmsgmb",
+                        "act": "user_confirm",
+                        "data": "{\"user_action\":2,\"pc_name\":\"ADMIN-PC\"}"
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "transfer_sync2",
+                        "act": "upload_batch",
+                        "data": "{\"syncId\":\"abc123\",\"err\":0,\"msgUrl\":\"https://f.zalo.me/batch1\"}"
+                    }
+                }
+            ]
+        });
+        let evs = crate::chat::extract_mobile_sync_controls(&payload);
+        assert_eq!(
+            evs,
+            vec![
+                crate::chat::MobileSyncControlEvent::WaitingConfirmOnPhone {
+                    sync_id: "abc123".into()
+                },
+                crate::chat::MobileSyncControlEvent::MobileBusyRestoring,
+                crate::chat::MobileSyncControlEvent::SyncV2Batch {
+                    url: "https://f.zalo.me/batch1".into(),
+                    sync_id: "abc123".into(),
+                    batch_type: 0,
+                    is_last: false,
+                },
+            ]
+        );
     }
 }

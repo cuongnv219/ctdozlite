@@ -1135,19 +1135,43 @@ pub fn deduplicate_threads(
     *threads = merged;
 }
 
-/// Load locally cached conversations and message history.
+fn active_uin_from_session() -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string("session.json") {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(uin) = val.pointer("/login/uin").and_then(|v| v.as_str()) {
+                if !uin.is_empty() {
+                    return Some(uin.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Load locally cached conversations and message history scoped to active account.
 pub fn load_threads_cache() -> Vec<Thread> {
-    if let Ok(text) = std::fs::read_to_string("threads_cache.json") {
-        if let Ok(mut threads) = serde_json::from_str::<Vec<Thread>>(&text) {
-            deduplicate_threads(&mut threads, None);
-            return threads;
+    if let Some(uin) = active_uin_from_session() {
+        let acc_path = format!("accounts/{uin}_threads.json");
+        if let Ok(text) = std::fs::read_to_string(&acc_path) {
+            if let Ok(mut threads) = serde_json::from_str::<Vec<Thread>>(&text) {
+                deduplicate_threads(&mut threads, None);
+                return threads;
+            }
+        }
+    }
+    if std::path::Path::new("session.json").exists() {
+        if let Ok(text) = std::fs::read_to_string("threads_cache.json") {
+            if let Ok(mut threads) = serde_json::from_str::<Vec<Thread>>(&text) {
+                deduplicate_threads(&mut threads, None);
+                return threads;
+            }
         }
     }
     Vec::new()
 }
 
 /// Snapshot of the thread list for an instant first paint. Only the newest
-/// `PRELOAD_MSGS` messages per thread are kept: full history lives in `zalo_history.db`, and
+/// `PRELOAD_MSGS` messages per thread are kept: full history lives in SQLite, and
 /// rewriting every message as pretty JSON on each change cost more than the SQLite write.
 pub fn save_threads_cache(threads: &[Thread]) {
     let keep = crate::store::MessageStore::PRELOAD_MSGS;
@@ -1166,7 +1190,11 @@ pub fn save_threads_cache(threads: &[Thread]) {
         })
         .collect();
     if let Ok(text) = serde_json::to_string(&slim) {
-        let _ = std::fs::write("threads_cache.json", text);
+        let _ = std::fs::write("threads_cache.json", &text);
+        if let Some(uin) = active_uin_from_session() {
+            let _ = std::fs::create_dir_all("accounts");
+            let _ = std::fs::write(format!("accounts/{uin}_threads.json"), text);
+        }
     }
 }
 
@@ -1242,9 +1270,11 @@ pub async fn get_friends(s: &Session) -> Result<Vec<Thread>> {
         }
     }
 
-    // Hydrate with locally persisted history from SQLite (`zalo_history.db`)
+    // Hydrate with locally persisted history from SQLite scoped to this account
+    let uin = s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or_default();
+    let db_path = crate::store::db_path_for_account(uin);
     crate::store::load_history_into_threads(
-        "zalo_history.db",
+        &db_path,
         &mut threads,
         crate::store::MessageStore::PRELOAD_MSGS,
     );
@@ -1622,6 +1652,137 @@ fn md5_hex_bytes(bytes: &[u8]) -> String {
     })
 }
 
+/// How long `send_attachment` waits for the `file_done` control event of an async file upload.
+const FILE_DONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// How long an unclaimed `file_done` event is kept for a waiter that registers late.
+const FILE_DONE_EARLY_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Async file uploads waiting for their `act_type: "file_done"` control event, keyed by `fileId`.
+///
+/// `asyncfile/upload` only returns a `fileId`; Zalo pushes the final `fileUrl` later over the
+/// WebSocket (`cmd 601`) or `lp_control`, and `asyncfile/msg` is rejected without it.
+#[derive(Default)]
+struct FileDoneRegistry {
+    waiters: std::collections::HashMap<String, tokio::sync::oneshot::Sender<String>>,
+    /// Events that arrived before their waiter registered (`fileId` -> (`fileUrl`, received at)).
+    early: std::collections::HashMap<String, (String, std::time::Instant)>,
+}
+
+static FILE_DONE_REGISTRY: std::sync::LazyLock<std::sync::Mutex<FileDoneRegistry>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(FileDoneRegistry::default()));
+
+/// Set once any control-event consumer (WebSocket or `lp_control` poll) feeds `file_done` events,
+/// so front-ends without one (TUI) skip the wait instead of stalling for `FILE_DONE_TIMEOUT`.
+static FILE_DONE_LISTENER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn file_id_key(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse `act_type: "file_done"` items (`{fileId, data: {url}}`) into `(fileId, fileUrl)` pairs.
+pub fn extract_file_done_controls(data_node: &Value) -> Vec<(String, String)> {
+    let mut candidates: Vec<&Value> = Vec::new();
+    if let Some(arr) = data_node.get("controls").and_then(Value::as_array) {
+        candidates.extend(arr.iter());
+    } else if let Some(arr) = data_node.as_array() {
+        for item in arr {
+            if let Some(sub) = item.get("controls").and_then(Value::as_array) {
+                candidates.extend(sub.iter());
+            } else {
+                candidates.push(item);
+            }
+        }
+    } else {
+        candidates.push(data_node);
+    }
+
+    let mut out = Vec::new();
+    for item in candidates {
+        let c = item.get("content").unwrap_or(item);
+        if c.get("act_type").and_then(Value::as_str) != Some("file_done") {
+            continue;
+        }
+        let raw_data = c.get("data").unwrap_or(&Value::Null);
+        let parsed_data: Value;
+        let d = if let Some(s) = raw_data.as_str() {
+            parsed_data = serde_json::from_str::<Value>(s).unwrap_or(Value::Null);
+            &parsed_data
+        } else {
+            raw_data
+        };
+        let Some(file_id) = c
+            .get("fileId")
+            .or_else(|| d.get("fileId"))
+            .and_then(file_id_key)
+        else {
+            continue;
+        };
+        let Some(url) = pick_str(d, &["url", "fileUrl"]) else {
+            continue;
+        };
+        out.push((file_id, url));
+    }
+    out
+}
+
+/// Resolve pending async file uploads from a decrypted control payload (WebSocket `cmd 601` or
+/// `lp_control`). Unclaimed events are kept briefly for uploads whose waiter registers late.
+pub fn dispatch_file_done_controls(data_node: &Value) {
+    FILE_DONE_LISTENER_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let events = extract_file_done_controls(data_node);
+    if events.is_empty() {
+        return;
+    }
+    let Ok(mut reg) = FILE_DONE_REGISTRY.lock() else {
+        crate::logger::log_error("chat::file_done", "registry mutex poisoned");
+        return;
+    };
+    reg.early
+        .retain(|_, (_, at)| at.elapsed() < FILE_DONE_EARLY_TTL);
+    for (file_id, url) in events {
+        match reg.waiters.remove(&file_id) {
+            Some(tx) => {
+                let _ = tx.send(url);
+            }
+            None => {
+                reg.early.insert(file_id, (url, std::time::Instant::now()));
+            }
+        }
+    }
+}
+
+fn register_file_done_waiter(file_id: &str) -> tokio::sync::oneshot::Receiver<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    match FILE_DONE_REGISTRY.lock() {
+        Ok(mut reg) => match reg.early.remove(file_id) {
+            Some((url, _)) => {
+                let _ = tx.send(url);
+            }
+            None => {
+                reg.waiters.insert(file_id.to_string(), tx);
+            }
+        },
+        // Dropping `tx` makes the receiver resolve immediately with an error.
+        Err(_) => crate::logger::log_error("chat::file_done", "registry mutex poisoned"),
+    }
+    rx
+}
+
+/// Wait up to `timeout` for the `file_done` event of `file_id`; `None` on timeout.
+async fn wait_for_file_done(file_id: &str, timeout: std::time::Duration) -> Option<String> {
+    let rx = register_file_done_waiter(file_id);
+    let res = tokio::time::timeout(timeout, rx).await;
+    if let Ok(mut reg) = FILE_DONE_REGISTRY.lock() {
+        reg.waiters.remove(file_id);
+    }
+    res.ok().and_then(Result::ok)
+}
+
 /// Upload and send a photo, video, or general file attachment to a 1-1 or group conversation.
 ///
 /// Implements Zalo PC 26.10.11's two-stage chunked upload (`photo_original/upload` -> `photo_original/send`
@@ -1898,19 +2059,36 @@ pub async fn send_attachment(
             "{file_host}{upload_ep}?{}&params={params}&type={target_type}",
             s.common_params()
         );
-        if let Ok(up_raw) = s
+        let up_raw = s
             .post_multipart(&url, "chunkContent", &file_name, mime, chunk)
             .await
-        {
-            last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
-        } else {
-            break;
+            .map_err(|e| anyhow::anyhow!("tải lên phần {chunk_id}/{total_chunks} thất bại: {e}"))?;
+        last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+        if let Some(code) = last_up_dec.get("error_code").and_then(Value::as_i64) {
+            if code != 0 {
+                let msg = last_up_dec
+                    .get("error_message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                return Err(crate::session::SessionError::new(code, msg).into());
+            }
         }
     }
 
     let data_node = last_up_dec.get("data").unwrap_or(&last_up_dec);
-    let file_id = pick_str(data_node, &["fileId", "clientFileId"]);
-    let file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl"]).unwrap_or_default();
+    let file_id = pick_str(data_node, &["fileId", "clientFileId"]).filter(|id| id != "-1");
+    let mut file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl"]).unwrap_or_default();
+    if file_url.is_empty() && FILE_DONE_LISTENER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(fid) = file_id.as_deref() {
+            match wait_for_file_done(fid, FILE_DONE_TIMEOUT).await {
+                Some(url) => file_url = url,
+                None => crate::logger::log_error(
+                    "chat::send_attachment",
+                    &format!("no file_done event for fileId {fid} within {FILE_DONE_TIMEOUT:?}"),
+                ),
+            }
+        }
+    }
 
     let mut send_resp = if let Some(fid) = file_id {
         let msg_ep = if is_group {
@@ -5305,31 +5483,10 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
             }
         }
         if let Some(cu_arr) = obj.get("clearUnreads").and_then(Value::as_array) {
-            for cu in cu_arr {
-                let Some(tid) = pick_str(cu, &["idTo", "threadId", "userId"]) else {
-                    continue;
-                };
-                if tid.is_empty() || tid == "0" {
-                    continue;
-                }
-                let is_grp = is_group_flag(cu);
-                // Only auto-create 1-1 conversation threads from `clearUnreads`; disbanded groups
-                // may linger in `clearUnreads` after removal, whereas active groups come from `get_groups`.
-                if !is_grp && !threads.iter().any(|t| t.id == tid) {
-                    threads.push(Thread {
-                        presentation: Default::default(),
-                        unread: Default::default(),
-                        id: tid.clone(),
-                        name: format!("Người dùng {tid}"),
-                        preview: String::new(),
-                        time: String::new(),
-                        avatar: None,
-                        is_group: false,
-                        messages: Vec::new(),
-                    });
-                }
+            // clearUnreads updates read points; do not auto-create empty stranger threads without messages.
+            if !cu_arr.is_empty() {
+                found_list = true;
             }
-            found_list = true;
         }
         if !found_list {
             for (_, val) in obj {
@@ -5973,6 +6130,110 @@ pub async fn update_pinned_conversation(
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
+/// Send a real-time "is typing" indicator to a 1-1 contact (`cmd 11144`, `/api/message/typing`)
+/// or a group (`cmd 11196`, `/api/group/typing`), unless blocked by `block_typing`.
+pub async fn send_typing_indicator(
+    s: &Session,
+    thread_id: &str,
+    is_group: bool,
+) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    if crate::session::privacy_blocker_state().0 {
+        return Ok(json!({"error_code": 0, "data": {}}));
+    }
+    let clean = thread_id
+        .trim_start_matches("group_")
+        .trim_start_matches('g')
+        .trim_start_matches('G')
+        .trim_start_matches('u')
+        .trim();
+    if clean.is_empty() {
+        return Ok(json!({"error_code": 0, "data": {}}));
+    }
+    let (endpoint, path_and_q, body) = if is_group {
+        (
+            "group",
+            format!("/api/group/typing?{}", s.common_params()),
+            json!({
+                "grid": clean,
+                "imei": s.imei,
+            }),
+        )
+    } else {
+        (
+            "chat",
+            format!("/api/message/typing?{}", s.common_params()),
+            json!({
+                "toid": clean,
+                "destType": 0,
+                "imei": s.imei,
+            }),
+        )
+    };
+    let params = s.encoded_params(&body)?;
+    let resp = s
+        .post_endpoint_form(endpoint, &path_and_q, format!("params={params}"))
+        .await?;
+    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
+/// Send a "seen" receipt (`cmd 12118` `/api/message/seenv2` or `cmd 12124` `/api/group/seenv2`),
+/// unless blocked by `block_seen`.
+pub async fn send_seen_v2(
+    s: &Session,
+    thread_id: &str,
+    is_group: bool,
+    last_msg_id: &str,
+) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    if crate::session::privacy_blocker_state().2 {
+        return Ok(json!({"error_code": 0, "data": {}}));
+    }
+    let clean = thread_id
+        .trim_start_matches("group_")
+        .trim_start_matches('g')
+        .trim_start_matches('G')
+        .trim_start_matches('u')
+        .trim();
+    if clean.is_empty() || last_msg_id.trim().is_empty() {
+        return Ok(json!({"error_code": 0, "data": {}}));
+    }
+    let (endpoint, path_and_q, body) = if is_group {
+        (
+            "group",
+            format!("/api/group/seenv2?{}", s.common_params()),
+            json!({
+                "msgInfos": json!({
+                    "data": [{ "gmi": last_msg_id, "cmi": last_msg_id }],
+                    "grid": clean,
+                }).to_string(),
+                "imei": s.imei,
+            }),
+        )
+    } else {
+        (
+            "chat",
+            format!("/api/message/seenv2?{}", s.common_params()),
+            json!({
+                "msgInfos": json!({
+                    "data": [{ "gmi": last_msg_id, "cmi": last_msg_id }],
+                    "senderId": clean,
+                }).to_string(),
+                "imei": s.imei,
+            }),
+        )
+    };
+    let params = s.encoded_params(&body)?;
+    let resp = s
+        .post_endpoint_form(endpoint, &path_and_q, format!("params={params}"))
+        .await?;
+    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
 /// Mark a conversation as unread or read (`addMarkAsUnread` / `removeMarkAsUnread` @ `compact-app-pc.js:14299958`, cmd `12013` / `12014`).
 pub async fn set_unread_mark(
     s: &Session,
@@ -6225,8 +6486,19 @@ pub fn extract_mute_controls(data_node: &Value, now_unix: i64) -> Vec<MuteContro
 }
 
 /// Request mobile message sync (`pullMobileMsg` @ `app.asar`, cmd `12000`, `file` endpoint, #68, #73).
-/// Sends a wake-up/sync signal to the user's phone Zalo client to push recent messages.
+/// Sends a wake-up/sync signal with a 2048-bit RSA SPKI DER public key to the user's phone Zalo client.
 pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> {
+    let temp_key = crate::history_sync::latest_mobile_temp_key();
+    request_phone_sync_with_temp_key(s, public_key, &temp_key).await
+}
+
+/// Request mobile message sync (`pullMobileMsg`, cmd `12000`) with an explicit `temp_key`
+/// (received from `transfer_after_login` control event or empty for manual request).
+pub async fn request_phone_sync_with_temp_key(
+    s: &Session,
+    public_key: &str,
+    temp_key: &str,
+) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
@@ -6236,9 +6508,7 @@ pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> 
         "from_seq_id": 0,
         "is_retry": 0,
         "min_seq_id": 0,
-        "last_action_id": 0,
-        "last_group_action_id": 0,
-        "temp_key": "",
+        "temp_key": temp_key,
         "imei": s.imei
     });
     let params = s.encoded_params(&body)?;
@@ -6262,46 +6532,66 @@ pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> 
 }
 
 /// Request transfer-sync v2 from phone (`requestSyncMessage` @ `app.asar`, cmd `12888`, `file` endpoint, #68, #73).
-pub async fn request_phone_sync_v2(s: &Session, public_key: &str) -> Result<Value> {
+/// Mirrors `requestSyncMessage(reqId, data)` in `main-startup.js:14372356` & `shared-worker.js:282247`
+/// plus WebSocket `cmd 592` (`REQUEST_MOBILE_WAKE_UP`) and `cmd 590` (`SYNC_MESSAGE.REQUEST`).
+pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let body = json!({
-        "pc_name": s.computer_name,
-        "public_key": public_key,
-        "version": 1,
-        "is_retry": 0,
-        "last_action_id": 0,
-        "last_group_action_id": 0,
-        "temp_key": "",
-        "imei": s.imei
+    let sync_id = crate::param_cipher::random_hex(32);
+    let temp_key = crate::history_sync::latest_mobile_temp_key();
+    let (ik_pub, ek_pub) = match crate::history_sync::generate_sync_v2_keys() {
+        Ok(k) => (k.ik_pub, k.ek_pub),
+        Err(_) => (
+            crate::history_sync::generate_sync_v2_ed25519_public_key(0xA1),
+            crate::history_sync::generate_sync_v2_ed25519_public_key(0xB2),
+        ),
+    };
+    // 1. Wake up mobile master device over WebSocket (`cmd 592`)
+    let _ = crate::socket::send_mobile_wakeup(&sync_id);
+
+    // 2. Build SyncFull v2 request payload matching `shared-worker.js:282247` & `314736`
+    let sync_data = json!({
+        "syncId": sync_id,
+        "syncType": 0, // No.d.SyncFull = 0
+        "ek": ek_pub,
+        "ik": ik_pub,
+        "toDevice": 0, // No.c.Mobile = 0
+        "tempKey": temp_key,
+        "deviceName": s.computer_name,
+        "req": {
+            "type": "message",
+            "priority": 1,
+            "queries": [
+                {
+                    "partition": "",
+                    "from": 0,
+                    "to": 9_007_199_254_740_991_i64,
+                    "limit": 2000
+                }
+            ],
+            "batchSize": 2000
+        },
+        "ver": 1,
+        "ussidx": 0
     });
-    let params = s.encoded_params(&body)?;
-    let path = format!(
-        "/api/transfer-sync-v2/request-sync?{}&params={params}",
-        s.common_params()
-    );
-    if let Ok(resp) = s.get_endpoint("file", &path).await {
-        let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
-        if dec.get("error_code").and_then(Value::as_i64) == Some(0) {
-            return Ok(dec);
+    let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
+    Ok(json!({
+        "error_code": 0,
+        "data": {
+            "syncId": sync_id,
+            "ws_sent": sent_ws,
         }
-    }
-    let post_url = format!(
-        "{}/api/transfer-sync-v2/request-sync?{}",
-        s.domains.file,
-        s.common_params()
-    );
-    let resp = s.post_form(&post_url, format!("params={params}")).await?;
-    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    }))
 }
 
-/// Cancel an active mobile message sync request (`cancelTransferMessage` @ `app.asar`, cmd `12700`, #68).
+/// Cancel an active mobile message sync request (`cancelTransferMessage` @ `app.asar:14372356`, cmd `12700`, #68).
 pub async fn cancel_phone_sync(s: &Session, public_key: &str) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
     let body = json!({
+        "pc_name": s.computer_name,
         "public_key": public_key,
         "imei": s.imei
     });
@@ -6312,6 +6602,199 @@ pub async fn cancel_phone_sync(s: &Session, public_key: &str) -> Result<Value> {
     );
     let resp = s.get_endpoint("file", &path).await?;
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+/// Notify Zalo server and mobile device that sync snapshot download is completed
+/// (`cleanSync` @ `app.asar`, cmd `12003`), dismissing the mobile sync spinner.
+pub async fn clean_sync(s: &Session, public_key: &str) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let body = json!({
+        "public_key": public_key,
+        "imei": s.imei
+    });
+    let params = s.encoded_params(&body)?;
+    let path = format!(
+        "/api/message/delete_snapshot_mobile_msg?{}&params={params}",
+        s.common_params()
+    );
+    let resp = s.get_endpoint("file", &path).await?;
+    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
+/// Mobile sync control event received via WebSocket (`cmd 601`/`602`/`603`) or `lp_control`
+/// (`act_type: "transfer_msg" | "syncmsgmb" | "transfer_sync2"`, `main-startup.js:647494`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MobileSyncControlEvent {
+    /// `act == "transfer_after_login"` — carries `temp_key` issued right after QR scan.
+    TransferAfterLogin { temp_key: String },
+    /// `act == "transfer_status"` (`status == 3`) — phone displayed confirmation prompt and is waiting for user tap!
+    WaitingConfirmOnPhone { sync_id: String },
+    /// `act == "user_confirm"` (`user_action == 1 | 3`) or `transfer_status` (`status == 4 | 5`) — user tapped "Đồng bộ" on their phone!
+    UserConfirmed,
+    /// `act == "user_confirm"` (`user_action == 0`) or `transfer_status` (`status == 6 | 7`) — user declined sync on their phone.
+    UserRejected,
+    /// `act == "user_confirm"` (`user_action == 2`) or `transfer_status` (`status == 8`) — phone is busy backing up/restoring (`BUSY_RESTORING`).
+    MobileBusyRestoring,
+    /// `act == "syncmsg_info"` or `act == "upload_batch"` — phone finished uploading backup package (`url`, `file_name`, `encrypted_key`).
+    BackupReady {
+        url: String,
+        file_name: String,
+        encrypted_key: String,
+        checksum: String,
+    },
+    /// `act == "upload_batch"` (`act_type == "transfer_sync2"`) — Sync v2 chunk (used by iOS).
+    SyncV2Batch {
+        url: String,
+        sync_id: String,
+        batch_type: u8,
+        is_last: bool,
+    },
+}
+
+/// Extract `transfer_msg` / `syncmsgmb` / `transfer_sync2` events from a control payload.
+pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlEvent> {
+    let mut out = Vec::new();
+    let mut candidates: Vec<&Value> = Vec::new();
+    if let Some(arr) = data_node.get("controls").and_then(Value::as_array) {
+        candidates.extend(arr.iter());
+    } else if let Some(arr) = data_node.as_array() {
+        for item in arr {
+            if let Some(sub) = item.get("controls").and_then(Value::as_array) {
+                candidates.extend(sub.iter());
+            } else {
+                candidates.push(item);
+            }
+        }
+    } else {
+        candidates.push(data_node);
+    }
+
+    for item in candidates {
+        let c = item.get("content").unwrap_or(item);
+        let act_type = c
+            .get("act_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(act_type, "transfer_msg" | "syncmsgmb" | "transfer_sync2") {
+            continue;
+        }
+        let act = c.get("act").and_then(Value::as_str).unwrap_or_default();
+        let parsed_data: Value = match c.get("data") {
+            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
+            Some(v) => v.clone(),
+            None => Value::Null,
+        };
+        match act {
+            "transfer_after_login" => {
+                if let Some(tk) = parsed_data
+                    .get("temp_key")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    out.push(MobileSyncControlEvent::TransferAfterLogin {
+                        temp_key: tk.to_string(),
+                    });
+                }
+            }
+            "user_confirm" => {
+                let ua = parsed_data
+                    .get("user_action")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                    .unwrap_or(-1);
+                if ua == 1 || ua == 3 {
+                    out.push(MobileSyncControlEvent::UserConfirmed);
+                } else if ua == 2 {
+                    out.push(MobileSyncControlEvent::MobileBusyRestoring);
+                } else if ua == 0 {
+                    out.push(MobileSyncControlEvent::UserRejected);
+                }
+            }
+            "transfer_status" => {
+                let st = parsed_data
+                    .get("status")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                    .unwrap_or(-1);
+                let sid = parsed_data
+                    .get("syncId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                match st {
+                    3 => out.push(MobileSyncControlEvent::WaitingConfirmOnPhone { sync_id: sid }),
+                    4 | 5 => out.push(MobileSyncControlEvent::UserConfirmed),
+                    6 | 7 => out.push(MobileSyncControlEvent::UserRejected),
+                    8 => out.push(MobileSyncControlEvent::MobileBusyRestoring),
+                    _ => {}
+                }
+            }
+            "upload_batch" => {
+                let url = parsed_data
+                    .get("msgUrl")
+                    .or_else(|| parsed_data.get("url"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let sid = parsed_data
+                    .get("syncId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("sync_v2_batch")
+                    .to_string();
+                let batch_type = parsed_data
+                    .get("batchType")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as u8;
+                let is_last = parsed_data
+                    .get("isLast")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) == 1;
+                if !url.is_empty() {
+                    out.push(MobileSyncControlEvent::SyncV2Batch {
+                        url,
+                        sync_id: sid,
+                        batch_type,
+                        is_last,
+                    });
+                } else {
+                    out.push(MobileSyncControlEvent::MobileBusyRestoring);
+                }
+            }
+            "syncmsg_info" => {
+                let url = parsed_data
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let file_name = parsed_data
+                    .get("file_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let encrypted_key = parsed_data
+                    .get("encrypted_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let checksum = parsed_data
+                    .get("checksum_code")
+                    .or_else(|| parsed_data.get("checksum"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if !url.is_empty() {
+                    out.push(MobileSyncControlEvent::BackupReady {
+                        url,
+                        file_name,
+                        encrypted_key,
+                        checksum,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Hide or unhide a conversation (`updateItemHiddenChat` @ `compact-app-pc.js:14384423`, cmd `10049`).
@@ -7335,6 +7818,58 @@ mod send_identity_tests {
     }
 
     #[test]
+    fn extract_file_done_controls_parses_object_and_string_data() {
+        let payload = json!({
+            "controls": [
+                { "content": { "act_type": "file_done", "fileId": 1234567, "data": { "url": "https://f.zdn.vn/a.pdf" } } },
+                { "content": { "act_type": "file_done", "fileId": "89", "data": "{\"url\":\"https://f.zdn.vn/b.mp4\"}" } },
+                { "content": { "act_type": "voip", "fileId": 1, "data": { "url": "https://x" } } },
+                { "content": { "act_type": "file_done", "fileId": 2, "data": {} } }
+            ]
+        });
+        assert_eq!(
+            extract_file_done_controls(&payload),
+            vec![
+                ("1234567".to_string(), "https://f.zdn.vn/a.pdf".to_string()),
+                ("89".to_string(), "https://f.zdn.vn/b.mp4".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn file_done_resolves_waiters_registered_before_and_after_the_event() {
+        let ev = |id: &str, url: &str| json!({ "controls": [{ "content": { "act_type": "file_done", "fileId": id, "data": { "url": url } } }] });
+
+        // Event arrives while the upload is already waiting.
+        let waiter = tokio::spawn(async {
+            wait_for_file_done("test_fd_after", std::time::Duration::from_secs(5)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        dispatch_file_done_controls(&ev("test_fd_after", "https://f/after"));
+        assert_eq!(waiter.await.unwrap().as_deref(), Some("https://f/after"));
+
+        // Event arrives before the upload registers its waiter.
+        dispatch_file_done_controls(&ev("test_fd_early", "https://f/early"));
+        assert_eq!(
+            wait_for_file_done("test_fd_early", std::time::Duration::from_secs(5))
+                .await
+                .as_deref(),
+            Some("https://f/early")
+        );
+
+        // No event: times out and leaves no stale waiter behind.
+        assert_eq!(
+            wait_for_file_done("test_fd_none", std::time::Duration::from_millis(20)).await,
+            None
+        );
+        assert!(!FILE_DONE_REGISTRY
+            .lock()
+            .unwrap()
+            .waiters
+            .contains_key("test_fd_none"));
+    }
+
+    #[test]
     fn extract_mute_controls_parses_set_and_unset_events_for_peers_and_groups() {
         let now = 1700000000_i64;
         let payload = json!({
@@ -7471,5 +8006,57 @@ mod send_identity_tests {
         let msg_b = parse_chat_message(&raw_file_no_ext).expect("must parse file message");
         assert_eq!(msg_b.link_src.as_deref(), Some("Tập tin Zalo"));
         assert_eq!(msg_b.link_title.as_deref(), Some("De_cuong_mon_hoc.doc"));
+    }
+
+    #[test]
+    fn extract_mobile_sync_controls_parses_transfer_confirm_and_backup_ready() {
+        let payload = json!({
+            "controls": [
+                {
+                    "content": {
+                        "act_type": "transfer_msg",
+                        "act": "transfer_after_login",
+                        "data": "{\"temp_key\":\"tk_login_999\"}"
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "syncmsgmb",
+                        "act": "user_confirm",
+                        "data": { "user_action": 1, "pc_name": "DESKTOP" }
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "syncmsgmb",
+                        "act": "syncmsg_info",
+                        "data": {
+                            "url": "https://f1-zpc.zdn.vn/backup.zdb",
+                            "file_name": "backup.zdb",
+                            "encrypted_key": "enc_key_b64",
+                            "checksum_code": "md5_123"
+                        }
+                    }
+                }
+            ]
+        });
+        let evs = extract_mobile_sync_controls(&payload);
+        assert_eq!(evs.len(), 3);
+        assert_eq!(
+            evs[0],
+            MobileSyncControlEvent::TransferAfterLogin {
+                temp_key: "tk_login_999".into()
+            }
+        );
+        assert_eq!(evs[1], MobileSyncControlEvent::UserConfirmed);
+        assert_eq!(
+            evs[2],
+            MobileSyncControlEvent::BackupReady {
+                url: "https://f1-zpc.zdn.vn/backup.zdb".into(),
+                file_name: "backup.zdb".into(),
+                encrypted_key: "enc_key_b64".into(),
+                checksum: "md5_123".into(),
+            }
+        );
     }
 }

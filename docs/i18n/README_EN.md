@@ -1,12 +1,12 @@
 # ctdozlite
 
-**[Tiếng Việt](README.md)** · **[English](README_EN.md)** · **[한국어](README_KO.md)** · **[日本語](README_JA.md)** · **[简体中文](README_ZH.md)**
+**[Tiếng Việt](../../README.md)** · **[English](README_EN.md)** · **[한국어](README_KO.md)** · **[日本語](README_JA.md)** · **[简体中文](README_ZH.md)**
 
 A pure Rust Zalo Desktop client (`eframe`/`egui` + `ratatui`) communicating directly with Zalo Web/PC APIs and WebSocket services without Electron or Chromium.
 
 - **Project Homepage (Website & Download):** [https://ctdozlite.ctdo.net/](https://ctdozlite.ctdo.net/)
 - **Prebuilt Packages (Releases):** [https://github.com/ctdoteam1110/ctdozlite/releases](https://github.com/ctdoteam1110/ctdozlite/releases)
-- **Feature Matrix & Guides:** [Features & Limits](docs/TINH_NANG.md) · [Known Issues](docs/DA_BIET.md) · [Troubleshooting](docs/KHAC_PHUC_SU_CO.md)
+- **Feature Matrix & Guides:** [Features & Limits](../TINH_NANG.md) · [Known Issues](../DA_BIET.md) · [Troubleshooting](../KHAC_PHUC_SU_CO.md)
 
 ---
 
@@ -92,7 +92,8 @@ Core contributors with representative code commits in the repository:
 ### Purpose of this project
 
 - This project exists for **one purpose only**: learning and systems-engineering research, specifically understanding how a modern messaging application operates at the network-protocol, encryption, and native desktop architecture layers.
-- All source code is **written from scratch in Rust**, based on observing public data flows between Zalo Web/PC and its servers. This project does **not** decompile, extract, or repackage any proprietary Zalo asset (no bundled original icons, stickers, audio, images, or Zalo JS/WASM code).
+- All source code is **written from scratch in Rust**. To understand packet framing, request signing and parameter encoding, the maintainers performed **static analysis** (reading and decompiling) of the **publicly distributed** Zalo installer and its bundled native libraries. Those findings were used **only as reference for an independent reimplementation** — no Zalo machine code, JS/WASM source, `.so`, `.dex` or APK file is copied, embedded or redistributed in this repository. The unpacked analysis directories (`xapk_extracted/`, `test_lab/`) live **outside** the repository and are never committed.
+- **Third-party artwork notice:** the bundled sticker set under `src/assets/ami_fat_cat/` is the work of a **third party (the original artist)**. It is not a VNG/Zalo asset, we claim no rights over it, and it is included for UI testing only — it will be removed immediately upon request from the rights holder.
 - We **do not own** and **do not claim ownership** of the `Zalo` trademark, logo, or any VNG intellectual property. The name `Zalo` is used descriptively only, to state **which service's protocol this software is compatible with**, so users understand the product's nature.
 - The project is **entirely non-commercial**: 100% open source, no fees, no advertising, no data sales, no monetization of any kind.
 
@@ -109,4 +110,4 @@ If VNG Corporation or an authorized Zalo representative has any request regardin
 
 ## 📜 License
 
-Distributed under the dual **[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)** license. Developed strictly for educational and system-level engineering research purposes.
+Distributed under the dual **[MIT](../../LICENSE-MIT) OR [Apache-2.0](../../LICENSE-APACHE)** license. Developed strictly for educational and system-level engineering research purposes.
