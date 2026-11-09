@@ -24,6 +24,7 @@ pub mod tui;
 pub mod ui;
 pub mod unread;
 pub mod voip_log;
+pub mod zproto_host;
 
 /// Writable storage selection and private atomic session writes.
 pub mod data_dir;
@@ -38,3 +39,6 @@ pub mod api_mcp;
 
 /// Native notification authorization without delivery.
 pub mod native_notifications;
+
+#[cfg(any(windows, test))]
+mod clipboard_dib;

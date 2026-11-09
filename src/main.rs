@@ -222,8 +222,13 @@ async fn main() -> Result<()> {
         };
 
         let mut initial_threads = chat::load_threads_cache();
+        let db_to_load = if let Some(uin) = s.login.as_ref().map(|l| &l.uin).filter(|u| !u.is_empty()) {
+            store::db_path_for_account(uin)
+        } else {
+            "zalo_history.db".to_string()
+        };
         store::load_history_into_threads(
-            "zalo_history.db",
+            &db_to_load,
             &mut initial_threads,
             store::MessageStore::PRELOAD_MSGS,
         );

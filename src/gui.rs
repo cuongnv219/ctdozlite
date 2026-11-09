@@ -23,6 +23,7 @@ use crate::session::Session;
 
 mod messages;
 mod modals;
+mod reactions_dialog;
 mod stickers;
 mod theme;
 mod worker;
@@ -84,6 +85,9 @@ pub enum GuiEvent {
         key: String,
         image: egui::ColorImage,
     },
+    StickerImageFailed {
+        key: String,
+    },
     StickerStoreLoaded(Vec<crate::chat::StickerPackInfo>),
     StickerPackItemsLoaded {
         cate_id: u64,
@@ -100,6 +104,10 @@ pub enum GuiEvent {
         items: Vec<crate::chat::StickerItem>,
     },
     LinkPreviewReady(crate::chat::LinkMetadata),
+    GroupMembersLoaded {
+        group_id: String,
+        members: Vec<crate::chat::SidebarMember>,
+    },
     PhoneLookupSuccess(crate::chat::PhoneLookupResult),
     PhoneLookupFailed(String),
     FriendStatusChecked {
@@ -120,6 +128,7 @@ pub enum GuiEvent {
         ts: i64,
         reaction: String,
     },
+    ReactionEventsReceived(Vec<crate::reactions::ReactionEvent>),
     MessageDeleted {
         thread_id: String,
         msg_id: String,
@@ -130,6 +139,18 @@ pub enum GuiEvent {
         msg_id: String,
         ts: i64,
     },
+    ForwardFinished {
+        target_name: String,
+        error: Option<String>,
+    },
+    ScreenshotCaptured {
+        path: std::path::PathBuf,
+        width: u32,
+        height: u32,
+        image: egui::ColorImage,
+    },
+    TypingEventsReceived(Vec<crate::chat::TypingEvent>),
+    SeenEventsReceived(Vec<crate::chat::SeenEvent>),
     SendFailed {
         thread_id: String,
         text: String,
@@ -190,6 +211,7 @@ pub enum GuiEvent {
         >,
     ),
     MuteSnapshotSynced(HashMap<String, i64>),
+    PinnedSnapshotSynced(Vec<String>),
     MuteEventsReceived(Vec<crate::chat::MuteControlEvent>),
     PhoneSyncProgress {
         progress: f32,
@@ -200,6 +222,20 @@ pub enum GuiEvent {
         added: usize,
         active_threads: usize,
         cancelled: bool,
+        error: Option<String>,
+    },
+    /// Result of pinning/unpinning a single chat message through the group-board API.
+    MessagePinResult {
+        thread_id: String,
+        msg_id: String,
+        pin: bool,
+        topic_id: String,
+        error: Option<String>,
+    },
+    /// Server-side pinned board items for one conversation.
+    BoardPinsUpdated {
+        thread_id: String,
+        topics: Vec<crate::chat::BoardTopic>,
         error: Option<String>,
     },
     ProxyUpdated(Result<Option<String>, String>),
@@ -223,7 +259,11 @@ fn phone_sync_completion_message(
     if let Some(err) = error {
         return format!("⚠️ Đồng bộ thất bại: {err}");
     }
-    let prefix = if cancelled { "Đã dừng" } else { "Đã hoàn tất" };
+    let prefix = if cancelled {
+        "Đã dừng"
+    } else {
+        "Đã hoàn tất"
+    };
     format!(
         "{prefix} yêu cầu: {added} tin mới từ Cloud/Nhóm ({active_threads} hội thoại). Lịch sử điện thoại chưa được tải vào ứng dụng."
     )
@@ -242,6 +282,16 @@ pub struct UpdateCheckResult {
     pub asset_size: u64,
     pub expected_sha256: Option<String>,
     pub published_at: String,
+}
+
+/// Compare semantic versions (`"v0.0.2"` > `"0.0.1"`).
+pub(crate) fn default_quick_reply_items() -> Vec<String> {
+    vec![
+        "Anh/em đang bận chút, lát gọi lại nhé!".into(),
+        "Đang trong cuộc họp, nhắn tin giúp mình nhé.".into(),
+        "Hiện không tiện nghe máy, có việc gì gấp không ạ?".into(),
+        "Đang ngoài đường ồn quá, lát về mình gọi lại nha.".into(),
+    ]
 }
 
 /// Compare semantic versions (`"v0.0.2"` > `"0.0.1"`).
@@ -269,6 +319,10 @@ struct ActiveCallOverlay {
     error_reason: Option<String>,
     speaker_view: bool,
     pinned_tile_idx: usize,
+    call_page: usize,
+    members_popover_open: bool,
+    invite_search_query: String,
+    quick_reply_popover_open: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +392,10 @@ struct AppSettings {
     play_notification_sound: bool,
     // 5. Tin nhắn
     quick_messages_enabled: bool,
+    quick_reply_enabled: bool,
+    quick_reply_items: Vec<String>,
+    #[serde(skip)]
+    quick_reply_draft: String,
     hidden_chat_pin_enabled: bool,
     split_priority_inbox: bool,
     excel_paste_mode: String, // "image" | "text" | "ask"
@@ -399,8 +457,11 @@ impl Default for AppSettings {
             theme_mode: "dark".into(),
             use_avatar_as_wallpaper: false,
             enable_notifications: true,
-            play_notification_sound: false,
+            play_notification_sound: true,
             quick_messages_enabled: true,
+            quick_reply_enabled: true,
+            quick_reply_items: default_quick_reply_items(),
+            quick_reply_draft: String::new(),
             hidden_chat_pin_enabled: true,
             split_priority_inbox: false,
             excel_paste_mode: "ask".into(),
@@ -471,6 +532,10 @@ pub struct GuiTx {
 }
 
 impl GuiTx {
+    pub fn new(tx: Sender<GuiEvent>, ctx: egui::Context) -> Self {
+        Self { tx, ctx }
+    }
+
     /// Same contract as `Sender::send` (callers already `let _ =` it), plus the wake-up.
     #[allow(clippy::result_large_err)]
     pub fn send(&self, ev: GuiEvent) -> Result<(), std::sync::mpsc::SendError<GuiEvent>> {
@@ -478,6 +543,18 @@ impl GuiTx {
         self.ctx.request_repaint();
         res
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct IncomingPopupState {
+    pub(crate) thread_id: String,
+    pub(crate) sender_name: String,
+    pub(crate) preview_text: String,
+    pub(crate) avatar_url: Option<String>,
+    pub(crate) is_group: bool,
+    pub(crate) unread_total: usize,
+    pub(crate) created_at: std::time::Instant,
+    pub(crate) reply_draft: String,
 }
 
 pub struct ZaloGuiApp {
@@ -504,6 +581,8 @@ pub struct ZaloGuiApp {
 
     // Chat screen state
     threads: Vec<Thread>,
+    /// Event ledger for reaction counts (see `reactions::ReactionInbox`).
+    reaction_inbox: crate::reactions::ReactionInbox,
     selected_thread_index: usize,
     thread_filter: ThreadFilter,
     search_query: String,
@@ -514,7 +593,14 @@ pub struct ZaloGuiApp {
     replying_to: Option<ChatMessage>,
     forward_msg: Option<ChatMessage>,
     forward_filter: String,
+    /// (thread id, message id) whose reaction list is open.
+    reactions_dialog: Option<(String, String)>,
+    /// Selected reaction type tab in that dialog (None = all).
+    reactions_tab: Option<i32>,
     filter_starred_only: bool,
+    pub(crate) send_hd_original: bool,
+    pub(crate) typing_map: HashMap<String, (String, std::time::Instant)>,
+    pub(crate) last_typing_ping_at: std::time::Instant,
     active_call: Option<ActiveCallOverlay>,
     image_viewer: Option<ImageViewerModal>,
 
@@ -523,6 +609,8 @@ pub struct ZaloGuiApp {
     /// "Xoá dữ liệu tin nhắn cục bộ" is pending confirmation (#21).
     wipe_confirm_open: bool,
     toast_notice: Option<(String, std::time::Instant)>,
+    /// Rich corner notification popup for incoming messages
+    incoming_popup: Option<IncomingPopupState>,
     phone_modal_open: bool,
     phone_modal_input: String,
     phone_lookup_loading: bool,
@@ -556,6 +644,8 @@ pub struct ZaloGuiApp {
     last_composer_text: String,
     last_composer_edit_at: std::time::Instant,
     composer_sticker_selected: Option<usize>,
+    composer_mention_selected: usize,
+    dismissed_mention_suggest_for: String,
     composer_focus_pending: bool,
     pending_clipboard_image: Option<(std::path::PathBuf, u32, u32, TextureHandle)>,
     unread_counts: HashMap<String, usize>,
@@ -564,6 +654,9 @@ pub struct ZaloGuiApp {
     dismissed_link_preview_for: String,
     friend_status_map: HashMap<String, crate::chat::FriendshipStatus>,
     checking_friend_status: HashSet<String>,
+    group_members_map: HashMap<String, Vec<crate::chat::SidebarMember>>,
+    fetching_group_members: HashSet<String>,
+    group_member_search: String,
     user_online_map: HashMap<String, (bool, String)>,
     allow_quit: bool,
     settings_modal_open: bool,
@@ -744,14 +837,20 @@ impl ZaloGuiApp {
             qr_texture: None,
             qr_status: "Đang tạo mã QR đăng nhập…".into(),
             threads,
-            selected_thread_index,
-            thread_filter: ThreadFilter::All,
+            reaction_inbox: crate::reactions::ReactionInbox::default(),
+
+            selected_thread_index,            thread_filter: ThreadFilter::All,
             search_query: String::new(),
             input_message: String::new(),
             replying_to: None,
             forward_msg: None,
             forward_filter: String::new(),
+            reactions_dialog: None,
+            reactions_tab: None,
             filter_starred_only: false,
+            send_hd_original: true,
+            typing_map: HashMap::new(),
+            last_typing_ping_at: std::time::Instant::now(),
             active_call: None,
             image_viewer: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
@@ -759,6 +858,7 @@ impl ZaloGuiApp {
             profile_menu_open: false,
             wipe_confirm_open: false,
             toast_notice: None,
+            incoming_popup: None,
             phone_modal_open: false,
             phone_modal_input: String::new(),
             phone_lookup_loading: false,
@@ -797,6 +897,8 @@ impl ZaloGuiApp {
             last_composer_text: String::new(),
             last_composer_edit_at: std::time::Instant::now(),
             composer_sticker_selected: None,
+            composer_mention_selected: 0,
+            dismissed_mention_suggest_for: String::new(),
             composer_focus_pending: false,
             pending_clipboard_image: None,
             unread_counts: HashMap::new(),
@@ -805,6 +907,9 @@ impl ZaloGuiApp {
             dismissed_link_preview_for: String::new(),
             friend_status_map: HashMap::new(),
             checking_friend_status: HashSet::new(),
+            group_members_map: HashMap::new(),
+            fetching_group_members: HashSet::new(),
+            group_member_search: String::new(),
             user_online_map: HashMap::new(),
             allow_quit: false,
             settings_modal_open: false,
@@ -936,6 +1041,13 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Re-read the pinned board of the open thread, throttled.
+    ///
+    /// Parked for now: `friendboard/list` rejects the request shapes we can build (error 114), so
+    /// polling only produced a toast on every thread switch. The read-back will come from the
+    /// socket control events (`pin_message` / `unpin_topic`) instead.
+    fn maybe_refresh_board_pins(&mut self) {}
+
     fn persist_threads_async(&self) {
         self.publish_known_threads();
         let snapshot = self.threads.clone();
@@ -961,16 +1073,21 @@ impl ZaloGuiApp {
                         format!("Đã quét bởi {name} — Vui lòng bấm 'Đăng nhập' trên điện thoại…");
                 }
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
+                    // On session refresh under the same account, keep thread list & unread counts.
+                    // Clearing + re-fetching counts all existing history as brand-new unread (#119).
+                    let is_refresh = self.is_logged_in;
                     self.is_logged_in = true;
                     self.user_name = name;
                     self.user_uin = uin;
                     if avatar.is_some() {
                         self.user_avatar = avatar;
                     }
-                    self.threads.clear();
-                    self.unread_counts.clear();
-                    self.history_reached_start.clear();
-                    self.selected_thread_index = 0;
+                    if !is_refresh {
+                        self.threads.clear();
+                        self.unread_counts.clear();
+                        self.history_reached_start.clear();
+                        self.selected_thread_index = 0;
+                    }
                     self.login_in_progress = false;
                     self.composer_sticker_cache.retain(|_, v| !v.is_empty());
                     self.status_msg = "Trực tuyến · Đồng bộ thời gian thực".into();
@@ -1036,20 +1153,111 @@ impl ZaloGuiApp {
                                 }
                                 let added = existing.messages.len().saturating_sub(old_len);
                                 if added > 0 {
+                                    let seen = existing.unread.last_seen_id.as_deref().unwrap_or("");
                                     let inc_cnt = existing
                                         .messages
                                         .iter()
                                         .rev()
                                         .take(added)
-                                        .filter(|m| !m.is_outgoing)
+                                        .filter(|m| {
+                                            if m.is_outgoing {
+                                                return false;
+                                            }
+                                            if seen.is_empty() {
+                                                return true;
+                                            }
+                                            matches!(
+                                                crate::unread::compare_ids(&m.id, seen),
+                                                Some(std::cmp::Ordering::Greater) | None
+                                            )
+                                        })
                                         .count();
-                                    if inc_cnt > 0 && (existing.id != active_tid || !is_focused) {
-                                        *self
-                                            .unread_counts
-                                            .entry(existing.id.clone())
-                                            .or_insert(0) += inc_cnt;
+                                    if inc_cnt > 0 {
                                         if !is_thread_muted {
                                             new_incoming_alert = true;
+                                        }
+                                        if existing.id != active_tid || !is_focused {
+                                            *self
+                                                .unread_counts
+                                                .entry(existing.id.clone())
+                                                .or_insert(0) += inc_cnt;
+                                            if !is_thread_muted {
+                                                if let Some(last_inc) = existing
+                                                    .messages
+                                                    .iter()
+                                                    .rev()
+                                                    .take(added)
+                                                    .find(|m| !m.is_outgoing)
+                                                {
+                                                    let sender_label = if existing.is_group
+                                                        && !last_inc.sender.is_empty()
+                                                    {
+                                                        format!(
+                                                            "{} · {}",
+                                                            last_inc.sender, existing.name
+                                                        )
+                                                    } else {
+                                                        existing.name.clone()
+                                                    };
+                                                    let preview_raw = last_inc.text.trim();
+                                                    let preview_short: String =
+                                                        if preview_raw.chars().count() > 96 {
+                                                            let s: String = preview_raw
+                                                                .chars()
+                                                                .take(96)
+                                                                .collect();
+                                                            format!("{s}…")
+                                                        } else if preview_raw.is_empty() {
+                                                            "[ Đính kèm / Nhãn dán ]".to_string()
+                                                        } else {
+                                                            preview_raw.to_string()
+                                                        };
+                                                    let avt_url = existing
+                                                        .avatar
+                                                        .clone()
+                                                        .filter(|u| !u.trim().is_empty());
+                                                    if let Some(ref url) = avt_url {
+                                                        let tex_key = format!(
+                                                            "thumb_{}",
+                                                            crate::crypto::md5_hex(url)
+                                                        );
+                                                        if !self
+                                                            .sticker_textures
+                                                            .contains_key(&tex_key)
+                                                            && !self
+                                                                .loading_stickers
+                                                                .contains(&tex_key)
+                                                        {
+                                                            self.loading_stickers
+                                                                .insert(tex_key.clone());
+                                                            if let Some(tx) = WORKER_TX.get() {
+                                                                let _ = tx.send(
+                                                                    WorkerCmd::FetchStickerImage {
+                                                                        key: tex_key,
+                                                                        url: url.clone(),
+                                                                    },
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    let unread_for_thread = self
+                                                        .unread_counts
+                                                        .get(&existing.id)
+                                                        .copied()
+                                                        .unwrap_or(1);
+                                                    self.incoming_popup =
+                                                        Some(IncomingPopupState {
+                                                            thread_id: existing.id.clone(),
+                                                            sender_name: sender_label,
+                                                            preview_text: preview_short,
+                                                            avatar_url: avt_url,
+                                                            is_group: existing.is_group,
+                                                            unread_total: unread_for_thread,
+                                                            created_at: std::time::Instant::now(),
+                                                            reply_draft: String::new(),
+                                                        });
+                                                }
+                                            }
                                         }
                                     }
                                     if existing.id == self.chat_render_window.0 {
@@ -1063,11 +1271,37 @@ impl ZaloGuiApp {
                             }) {
                                 crate::chat::merge_thread_into(existing, nt, true);
                             } else if !nt.id.is_empty() && nt.id != "0" {
+                                // Brand-new thread: only count incoming messages newer than the
+                                // persisted read-point (#119). Without this, reopening the app
+                                // counts the entire loaded history of every thread as unread.
+                                let seen = nt.unread.last_seen_id.as_deref().unwrap_or("");
+                                let inc_cnt = nt
+                                    .messages
+                                    .iter()
+                                    .filter(|m| {
+                                        if m.is_outgoing {
+                                            return false;
+                                        }
+                                        if seen.is_empty() {
+                                            return true;
+                                        }
+                                        matches!(
+                                            crate::unread::compare_ids(&m.id, seen),
+                                            Some(std::cmp::Ordering::Greater) | None
+                                        )
+                                    })
+                                    .count();
+                                if inc_cnt > 0 {
+                                    self.unread_counts.insert(nt.id.clone(), inc_cnt);
+                                }
                                 self.threads.push(nt);
                             }
                         }
 
                         if new_incoming_alert && self.settings.enable_notifications {
+                            if self.settings.play_notification_sound {
+                                crate::media::play_notification_chime();
+                            }
                             let total_unread: usize = self.unread_counts.values().sum();
                             let title = if total_unread > 0 {
                                 format!("({total_unread}) ctdozlite")
@@ -1099,7 +1333,16 @@ impl ZaloGuiApp {
                         if self.selected_thread_index >= self.threads.len() {
                             self.selected_thread_index = self.threads.len().saturating_sub(1);
                         }
+                        // A merge may bring a stale history total; the event ledger is authoritative.
+                        if !self.reaction_inbox.is_empty() {
+                            for t in self.threads.iter_mut() {
+                                self.reaction_inbox.apply_to(&mut t.messages);
+                            }
+                        }
                         self.persist_threads_async();
+                        // A pin/unpin from another device arrives only as an event message, so the
+                        // board has to be re-read before the banner/chips can match the server.
+                        self.maybe_refresh_board_pins();
                     }
                     self.status_msg = format!("Trực tuyến · Cập nhật {}", crate::ui::clock());
                 }
@@ -1260,21 +1503,32 @@ impl ZaloGuiApp {
                     }
                     self.status_msg = format!("Đã gửi trả lời lúc {}", crate::ui::clock());
                 }
-                GuiEvent::Reacted {
-                    thread_id,
-                    msg_id,
-                    ts,
-                    reaction,
-                } => {
-                    if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
-                        if let Some(m) = t.messages.iter_mut().find(|m| {
-                            (!m.id.is_empty() && m.id == msg_id) || (m.id.is_empty() && m.ts == ts)
-                        }) {
-                            m.reactions = vec![reaction];
-                        }
+                GuiEvent::Reacted { .. } => {
+                    // Counts come only from the `chat.reaction` echo (ReactionEventsReceived);
+                    // adding here as well double-counted every click.
+                    self.status_msg = "Đã thả cảm xúc".into();
+                }
+                GuiEvent::ReactionEventsReceived(events) => {
+                    let total = events.len();
+                    let pending_before = self.reaction_inbox.pending_len();
+                    self.reaction_inbox.record(&events);
+                    let mut changed = false;
+                    for t in self.threads.iter_mut() {
+                        changed |= self.reaction_inbox.apply_to(&mut t.messages);
+                    }
+                    crate::reactions::trace_batch(
+                        total,
+                        total.saturating_sub(
+                            self.reaction_inbox
+                                .pending_len()
+                                .saturating_sub(pending_before),
+                        ),
+                        usize::from(changed),
+                        &[],
+                    );
+                    if changed {
                         self.persist_threads_async();
                     }
-                    self.status_msg = "Đã thả cảm xúc".into();
                 }
                 GuiEvent::MessageDeleted {
                     thread_id,
@@ -1303,22 +1557,110 @@ impl ZaloGuiApp {
                             (!msg_id.is_empty() && m.id == msg_id)
                                 || (msg_id.is_empty() && m.ts == ts)
                         }) {
-                            m.text = "[Tin nhắn đã thu hồi]".into();
-                            m.sticker_id = None;
-                            m.link_url = None;
-                            m.link_thumb = None;
+                            if !m.text.starts_with("[Đã thu hồi]") {
+                                if m.text.trim().is_empty() {
+                                    m.text = "[Tin nhắn đã thu hồi]".into();
+                                } else {
+                                    m.text = format!("[Đã thu hồi] {}", m.text);
+                                }
+                            }
+                            // Anti-recall: Preserve sticker_id, link_url, link_thumb so user can still see media!
                         }
                         if let Some(last) = t.messages.last() {
                             t.preview = last.text.clone();
                         }
                         self.persist_threads_async();
                     }
-                    self.status_msg = "Đã thu hồi tin nhắn với mọi người".into();
+                    self.status_msg = "Có tin nhắn vừa bị thu hồi (đã lưu lại)".into();
+                }
+                GuiEvent::ForwardFinished { target_name, error } => match error {
+                    None => {
+                        self.show_toast(format!("Đã chuyển tiếp tới {target_name}"));
+                        self.status_msg = format!("Đã chuyển tiếp tới {target_name}");
+                    }
+                    Some(err) => {
+                        self.show_toast(format!("Chuyển tiếp tới {target_name} thất bại: {err}"));
+                        self.status_msg = format!("Chuyển tiếp thất bại: {err}");
+                    }
+                },
+                GuiEvent::ScreenshotCaptured {
+                    path,
+                    width,
+                    height,
+                    image,
+                } => {
+                    let tex = ctx.load_texture(
+                        format!("clip_preview_{}", crate::login::unix_now()),
+                        image,
+                        TextureOptions::LINEAR,
+                    );
+                    self.pending_clipboard_image = Some((path, width, height, tex));
+                    self.composer_focus_pending = true;
+                    self.show_toast(format!(
+                        "Đã chụp ảnh màn hình ({width}×{height} px) — nhấn Enter để gửi"
+                    ));
+                    self.status_msg = format!("Đã chụp ảnh màn hình ({width}×{height} px)");
+                }
+                GuiEvent::TypingEventsReceived(evs) => {
+                    for ev in evs {
+                        if ev.is_typing {
+                            let name = if let Some(t) =
+                                self.threads.iter().find(|t| t.id == ev.thread_id)
+                            {
+                                if t.is_group {
+                                    self.group_members_map
+                                        .get(&t.id)
+                                        .and_then(|members| members.iter().find(|m| m.id == ev.uid))
+                                        .map(|m| m.name.clone())
+                                        .unwrap_or_else(|| {
+                                            if ev.uid.is_empty() {
+                                                "Thành viên".to_string()
+                                            } else {
+                                                format!("Người dùng {}", ev.uid)
+                                            }
+                                        })
+                                } else {
+                                    t.name.clone()
+                                }
+                            } else {
+                                "Đối phương".to_string()
+                            };
+                            self.typing_map.insert(
+                                ev.thread_id,
+                                (
+                                    name,
+                                    std::time::Instant::now() + std::time::Duration::from_secs(6),
+                                ),
+                            );
+                        } else {
+                            self.typing_map.remove(&ev.thread_id);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                GuiEvent::SeenEventsReceived(evs) => {
+                    for ev in evs {
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == ev.thread_id) {
+                            for m in t.messages.iter_mut().filter(|m| m.is_outgoing) {
+                                if ev.seen_ts == 0 || m.ts <= ev.seen_ts * 1000 + 5000 {
+                                    m.delivery = crate::message_model::DeliveryState::Read;
+                                }
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
                 }
                 GuiEvent::StickerImageReady { key, image } => {
                     self.loading_stickers.remove(&key);
                     let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
                     self.sticker_textures.insert(key, tex);
+                }
+                GuiEvent::StickerImageFailed { key } => {
+                    if key.starts_with("call_remote_video") {
+                        self.sticker_textures.remove(&key);
+                        ctx.request_repaint();
+                    }
+                    self.loading_stickers.remove(&key);
                 }
                 GuiEvent::StickerStoreLoaded(packs) => {
                     self.sticker_store_loading = false;
@@ -1424,6 +1766,36 @@ impl ZaloGuiApp {
                         self.persist_threads_async();
                     }
                 }
+                GuiEvent::GroupMembersLoaded { group_id, members } => {
+                    self.fetching_group_members.remove(&group_id);
+                    for m in &members {
+                        if let Some(ref ava_url) = m.avatar {
+                            if ava_url.starts_with("http") {
+                                let file_or_base =
+                                    crate::chat::avatar_file_key(Some(ava_url.as_str()))
+                                        .unwrap_or_else(|| {
+                                            ava_url.split('?').next().unwrap_or(ava_url).to_string()
+                                        });
+                                let key = format!("ava_{}", crate::crypto::md5_hex(&file_or_base));
+                                if !self.sticker_textures.contains_key(&key)
+                                    && self.loading_stickers.insert(key.clone())
+                                {
+                                    if let Some(tx) = WORKER_TX.get() {
+                                        let _ = tx.send(WorkerCmd::FetchStickerImage {
+                                            key,
+                                            url: ava_url.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(t) = self.threads.iter_mut().find(|th| th.id == group_id) {
+                        t.presentation.members = members.clone();
+                        t.presentation.member_count = Some(members.len() as u64);
+                    }
+                    self.group_members_map.insert(group_id, members);
+                }
                 GuiEvent::FriendStatusChecked {
                     user_id,
                     status,
@@ -1477,6 +1849,8 @@ impl ZaloGuiApp {
                         self.sticker_textures.remove("call_remote_video_1");
                         self.sticker_textures.remove("call_remote_video_2");
                         self.sticker_textures.remove("call_remote_video_3");
+                        self.sticker_textures.remove("call_remote_video_4");
+                        self.sticker_textures.remove("call_remote_video_5");
                         self.sticker_textures.remove("call_local_video");
                         if !has_error {
                             self.active_call = None;
@@ -1529,6 +1903,10 @@ impl ZaloGuiApp {
                         error_reason: None,
                         speaker_view: false,
                         pinned_tile_idx: 0,
+                        call_page: 0,
+                        members_popover_open: false,
+                        invite_search_query: String::new(),
+                        quick_reply_popover_open: false,
                     });
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                         egui::UserAttentionType::Critical,
@@ -1570,7 +1948,16 @@ impl ZaloGuiApp {
                     }
                 }
                 GuiEvent::ScheduledListUpdated => {
+                    let prev_cnt = self.scheduled_items.len();
                     self.refresh_scheduled_items();
+                    if self.scheduled_items.len() < prev_cnt {
+                        if self.settings.enable_notifications
+                            && self.settings.play_notification_sound
+                        {
+                            crate::media::play_notification_chime();
+                        }
+                        self.show_toast("⏰ Đã gửi tự động tin nhắn hẹn giờ / nhắc hẹn");
+                    }
                 }
                 GuiEvent::SyncFinished {
                     added,
@@ -1719,6 +2106,24 @@ impl ZaloGuiApp {
                     }
                     self.persist_threads_async();
                 }
+                GuiEvent::PinnedSnapshotSynced(pinned_ids) => {
+                    for pid in &pinned_ids {
+                        let clean = pid
+                            .trim_start_matches("group_")
+                            .trim_start_matches('g')
+                            .trim_start_matches('G')
+                            .trim_start_matches('u')
+                            .trim_start_matches('U')
+                            .trim()
+                            .to_string();
+                        if !clean.is_empty() && !self.settings.pinned_threads.contains(&clean) {
+                            self.settings.pinned_threads.push(clean);
+                        }
+                    }
+                    crate::chat::apply_pinned_threads(&mut self.threads, &pinned_ids);
+                    self.settings.save();
+                    self.persist_threads_async();
+                }
                 GuiEvent::MuteEventsReceived(events) => {
                     let mut changed = false;
                     for ev in events {
@@ -1759,13 +2164,40 @@ impl ZaloGuiApp {
                     self.phone_sync_progress = 0.0;
                     if !threads.is_empty() {
                         for nt in threads {
+                            let is_pinned = nt.presentation.pinned
+                                || self.settings.pinned_threads.contains(&nt.id)
+                                || crate::chat::is_pinned_in_list(
+                                    &nt.id,
+                                    nt.is_group,
+                                    &self.settings.pinned_threads,
+                                );
+                            if is_pinned {
+                                let clean = nt
+                                    .id
+                                    .trim_start_matches("group_")
+                                    .trim_start_matches('g')
+                                    .trim_start_matches('G')
+                                    .trim_start_matches('u')
+                                    .trim_start_matches('U')
+                                    .trim()
+                                    .to_string();
+                                if !clean.is_empty()
+                                    && !self.settings.pinned_threads.contains(&clean)
+                                {
+                                    self.settings.pinned_threads.push(clean);
+                                }
+                            }
                             if let Some(existing) = self.threads.iter_mut().find(|t| t.id == nt.id)
                             {
                                 crate::chat::merge_thread_into(existing, nt, true);
+                                if is_pinned {
+                                    existing.presentation.pinned = true;
+                                }
                             } else if !nt.id.is_empty() && nt.id != "0" {
                                 self.threads.push(nt);
                             }
                         }
+                        self.settings.save();
                         self.persist_threads_async();
                     }
                     let msg = phone_sync_completion_message(
@@ -1777,6 +2209,85 @@ impl ZaloGuiApp {
                     self.phone_sync_status = msg.clone();
                     self.status_msg = msg.clone();
                     self.show_toast(msg);
+                }
+                GuiEvent::MessagePinResult {
+                    thread_id,
+                    msg_id,
+                    pin,
+                    topic_id,
+                    error,
+                } => {
+                    if let Some(err) = error {
+                        // The server refused the board call: roll the optimistic flip back.
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            if let Some(m) = t.messages.iter_mut().find(|m| m.id == msg_id) {
+                                m.is_pinned = !pin;
+                                if !pin {
+                                    m.board_topic_id.clear();
+                                }
+                            }
+                        }
+                        let msg = format!("⚠️ Không ghim được tin nhắn: {err}");
+                        self.status_msg = msg.clone();
+                        self.show_toast(msg);
+                    } else if !topic_id.is_empty() {
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            if let Some(m) = t.messages.iter_mut().find(|m| m.id == msg_id) {
+                                m.board_topic_id = topic_id;
+                            }
+                        }
+                        self.persist_threads_async();
+                    }
+                }
+                GuiEvent::BoardPinsUpdated {
+                    thread_id,
+                    topics,
+                    error,
+                } => {
+                    if let Some(_err) = error {
+                        // Board read-back is parked (the list API rejects every shape we can build),
+                        // so stay completely silent: a toast on each thread switch is unacceptable.
+                    } else {
+                        // The server is authoritative: match each topic back to its bubble and drop
+                        // stale local pin flags inside this thread.
+                        let pinned_ids: Vec<String> =
+                            topics.iter().map(|t| t.id.clone()).collect();
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            let mut changed = false;
+                            for m in t.messages.iter_mut() {
+                                let mut found: Option<&crate::chat::BoardTopic> = None;
+                                for topic in &topics {
+                                    if topic.msg_ids.iter().any(|id| {
+                                        id == &m.id
+                                            || (!m.client_message_id.is_empty()
+                                                && id == &m.client_message_id)
+                                    }) {
+                                        found = Some(topic);
+                                        break;
+                                    }
+                                }
+                                match found {
+                                    Some(topic) => {
+                                        if !m.is_pinned || m.board_topic_id != topic.id {
+                                            m.is_pinned = true;
+                                            m.board_topic_id = topic.id.clone();
+                                            changed = true;
+                                        }
+                                    }
+                                    None => {
+                                        if m.is_pinned && !pinned_ids.contains(&m.board_topic_id) {
+                                            m.is_pinned = false;
+                                            m.board_topic_id.clear();
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if changed {
+                                self.persist_threads_async();
+                            }
+                        }
+                    }
                 }
                 GuiEvent::ProxyUpdated(res) => match res {
                     Ok(Some(url)) => {
@@ -1836,7 +2347,9 @@ impl eframe::App for ZaloGuiApp {
             }
             std::process::exit(0);
         }
-        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)) {
+        if ctx.input(|i| {
+            (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)
+        }) {
             self.settings_modal_open = true;
             self.settings_tab = SettingsTab::Privacy;
         }

@@ -35,6 +35,18 @@ pub const AUTH: &str = "https://wpa.zaloapp.com";
 /// Base host that serves `getServerInfo` for an authenticated web session.
 pub const WPA_CHAT: &str = "https://wpa.chat.zalo.me";
 
+/// Group board (pinned messages / notes / reminders). Zalo PC resolves this through
+/// `apiGroupBoard = https://groupboard-wpa.api.${domain}`; web sessions answer on the
+/// `chat.zalo.me` flavour, which is what the live capture came from (`friendboard-wpa.chat.zalo.me`).
+pub const GROUP_BOARD: &str = "https://groupboard-wpa.chat.zalo.me";
+
+/// Friend board (pinned messages in a 1-1 chat). Confirmed by a live Zalo Web capture:
+/// `GET https://friendboard-wpa.chat.zalo.me/api/friendboard/create?...&params=<AES>`.
+pub const FRIEND_BOARD: &str = "https://friendboard-wpa.chat.zalo.me";
+
+/// Legacy board host (`apiBoardDomain`); kept as a fallback for `/api/board/pin`.
+pub const BOARD: &str = "https://board-wpa.chat.zalo.me";
+
 /// Look up a service domain by key.
 pub fn service(key: &str) -> Option<&'static str> {
     SERVICE_MAP_V3

@@ -72,8 +72,8 @@ Core contributors with representative code commits in the repository:
 
 | Contributor | GitHub | Key Role | Code Volume |
 | :--- | :--- | :--- | :---: |
-| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Core architecture, VoIP call engine, egui framework, Contacts & Social Feed, cross-platform & v0.0.6 release | **> 75,600+ lines** |
-| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Modular GUI refactoring, Atom One Dark, MCP/REST API, Message Scheduler, GitHub API Auto-Updater, 25+ Issue fixes & v0.0.5 / v0.0.7 release | **> 35,600+ lines** 🏆 |
+| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Core architecture, VoIP call engine, egui framework, Contacts & Social Feed, cross-platform & v0.1.0 release | **> 75,600+ lines** |
+| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Modular GUI refactoring, Atom One Dark, MCP/REST API, Message Scheduler, GitHub API Auto-Updater, 25+ Issue fixes & v0.1.0 release | **> 35,600+ lines** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | 10 PRs: OS timezone, customizable data-dir, macOS helpers, session atomic, media cache, updater, message state, exact message identity (#61), quote navigation (#60), macOS notification permissions (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | 5 PRs: Engineering standards, session safety, domain resolution | **> 3,400+ lines** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | 8 PRs: SQLite startup speedup, resumable history sync (#45), worker poll timer (#46), chat virtualization, CJK font lazy loading | **~950+ lines** |
@@ -111,3 +111,4 @@ If VNG Corporation or an authorized Zalo representative has any request regardin
 ## 📜 License
 
 Distributed under the dual **[MIT](../../LICENSE-MIT) OR [Apache-2.0](../../LICENSE-APACHE)** license. Developed strictly for educational and system-level engineering research purposes.
+

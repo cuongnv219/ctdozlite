@@ -76,7 +76,7 @@ Gói `.tar.gz` kèm sẵn `install.sh` và `uninstall.sh`.
 
 Nếu Windows SmartScreen hoặc Microsoft Defender cảnh báo ứng dụng mã nguồn mở chưa mua chứng chỉ EV Code Signing thương mại:
 1. Đối chiếu mã băm SHA-256 của file tải về với `SHA256SUMS.txt` trên trang GitHub Releases (`Get-FileHash .\ctdozlite-<version>-setup-windows-x86_64.exe -Algorithm SHA256`).
-2. Chọn **More info → Run anyway** (hoặc dùng bản `portable-windows-x86_64.exe` / `.zip`). Từ bản `v0.0.4`, bộ cài Inno Setup đã chuyển sang chuẩn nén `zip/9` không đóng khối đặc (`SolidCompression=no`), nhúng đầy đủ `VS_VERSIONINFO` + `RT_MANIFEST` (`asInvoker`) và giữ bảng ký hiệu PE để tránh cảnh báo nhầm (false positive) của bộ máy học Microsoft Defender (#58).
+2. Chọn **More info → Run anyway** (hoặc dùng bản `portable-windows-x86_64.exe` / `.zip`). Từ bản `v0.1.0`, bộ cài Inno Setup đã chuyển sang chuẩn nén `zip/9` không đóng khối đặc (`SolidCompression=no`), nhúng đầy đủ `VS_VERSIONINFO` + `RT_MANIFEST` (`asInvoker`) và giữ bảng ký hiệu PE để tránh cảnh báo nhầm (false positive) của bộ máy học Microsoft Defender (#58).
 
 ## Tự động thông báo & cập nhật qua GitHub Releases API
 
@@ -129,3 +129,4 @@ Xem mục **Tự biên dịch từ mã nguồn** trong [README](../README.md#t�
   ```
 
 Gói sinh ra nằm trong thư mục `dist/`.
+

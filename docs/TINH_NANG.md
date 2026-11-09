@@ -2,7 +2,7 @@
 
 Trang này cho biết **cái gì đang chạy, cái gì chạy một phần, cái gì chưa có** — để bạn không mất thời gian báo lại những lỗi đã biết.
 
-> **Kiểm chứng trên nhánh `main` (v0.0.7).** Bảng này được cập nhật mỗi lần release.
+> **Kiểm chứng trên nhánh `main` (v0.1.0).** Bảng này được cập nhật mỗi lần release.
 > Nếu bạn đang dùng bản build cũ hơn, một số dòng có thể đã khác.
 
 ## Cách đọc
@@ -123,3 +123,4 @@ Trước khi mở issue, kiểm tra [trang Đã biết](DA_BIET.md). Nếu chưa
 5. Log: chạy lại với `--dev` và dán phần lỗi.
 
 Xem [Hướng dẫn sử dụng](HUONG_DAN_SU_DUNG.md) để biết chi tiết các tham số.
+

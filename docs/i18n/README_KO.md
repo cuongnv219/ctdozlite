@@ -72,8 +72,8 @@ cargo build --release
 
 | 기여자 | GitHub | 주요 역할 | 기여 규모 |
 | :--- | :--- | :--- | :---: |
-| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | 핵심 아키텍처, VoIP 통화 엔진, egui 프레임워크, 연락처 및 소셜 피드, 크로스 플랫폼 및 v0.0.6 릴리스 | **> 75,600+ 줄** |
-| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | 모듈형 GUI 리팩터링, Atom One Dark, MCP/REST API, 예약 메시지, GitHub API 자동 업데이트, 25+ 이슈 해결 및 v0.0.5 / v0.0.7 릴리스 | **> 35,600+ 줄** 🏆 |
+| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | 핵심 아키텍처, VoIP 통화 엔진, egui 프레임워크, 연락처 및 소셜 피드, 크로스 플랫폼 및 v0.1.0 릴리스 | **> 75,600+ 줄** |
+| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | 모듈형 GUI 리팩터링, Atom One Dark, MCP/REST API, 예약 메시지, GitHub API 자동 업데이트, 25+ 이슈 해결 및 v0.1.0 릴리스 | **> 35,600+ 줄** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | 10개 PR: OS 타임존, 데이터 디렉터리, macOS 헬퍼, 세션 원자적 저장, 미디어 캐시, 업데이터, 메시지 모델, 메시지 고유 식별자 중복 방지 (#61), 인용 메시지 이동 (#60), macOS 알림 권한 (#59) | **> 11,500+ 줄** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | 5개 PR: 엔지니어링 표준 수립, 세션 안전성 확보, 네트워크 도메인 확인 | **> 3,400+ 줄** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | 8개 PR: SQLite 빠른 시작 최적화, 그룹/클라우드 기록 동기화(#45), 워커 폴 타이머(#46), 채팅 가상화, CJK 폰트 지연 로딩 | **~950+ 줄** |
@@ -111,3 +111,4 @@ VNG Corporation 또는 Zalo의 권한 있는 대리인이 본 프로젝트와 �
 ## 📜 라이선스
 
 이 프로젝트는 **[MIT](../../LICENSE-MIT) OR [Apache-2.0](../../LICENSE-APACHE)** 듀얼 라이선스 하에 배포됩니다. 본 프로젝트는 순수 학술 및 시스템 프로그래밍 연구 목적으로 개발되었습니다.
+

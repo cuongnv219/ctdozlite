@@ -16,16 +16,16 @@
      {
        "schema_version": 1,
        "version": "0.0.3",
-       "tag_name": "v0.0.3",
+       "tag_name": "v0.1.0",
        "published_at": "2026-04-19T00:00:00Z",
        "repository": "https://github.com/ctdoteam1110/ctdozlite",
-       "release_url": "https://github.com/ctdoteam1110/ctdozlite/releases/tag/v0.0.3",
+       "release_url": "https://github.com/ctdoteam1110/ctdozlite/releases/tag/v0.1.0",
        "assets": [
          {
            "name": "ctdozlite-0.0.3-macos-arm64.dmg",
            "sha256": "<64-hex>",
            "size": 12345678,
-           "browser_download_url": "https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.0.3/ctdozlite-0.0.3-macos-arm64.dmg"
+           "browser_download_url": "https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.0/ctdozlite-0.0.3-macos-arm64.dmg"
          }
        ]
      }
@@ -35,3 +35,4 @@
    - Giới hạn kích thước tải tối thiểu/tối đa và thời gian chờ (`DownloadLimits`).
    - Đối chiếu mã băm `SHA-256` và chữ ký định dạng tệp (PE `MZ`, Mach-O/DMG, ELF/AppImage) trước khi ghi đĩa.
    - Với bản chạy ngay (Portable), thực hiện ghi tạm và tự động hoàn tác (rollback) nếu tiến trình mới khởi chạy thất bại.
+
