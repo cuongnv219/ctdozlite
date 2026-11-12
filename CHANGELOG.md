@@ -5,6 +5,9 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+### Added (Tính năng mới)
+- **Xem trước tài liệu trong app (preview docx/xlsx/pptx/pdf/txt/csv/md/rtf):** card tệp có nút "Xem trước" (chỉ tải khi bấm, giới hạn 10MB) trích text ngay trong bong bóng (6 dòng đầu) + popup "Xem đầy đủ" có cuộn và nút Sao chép (`src/doc_preview.rs`, `src/gui/worker.rs`, `src/gui/messages.rs`, `src/gui/modals.rs`); định dạng cũ `.doc/.xls/.ppt` báo mở ngoài. Session-only, không cache đĩa.
+
 ## [0.1.0] - 2026-11-09
 
 ### Added (Tính năng mới & Cập nhật)
