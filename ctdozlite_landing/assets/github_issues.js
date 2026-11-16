@@ -1,9 +1,656 @@
 window.CTD_GITHUB_ISSUES = {
-  "fetchedAt": "2026-11-04T15:37:33.090Z",
+  "fetchedAt": "2026-11-15T17:37:56.000Z",
   "repo": "ctdoteam1110/ctdozlite",
-  "totalIssues": 56,
-  "totalPrs": 40,
+  "totalIssues": 89,
+  "totalPrs": 62,
   "issues": [
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc3MTQyMDUw",
+        "is_bot": false,
+        "login": "nguyenhoclaptrinh",
+        "name": "Nguyen Truong"
+      },
+      "body": "Yêu cầu đồng bộ tin nhắn Sync V2 không hiển thị thông báo trên điện thoại\n\n## Tái hiện\n1. Vào Cài đặt, chọn tab Đồng bộ tin nhắn.\n2. Bấm 'Bắt đầu đồng bộ'.\n3. Zalo trên điện thoại không hiện popup xác nhận đồng bộ; giao diện dừng ở 10% và báo hết thời gian chờ sau 90 giây.\n\n## Nguyên nhân\n- `request_phone_sync_v2_http` tại `src/chat.rs:8867` gửi danh sách phân vùng lớn qua query string của HTTP GET, vượt giới hạn độ dài URL (lỗi HTTP 414).\n- `src/logger.rs:154` ghi log đồng bộ vào `/tmp/sync_debug.log`, bị nuốt log trên Windows do không tồn tại thư mục /tmp.\n- Gói CMD 590 ban đầu gửi truy vấn phân vùng tin nhắn chi tiết thay vì gói bắt tay phân vùng conversations chuẩn của Zalo PC.\n\n## Tiêu chí nghiệm thu\n- Yêu cầu đồng bộ làm xuất hiện popup xác nhận trên điện thoại Zalo.\n- Log đồng bộ ghi đúng vào `%APPDATA%/ctdozlite/sync_debug.log` trên Windows.\n- Pass unit test kiểm tra cấu trúc payload khởi tạo phiên.\n",
+      "closedAt": "2026-11-15T09:22:10Z",
+      "createdAt": "2026-11-15T05:54:07Z",
+      "labels": [],
+      "number": 151,
+      "state": "CLOSED",
+      "title": "fix(net): Sửa lỗi gửi yêu cầu đồng bộ Sync V2 về điện thoại và đường dẫn log trên Windows"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc3MTQyMDUw",
+        "is_bot": false,
+        "login": "nguyenhoclaptrinh",
+        "name": "Nguyen Truong"
+      },
+      "body": "Hiện tượng nháy cửa sổ console khi duyệt tin nhắn nhóm trên Windows\n\n## Tái hiện\n1. Mở 'Cloud của tôi' hoặc bất kỳ cuộc trò chuyện nào.\n2. Bấm vào một nhóm có tin nhắn video hoặc sticker động.\n3. Xuất hiện cửa sổ conhost.exe / cmd.exe màu đen nháy lên trong khoảng 100ms rồi biến mất khi trích xuất thumbnail.\n\n## Nguyên nhân\nHàm `extract_first_video_frame` tại `src/gui/worker.rs:4938` gọi `ffmpeg` thiếu cờ `CREATE_NO_WINDOW` (`0x0800_0000`).\n\n## Tiêu chí nghiệm thu\n- Không còn nháy cửa sổ cmd khi mở nhóm có video hoặc sticker.\n- Cờ tiến trình được bọc an toàn dưới `#[cfg(target_os = \"windows\")]`.\n",
+      "closedAt": "2026-11-15T09:24:24Z",
+      "createdAt": "2026-11-15T05:53:53Z",
+      "labels": [],
+      "number": 150,
+      "state": "CLOSED",
+      "title": "fix(ui): Triệt tiêu hiện tượng nháy cửa sổ console khi tải thumbnail media trên Windows"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc3MTQyMDUw",
+        "is_bot": false,
+        "login": "nguyenhoclaptrinh",
+        "name": "Nguyen Truong"
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** Windows 11 26H2 \n- **Phiên bản `ctdozlite`:** v0.1.1\n- **Chế độ chạy:** GUI\n\n## Các bước tái hiện\n1. Mở Zalo và đăng nhập mới\n2. Mở cài đặt\n3. Nhấn nút đồng bộ tin nhắn từ điện thoại ngay\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Lỗi không thể đồng bộ\n\n<img width=\"545\" height=\"247\" alt=\"image\" src=\"https://github.com/user-attachments/assets/318cdef3-9966-4a46-92a8-31ea0d0adc8e\" />\n\n- **Kỳ vọng:**  Đồng bộ được cả tin nhắn 1-1 và tin nhắn nhóm\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n- Log toàn ra 200 OK thôi nhưng có 1 đoạn log bất thường khi khởi động app:\n```text\n→ GET https://p4-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794576577\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"censored\"}\n\n  data decrypted (162 bytes)\n← 404 Not Found <html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly er…\n← 404 Not Found <html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly er…\n```\n",
+      "closedAt": "2026-11-15T02:33:54Z",
+      "createdAt": "2026-11-13T13:34:04Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 147,
+      "state": "CLOSED",
+      "title": "bug: Tính năng đồng bộ tin nhắn từ điện thoại bị lỗi không hoạt động"
+    },
+    {
+      "author": {
+        "id": "U_kgDODZ7oPw",
+        "is_bot": false,
+        "login": "vudubai-2026",
+        "name": "Tom"
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** Arch Linux\n- **Phiên bản `ctdozlite`:** v0.1.1\n- **Chế độ chạy:** GUI\n\n## Các bước tái hiện\n1. Mở app\n2. Thông báo đọc r hiện lại\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** thông báo đã đọc hiện đi hiện lạilại\n- **Kỳ vọng:** chỉ hiện thông báo mới ch đọc\n\n## Log (`--dev`)\n$ ./ctdozlite-0.1.1-x86_64.AppImage --gui --dev\n🔧 [DEV MODE ACTIVATED] – Quét log, chẩn đoán giao thức và trace chi tiết được bật.\n✓ Đã khôi phục phiên từ session.json: <REDACTED_USER> (UIN: <REDACTED_UIN>)\n🚀 Đang khởi chạy giao diện đồ họa ctdozlite (egui)…\n\n--- 1. Khởi tạo & Lấy cấu hình Server ---\n→ GET https://wpa.zaloapp.com/api/login/getServerInfo?bkt=-1&client_version=694&computer_name=DESKTOP&imei=<redacted>&sp_mtn=-1&type=30&signkey=<redacted>\n← 200 OK (error_code: 0 - Successful)\n\n--- 2. Kết nối kênh Polling / Realtime ---\n→ GET https://p5-ctl-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794564571\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794564571..1794564578\n← 200 OK (data decrypted: 149 bytes -> 84,870 bytes)\n\n--- 3. Đồng bộ thông tin cá nhân & Danh sách bạn bè ---\n→ GET https://tt-friend-wpa.chat.zalo.me/api/friend/reqstatus?zpw_ver=694&zpw_type=30&params=<redacted>\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/profile/me-v2?zpw_ver=694&zpw_type=30&params=<redacted>&os=8\n← 200 OK (data decrypted: 121 bytes / 1,251 bytes)\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/profile/lastOnline?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK (data decrypted: 1,251 bytes)\n→ GET https://tt-friend-wpa.chat.zalo.me/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 404 Not Found (nginx) [Fallback sang endpoint bên dưới]\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK (data decrypted: 99,682 bytes)\n\n--- 4. Đồng bộ Nhóm & Thành viên nhóm ---\n→ GET https://tt-group-wpa.chat.zalo.me/api/group/getlg/v4?zpw_ver=694&zpw_type=30\n← 200 OK (data decrypted: 821 bytes / 1,917 bytes)\n→ POST https://tt-group-wpa.chat.zalo.me/api/group/getmg-v2?zpw_ver=694&zpw_type=30 (body: <REDACTED>)\n← 200 OK (data decrypted: 821 bytes -> 28,003 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30 (body: <REDACTED>)\n← 200 OK (data decrypted: 245 bytes -> 28,003 bytes)\n→ POST https://tt-group-wpa.chat.zalo.me/api/group/seenv2?zpw_ver=694&zpw_type=30 (body: <REDACTED>)\n← 200 OK (data decrypted: 66 bytes)\n\n--- 5. Đồng bộ Hội thoại, Ghim & Tắt thông báo ---\n→ GET https://tt-convers-wpa.chat.zalo.me/api/preloadconvers/get-last-msgs?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK (data decrypted: 22,633 bytes -> 122,020 bytes)\n→ GET https://tt-group-cm.api.zaloapp.com/api/cm/getrecentv2?zpw_ver=694&zpw_type=30&params=<redacted>&nretry=0\n← 200 OK (data decrypted: 276 bytes -> 92,892 bytes)\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/profile/getmute?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK (data decrypted: 1,740 bytes)\n→ GET https://tt-convers-wpa.chat.zalo.me/api/pinconvers/list?zpw_ver=694&zpw_type=30\n← 200 OK (data decrypted: 139 bytes)\nKhông chắc log hữu ích\n```text\n\n```\n",
+      "closedAt": "2026-11-15T02:34:18Z",
+      "createdAt": "2026-11-13T10:11:32Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 146,
+      "state": "CLOSED",
+      "title": "bug: Fix tình trạng thông báo đã đọc hiện đi hiện lại"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCwSJjw",
+        "is_bot": false,
+        "login": "Lean-Duong",
+        "name": "Lucian Duong"
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** Windows 10 (bản 64-bit)\n- **Phiên bản `ctdozlite`:** bản cập nhật mới nhất (sau khi PR #78 được merge ngày 06/11/2026) — người dùng sẽ bổ sung số phiên bản chính xác nếu cần\n- **Chế độ chạy:** GUI (`--gui`)\n- **Người báo cáo:** @Lean-Duong\n\n## Các bước tái hiện\n1. Người kia gửi một tin nhắn (text / ảnh), sau đó **thu hồi** tin nhắn đó.\n2. Trong bản ctdozlite mới, bubble tin nhắn hiển thị **\"Tin nhắn đã được thu hồi\"** (chữ xiên gạch ngang) — nội dung gốc hoàn toàn biến mất.\n3. Đối chiếu với bản trước đó (theo issue #79 và PR #78 đã merge): tin nhắn thu hồi được giữ nguyên **text + media/ảnh/sticker**, hiển thị badge đỏ `🚫 Đã thu hồi` phía trên bubble, vẫn nhấp phóng to ảnh và sao chép văn bản được.\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** chỉ còn dòng \"Tin nhắn đã được thu hồi\", tính năng chống thu hồi (Anti-Recall) không còn hoạt động như trước.\n- **Kỳ vọng:** khôi phục lại hành vi như đã triển khai qua #78 — giữ nguyên nội dung gốc của tin nhắn đã thu hồi (text, media, link ảnh, sticker), kèm badge đánh dấu đã thu hồi.\n\n## Bối cảnh & tham chiếu\n- Feature gốc: #79 (Anti-Recall), đã được triển khai và merge trong PR #78.\n- PR #62 mục 4 có ghi chú *\"Chặn cache khôi phục nội dung và attachment của tin đã Recall\"* — có thể đây là nguyên nhân làm hành vi thay đổi ở bản mới.\n\n## Mong muốn\nTính năng **chống thu hồi / xem lại tin nhắn đã thu hồi** là một trong những tính năng **đặc biệt và khác biệt nhất** của ctdozlite so với Zalo PC chính thức — nó rất thiết thực cho việc nhắn tin hằng ngày (không bỏ lỡ nội dung khi đối phương thu hồi). Rất mong team cân nhắc mở lại tính năng này, hoặc ít nhất thêm một tuỳ chọn bật/tắt rõ ràng trong Cài đặt cho người dùng chủ động chọn.\n\n## Log (`--dev`)\nChưa có log liên quan; bubble thu hồi hiển thị bình thường, không thấy lỗi nào trên giao diện. Có thể bổ sung log `--gui --dev` khi tái hiện nếu team cần.\n",
+      "closedAt": "2026-11-15T02:34:21Z",
+      "createdAt": "2026-11-13T06:27:58Z",
+      "labels": [],
+      "number": 141,
+      "state": "CLOSED",
+      "title": "regression: Mất tính năng chống thu hồi tin nhắn (Anti-Recall) ở bản cập nhật mới"
+    },
+    {
+      "author": {
+        "id": "U_kgDOBX3z_w",
+        "is_bot": false,
+        "login": "Shigure-Ruiseki",
+        "name": "Ruiseki"
+      },
+      "body": "### Summary\n\nCó thể tải và cập nhật ở Arch đơn giản và nhanh hơn.\n\n### Proposal\n\nNhư title.\n\n### Evidence\n\n- Evidence / capture:\n- Observed error_code:\n\n\n### Context\n\n- ADR / RFC: None\n- Alternatives considered:\n",
+      "closedAt": null,
+      "createdAt": "2026-11-13T03:31:31Z",
+      "labels": [],
+      "number": 139,
+      "state": "OPEN",
+      "title": "feat(install): Hỗ trợ AUR và FlatHub"
+    },
+    {
+      "author": {
+        "id": "U_kgDOFTk0dg",
+        "is_bot": false,
+        "login": "dinhhanh37k14-code",
+        "name": ""
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** (ví dụ: Windows 11 23H2 / macOS 15.2 Apple Silicon / Ubuntu 24.04)\n- **Phiên bản `ctdozlite`:** (xem góc trên bên trái cửa sổ ứng dụng hoặc chạy `ctdozlite --version`)\n- **Chế độ chạy:** GUI (`--gui`) / TUI (`--tui`) / Headless (`--mcp` hoặc `--api-port`)\n\n## Các bước tái hiện\n1. ...\n2. ...\n3. ...\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** ...\n- **Kỳ vọng:** ...\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\n\n```\n",
+      "closedAt": null,
+      "createdAt": "2026-11-13T03:21:46Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 138,
+      "state": "OPEN",
+      "title": "bug: Chat chưa tag tên được, chưa ghim tin nhắn lên được, không xoá nhóm được, không thu hồi tin nhắn được, file chia sẻ đi người được chia sẻ sẽ không đọc được file"
+    },
+    {
+      "author": {
+        "id": "U_kgDOC0irsg",
+        "is_bot": false,
+        "login": "waynenguyen2212",
+        "name": ""
+      },
+      "body": "<img width=\"670\" height=\"319\" alt=\"1K770360V_448BDM\" src=\"https://github.com/user-attachments/assets/01713b20-0f63-4167-8371-f4d9ddc02e20\" />\nBản 0.1.1 ăn CPU quá nhiều",
+      "closedAt": "2026-11-13T02:04:04Z",
+      "createdAt": "2026-11-12T04:27:55Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 135,
+      "state": "CLOSED",
+      "title": "bug: CPU 100%"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCbrkvQ",
+        "is_bot": false,
+        "login": "tinzisreal",
+        "name": "Nguyen Huu Tung"
+      },
+      "body": "### Summary\n\n<img width=\"511\" height=\"82\" alt=\"image\" src=\"https://github.com/user-attachments/assets/3fd1052b-1595-41bd-be94-10c3d3b23729\" />\n\n### Proposal\n\nbị lỗi UI khi active search\n\n<img width=\"511\" height=\"82\" alt=\"image\" src=\"https://github.com/user-attachments/assets/1bad0f32-cde4-4990-a55e-2716c6cdb3c9\" />\n\n### Evidence\n\n- Evidence / capture:\n- Observed error_code:\n\n\n### Context\n\n- ADR / RFC: None\n- Alternatives considered:\n",
+      "closedAt": "2026-11-11T18:29:38Z",
+      "createdAt": "2026-11-11T12:29:44Z",
+      "labels": [],
+      "number": 133,
+      "state": "CLOSED",
+      "title": "feat(<scope>): <summary> bị lỗi UI khi active search"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCwSJjw",
+        "is_bot": false,
+        "login": "Lean-Duong",
+        "name": "Lucian Duong"
+      },
+      "body": "### Summary\r\n\r\nAvatar của liên hệ/nhóm trong danh sách hội thoại (sidebar trái) hiển thị bị **phóng to quá mức và cắt xén nội dung**: chỉ thấy phần giữa ảnh, phần xung quanh (mặt, logo, chữ, hoạ tiết) bị cắt mất.\r\n\r\n- Không xảy ra với tất cả avatar. Chủ yếu là **avatar mặc định của Zalo gốc**; đôi khi ảnh do người dùng tự tải lên cũng bị.\r\n- Hậu quả: không nhìn/nhận diện nhanh được nhóm của mình, danh sách hội thoại dài càng khó phân biệt.\r\n\r\nKỳ vọng: avatar hiển thị đủ nội dung và đúng tỉ lệ như Zalo PC / Zalo điện thoại, không bị zoom/cắt quá mức.\r\n\r\n### Reproduction\r\n\r\n1. Mở ctdozlite (GUI) trên Windows 10 và đăng nhập.\r\n2. Xem avatar các liên hệ/nhóm ở sidebar trái, chú ý các tài khoản dùng avatar mặc định của Zalo.\r\n3. So sánh với cùng tài khoản trên Zalo PC/điện thoại: bên ctdozlite ảnh bị phóng to, phần nội dung bị cắt.\r\n4. Kiểm tra thêm một số avatar là ảnh tự tải lên — một vài ảnh cũng bị tương tự, số khác vẫn bình thường.\r\n\r\nTái hiện: ổn định với các avatar bị ảnh hưởng (không phải toàn bộ danh sách).\r\n\r\n### Area\r\n\r\nui\r\n\r\n### Server error_code\r\n\r\nKhông có — không phải lỗi phía server, thuần hiển thị.\r\n\r\n### Environment\r\n\r\n- OS / Version: Windows 10\r\n- ctdozlite version: v0.1.0\r\n- Interface: GUI\r\n- Logs (redacted): không có log lỗi (không phải lỗi runtime)\r\n\r\n### Ghi chú\r\n\r\n- Ảnh chụp minh hoạ (vùng avatar trong sidebar) sẽ được dán vào bình luận ngay dưới issue này.\r\n- Liên quan #77: cùng vùng render avatar (`src/gui/theme.rs`, `paint_circular_image`) đã sửa tỉ lệ/crop trước đây — có thể là regression hoặc trường hợp chưa xử lý (ảnh không vuông / avatar mặc định của Zalo).\r\n- Không đính kèm token, cookie, IMEI hay số điện thoại.\r\n\r\n",
+      "closedAt": "2026-11-11T18:29:41Z",
+      "createdAt": "2026-11-10T14:57:46Z",
+      "labels": [],
+      "number": 131,
+      "state": "CLOSED",
+      "title": "bug(gui): avatar liên hệ/nhóm bị phóng to và cắt xén nội dung (chủ yếu avatar mặc định của Zalo)"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCwSJjw",
+        "is_bot": false,
+        "login": "Lean-Duong",
+        "name": "Lucian Duong"
+      },
+      "body": "### Summary\n\nHai vấn đề nằm cùng luồng đăng xuất / đăng nhập, nên gộp chung một issue:\n\n1. **Đăng xuất không có bước xác nhận.** Trong Cài đặt và menu hồ sơ, nút \"Đăng xuất tài khoản\" thực hiện ngay khi bấm một lần — cả 3 điểm vào đều đặt `do_logout = true` rồi gửi `WorkerCmd::Logout` luôn. Với trackpad hoặc màn hình cảm ứng, một cú chạm nhầm là phiên bị xoá ngay và phải quét lại mã QR.\n2. **Chưa có danh sách tài khoản đã lưu + đăng nhập nhanh.** Multi-account đã có sẵn (`accounts/<uin>.json`, `WorkerCmd::SwitchAccount` chuyển tài khoản **không cần QR**), nhưng danh sách này chỉ xuất hiện trong Cài đặt khi đang đăng nhập. Sau khi đăng xuất, màn hình login chỉ còn QR. Mong muốn: trải nghiệm như Facebook — tài khoản vẫn nằm trong danh sách sau khi đăng xuất, mở app bấm một lần là vào lại, không phải quét mã lại.\n\nKết quả kỳ vọng:\n\n- Mọi hành động đăng xuất đều phải xác nhận trước khi thực hiện.\n- Có danh sách tài khoản đã dùng (đang đăng nhập hoặc đã đăng xuất), phân biệt rõ \"Đăng xuất\" (giữ tài khoản để đăng nhập nhanh) và \"Xoá tài khoản khỏi thiết bị\".\n\n### Proposal\n\n#### A. Xác nhận trước khi đăng xuất\n\n- Thêm hộp thoại xác nhận cho **mọi điểm vào đăng xuất** trong GUI (`src/gui/modals.rs`): menu hồ sơ (~dòng 842), thanh điều hướng Cài đặt (~dòng 3156), panel tài khoản trong Cài đặt (~dòng 4239).\n- Tái dùng đúng pattern đã có cho \"Xoá dữ liệu tin nhắn cục bộ\": cờ `*_confirm_open` + `render_wipe_confirm` (`src/gui/modals.rs:15108`). Thêm `logout_confirm_open` và `render_logout_confirm`, không cần cơ chế mới.\n- Nội dung hộp thoại:\n  - Tiêu đề: \"Đăng xuất tài khoản?\"\n  - Mô tả: phiên đăng nhập hiện tại sẽ kết thúc; lịch sử tin nhắn vẫn được giữ; có thể đăng nhập lại bằng tài khoản đã lưu hoặc quét mã QR.\n  - \"Huỷ\" là lựa chọn mặc định (Esc đóng, click ra ngoài đóng); \"Đăng xuất\" dùng `pal.danger` và **không** nhận focus mặc định để Enter không vô tình kích hoạt.\n- Tuỳ chọn (chọn một, không cần cả hai): bấm 2 lần kiểu \"Bấm lần nữa để đăng xuất\" (tự reset sau ~3s) thay cho hộp thoại ở menu hồ sơ; hoặc checkbox \"Không hỏi lại\" (mặc định tắt).\n\n#### B. Lưu tài khoản đã đăng nhập / đăng xuất + đăng nhập nhanh (kiểu Facebook)\n\nNền tảng đã có, nên đây là mở rộng vòng đời + UI, không phải viết lại:\n\n- `src/account_manager.rs`: `save_current_account_snapshot`, `list_saved_accounts`, `switch_to_account`, `delete_saved_account` — snapshot gồm `session.json`, `threads_cache.json`, `zalo_history.db` cho từng `<uin>`.\n- `WorkerCmd::Logout` đã lưu snapshot trước khi xoá file gốc (`src/gui/worker.rs:1963-1968`), và `WorkerCmd::SwitchAccount` khôi phục session **không cần QR**.\n- Thiếu: màn hình login không hiển thị danh sách tài khoản (`list_saved_accounts` hiện chỉ dùng trong Cài đặt, `modals.rs:4353`); chưa phân biệt đăng xuất vs xoá tài khoản khỏi máy (`delete_saved_account` chỉ nằm trong Cài đặt, `modals.rs:4529`); chưa có trạng thái \"phiên còn hiệu lực / cần đăng nhập lại\".\n\nPhần cần bổ sung:\n\n- **Màn hình đăng nhập**: hiển thị danh sách account card (avatar, tên, \"hoạt động gần nhất\", badge trạng thái phiên). Một chạm:\n  - phiên còn hiệu lực → `WorkerCmd::SwitchAccount`, vào thẳng danh sách hội thoại;\n  - phiên hết hạn → mở QR nhưng **giữ nguyên card**, đăng nhập xong cập nhật lại snapshot.\n- **Đăng xuất** = kết thúc phiên nhưng giữ tài khoản trong danh sách. Thêm hành động riêng **\"Xoá tài khoản khỏi thiết bị\"** (gọi `delete_saved_account`) với xác nhận mạnh hơn (2 bước / gõ lại tên), không gộp chung nút đăng xuất.\n- **Trạng thái phiên**: thêm field trạng thái vào account card; khi Zalo trả `error_code` phiên hết hạn (vd. 114 / 600) thì đánh dấu \"cần đăng nhập lại\" và fallback QR — không xoá account.\n- **Cài đặt**: hiển thị danh sách tài khoản đã lưu kèm dung lượng `accounts/` và nút \"Xoá toàn bộ tài khoản đã lưu\".\n- **Bảo mật (cần chốt trước khi ship)**: `accounts/<uin>*.json` chứa `zpw_sek` / `zpw_enk` còn sống, liên quan trực tiếp `SESSION_SECURITY.md`. Đề xuất: mã hoá at rest (OS keyring / DPAPI), tuỳ chọn \"Lưu tài khoản trên thiết bị\" kèm cảnh báo, và nút xoá nhanh toàn bộ. Không đưa credential thật vào issue/PR.\n- **TUI**: thêm lệnh chọn tài khoản đã lưu tương ứng, tối thiểu hiển thị danh sách để hành vi hai giao diện đồng nhất.\n\nNon-goals:\n\n- Không đổi format `session.json` hay cấu trúc snapshot `accounts/<uin>.*`.\n- Không thêm đăng nhập bằng mật khẩu; QR vẫn là cách đăng nhập chính.\n- Không tự động đăng nhập khi mở app — người dùng chủ động chọn tài khoản.\n- Không đồng bộ danh sách tài khoản qua mạng / giữa các máy.\n\n### Evidence\n\n- Phản hồi người dùng: đang mở Cài đặt, chạm tay vào nút đăng xuất → bị đăng xuất ngay; sau đó đăng nhập lại bằng quét QR được, dữ liệu tin nhắn vẫn còn (snapshot `accounts/<uin>_history.db` được lưu trước khi xoá file gốc).\n- Đề xuất lưu tài khoản để không phải quét QR lại mỗi lần cũng đã được nêu ở #80 (đang mở) — issue này bổ sung phần UI + vòng đời đăng xuất.\n- Code: `src/gui/modals.rs` — \"Đăng xuất tài khoản\" (~842), \"Đăng xuất\" ở sidebar (~3156), \"Đăng xuất tài khoản này\" (~4239) đặt `do_logout = true` rồi gửi `WorkerCmd::Logout`; ngược lại `do_wipe` đã hỏi lại trước (`modals.rs:973-979` — \"Destructive and irreversible, so it asks first\").\n- Observed error_code: không có — không phải lỗi phía server, đây là vấn đề UX/luồng phía client.\n\n### Context\n\n- ADR / RFC: cần ADR cho việc lưu credential at rest (mã hoá, mặc định bật/tắt, cách xoá) trước khi phát triển phần B; phần A không cần ADR.\n- Alternatives considered:\n  - Toast \"Đã đăng xuất — Hoàn tác\": không khả thi về mặt bảo mật, tương đương giữ credential sống trên máy mà người dùng tưởng đã đăng xuất; nếu muốn \"hoàn tác\" thì nên đi theo hướng B (giữ tài khoản, đăng nhập nhanh) với thông báo rõ.\n  - Chỉ dời/ẩn nút đăng xuất vào submenu: giảm khả năng chạm nhầm nhưng không chặn được.\n  - Giữ `session.json` sau khi đăng xuất thay vì snapshot trong `accounts/`: làm mất ý nghĩa của \"đăng xuất\", khó phân biệt đã đăng xuất hay chưa, và dễ khiến người dùng hiểu nhầm là đã thoát phiên.\n  - Hộp thoại xác nhận + danh sách tài khoản đã lưu (phương án chọn): rẻ, đồng nhất với luồng xoá dữ liệu đã có, đúng trải nghiệm quen thuộc (Facebook, Zalo PC).\n",
+      "closedAt": "2026-11-11T18:29:44Z",
+      "createdAt": "2026-11-10T14:46:12Z",
+      "labels": [],
+      "number": 130,
+      "state": "CLOSED",
+      "title": "feat(auth): xác nhận trước khi đăng xuất và đăng nhập nhanh bằng tài khoản đã lưu (kiểu Facebook)"
+    },
+    {
+      "author": {
+        "id": "U_kgDOEOeK_A",
+        "is_bot": false,
+        "login": "Dragon-pixel-archive",
+        "name": ""
+      },
+      "body": "\n## Môi trường\n- **Hệ điều hành:** Windows 10\n- **Phiên bản `ctdozlite`:** v0.1.0\n- **Chế độ chạy:** app\n\n## Các bước tái hiện\n1. đăng nhập tài khoản\n2. mở cloud cá nhân\n3. mở tường nhà và nhật kí bạn bè\n4. chọn đồng bộ tin nhắn\n5. gửi tin nhắn từ tài khoản khác và thu hồi\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** \n- could cá nhân ko hiện tin nhắn văn bản, chỉ hiện thời gian\n- tường nhà và nhật kí bạn bè không hiện ảnh, chỉ hiện các skeleton, nếu mở link ảnh bằng trình duyệt ngoài thì vẫn thấy đc ảnh bth\n- đồng bộ tin nhắn không thành công\n- hiện rất nhiều event thu hồi tin nhắn từ người gửi\n- **Kỳ vọng:** \n- fix lỗi hiện cloud cá nhân\n- tường nhà và nhật kí bạn bè hiện ảnh\n- sửa lỗi đồng bộ tin nhắn\n- chỉ hiện một lần event thu hồi tin nhắn\n\n## Rất mong admin phát triển và hoàn thiện app vì đây là một ứng dụng rất tiềm năng và tuyệt vời\n\nảnh lỗi tin nhắn cloud\n<img width=\"979\" height=\"479\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/4e3cb781-2086-4820-a90d-f275f78098d5\" />\nlỗi tường nhà\n<img width=\"606\" height=\"885\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/aea262f3-48fb-4216-99de-91c3cb3daf3b\" />\nlỗi đồng bộ\n<img width=\"1909\" height=\"39\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/223dba33-7cd0-4414-baae-267a4dd53e68\" />\nlỗi event thu hồi\n<img width=\"525\" height=\"739\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/5a736f40-2ba2-4cf2-8c8f-99663494bfac\" />",
+      "closedAt": "2026-11-11T18:29:47Z",
+      "createdAt": "2026-11-09T06:35:24Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 128,
+      "state": "CLOSED",
+      "title": "bug: lỗi hiển thị và đồng bộ"
+    },
+    {
+      "author": {
+        "is_bot": true,
+        "login": "app/coderabbitai"
+      },
+      "body": "## Summary\n\nContact aliases that resemble generated placeholders, such as `123` or `Nhóm học`, may not replace an older thread name in SQLite. If the thread cache is unavailable during an offline restart, the older name can be displayed.\n\n## Required change\n\nUpdate the thread persistence path in `src/store.rs` and related contact-name handling in `src/chat.rs` so that persistence can distinguish contact aliases from generated placeholders. Preserve the safeguard that prevents generated placeholders from overwriting stored names.\n\n## Acceptance criteria\n\n- Persist and restore numeric aliases and aliases beginning with `Nhóm ` when the thread cache is unavailable.\n- Do not let generated placeholders replace existing names.\n- Add regression tests for persistence and offline restoration, including both alias examples and placeholder protection.\n\nRequested by @gr219 as a follow-up to https://github.com/ctdoteam1110/ctdozlite/pull/125.\n\nReview finding: https://github.com/ctdoteam1110/ctdozlite/pull/125#discussion_r4509078210",
+      "closedAt": "2026-11-11T18:29:50Z",
+      "createdAt": "2026-11-09T03:15:36Z",
+      "labels": [],
+      "number": 126,
+      "state": "CLOSED",
+      "title": "Preserve placeholder-like contact aliases across offline restarts"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCWTD4Q",
+        "is_bot": false,
+        "login": "ngthzuan",
+        "name": ""
+      },
+      "body": "<img width=\"1069\" height=\"750\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/0622076e-0989-472c-ae3e-36d4f6ff17d2\" />\nBị như hình-=))\n",
+      "closedAt": "2026-11-08T17:12:20Z",
+      "createdAt": "2026-11-08T10:23:35Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 123,
+      "state": "CLOSED",
+      "title": "bug:"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCIdiXA",
+        "is_bot": false,
+        "login": "Trinity030-dev",
+        "name": ""
+      },
+      "body": "win 11 26h2\nLỗi gửi lại thông báo cũ khi mở lại app trên win.\nthông báo của tin nhắn đã đọc và cuộc gọi cũ cũng bị gửi lại",
+      "closedAt": "2026-11-08T17:00:36Z",
+      "createdAt": "2026-11-08T06:51:39Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 122,
+      "state": "CLOSED",
+      "title": "gửi lại thông báo cũ khi mở app"
+    },
+    {
+      "author": {
+        "id": "U_kgDOClNNZA",
+        "is_bot": false,
+        "login": "bao2222-hub",
+        "name": ""
+      },
+      "body": "## Môi trường\n- **Hệ điều hành: Windows 11 26H2 Insider Preview (26340.9843)\n- **Phiên bản `ctdozlite`:** v 0.0.9 Latest\n- **Chế độ chạy:** GUI (`--gui`) \n\n## Các bước tái hiện\n1. nhấn vào đồng bộ tin nhắn trên điện thoại trên ctdozlite\n2. điện thoại nhận được yêu cầu đồng bộ tin nhắn\n3. app Zalo trên điện thoại crash ngay khi nhấn \"đồng bộ ngay\"\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Ctdozlite treo hoặc không đồng bộ được tin nhắn\n- **Kỳ vọng:** đồng bộ được tin nhắn\n\n## Log (`--dev`)\ntreo ở khi nhấn \"đồng bộ tin nhắn) ```text\n  data decrypted (2706 bytes)\n→ GET https://p5-ctl-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103438\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103438\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103439\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rN4cwjJVsNYWzqQSo2sP4kuuZrJf9C4OZlLNh33UQxuZ7+DfOS05EBTaQDdBS3RmDKGJAIU1HoemKaj8wQiTlvwD6ubNEgNIM0H59Yfi4jk37OT2msrkKeA4LVETOI19YWBKSFk7QnGUElCD/hvNIzN2hnbTsghhlKf0kYexqWmRTbp3rocRTZOdidNYqu09X1N3JuIahs4OsmZdP5w4sscdMHhy/SNhiha4tetPT2Ed5fWIneFSef/GVQHTPwar26nt+q8tIPHIcCSbJ3mjNkhYa16UTTYD8+3QYI…\n  data decrypted (688 bytes)\n→ GET https://p5-ctl-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103440\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103441\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103442\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103443\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103444\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103445\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n→ GET https://p5-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1794103447\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"ahDNjEyWygKDAV8T2JMFL7txo9Qpew/OZe/Rj/hVRDHAVfQEM0PDvIc1n4ZDqL+rVVRWz6v4fwucH9GzUTicRnRWLk66xFzFy5+ZhvNbbZvCBkQSOAfCkJsiyZQj/DxUjohNSfWDd/KI5BOoOwxPFQpq81zdp+C18TCu+XANag+nBxf/tHjszA6rTemMlCvrNOff49v2jH/N4XYTTlKXXpJMGrL5UDtw4Cv9iCoWSFAWCVSYnFunPhkP8/bcgb+LnH9nYa1gyg5AcNXl9GQ5ZQ/z0nQ4+Oea3hUYPT0GyrPqSzy4YEz0sIqsl0HjmnVbParHDAHBadvIbnvRfw4uqamXkTWk4YFDBfmBr…\n  data decrypted (545 bytes)\n```\n",
+      "closedAt": "2026-11-08T17:07:41Z",
+      "createdAt": "2026-11-08T02:04:45Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 120,
+      "state": "CLOSED",
+      "title": "bug:"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCIdiXA",
+        "is_bot": false,
+        "login": "Trinity030-dev",
+        "name": ""
+      },
+      "body": "<img width=\"122\" height=\"789\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/080cae27-8a60-48ac-9efe-445da72b3c58\" /> đã đọc tin nhưng khi mở app vô lại các dấu chọn báo tin nhắn không biến mất mà vẫn hiện như cũ\n",
+      "closedAt": "2026-11-08T12:41:39Z",
+      "createdAt": "2026-11-08T00:08:19Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 119,
+      "state": "CLOSED",
+      "title": "Lỗi đã đọc tin nhắn rồi nhưng vẫn còn báo chưa đọc"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCIdiXA",
+        "is_bot": false,
+        "login": "Trinity030-dev",
+        "name": ""
+      },
+      "body": "<img width=\"691\" height=\"367\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/13be682e-d722-4d09-811c-1f02e487e69d\" />\nlỗi không hiển thị ảnh mà hiện link trong tin nhắn gửi",
+      "closedAt": "2026-11-08T13:04:56Z",
+      "createdAt": "2026-11-08T00:06:46Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 118,
+      "state": "CLOSED",
+      "title": "lỗi không hiển thị ảnh mà hiện link trong tin nhắn gửi"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCIdiXA",
+        "is_bot": false,
+        "login": "Trinity030-dev",
+        "name": ""
+      },
+      "body": "win 26h2 win 11\nbug tin nhắn đọc rồi nhưng khi vào lại vẫn hiện số đỏ bên phải hộp tin nhắn \nCác tin nhắn group đọc hết vẫn hiện số đỏ báo tin nhắn mới kế bên như cũ gây nhầm lẫn cho người sử dụng",
+      "closedAt": "2026-11-08T00:07:25Z",
+      "createdAt": "2026-11-08T00:04:30Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 117,
+      "state": "CLOSED",
+      "title": "bug:"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjU3MzY3Njc0",
+        "is_bot": false,
+        "login": "nguyenvanhuy0612",
+        "name": "Nguyen Van Huy"
+      },
+      "body": "## Môi trường\n- **Hệ điều hành:** Windows 11 (x86_64)\n- **Phiên bản `ctdozlite`:** v0.0.8 (bản portable phát hành sẵn)\n- **Chế độ chạy:** GUI (`--gui --dev`)\n- **Môi trường phụ trợ:** Node.js v26.13.0\n\n## Tóm tắt lỗi\nKhi thực hiện tính năng \"Đồng bộ tin nhắn từ điện thoại ngay\" (`WorkerCmd::SyncPhoneMessages`), điện thoại có nhận được thông báo và người dùng đã bấm xác nhận đồng bộ, tuy nhiên phía client PC không thể giải mã và không kéo được tin nhắn về `zalo_history.db`.\n\nKhi kiểm tra luồng xử lý, `src/history_sync.rs` gọi lệnh `node sync_v2_helper.js gen-keys` để sinh cặp khóa Curve25519 cho Sync v2. Tuy nhiên, `sync_v2_helper.js` đang trỏ cứng tới đường dẫn WebAssembly cục bộ không tồn tại trên bản phát hành, dẫn tới lỗi `ENOENT`. Khi lệnh Node.js thất bại, code Rust fallback sang sinh khóa public key ngẫu nhiên không có private key tương ứng, làm cho client không thể giải mã gói tin mã hóa từ điện thoại.\n\n## Các bước tái hiện\n1. Mở `ctdozlite` trên Windows 11 (`ctdozlite.exe --gui --dev`).\n2. Đăng nhập bằng mã QR qua ứng dụng Zalo trên điện thoại.\n3. Vào **Cài đặt** -> **Đồng bộ tin nhắn**.\n4. Bấm **\"Đồng bộ tin nhắn từ điện thoại ngay\"** (`WorkerCmd::SyncPhoneMessages`).\n5. Bấm xác nhận đồng bộ trên điện thoại.\n6. Quan sát phía client PC: tiến trình đồng bộ bị treo, báo timeout hoặc kết thúc với 0 tin nhắn được thêm vào.\n\nKiểm tra trực tiếp file helper ngoài terminal:\n```bash\nnode sync_v2_helper.js gen-keys\n```\nKết quả trả về:\n```text\nError: ENOENT: no such file or directory, open 'C:\\Users\\...\\temp\\asar_extracted\\pc-dist\\libs\\libzproto_wasm_bg.ecc0555ba9d0f8867a4699ce943ec745.wasm'\n    at Object.openSync (node:fs:782:18)\n    at Object.readFileSync (node:fs:628:35)\n    at initWasm (.../sync_v2_helper.js:11:28)\n    at generateV2Keys (.../sync_v2_helper.js:18:11)\n```\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Lệnh sinh khóa trong `sync_v2_helper.js` bị lỗi `ENOENT` do đường dẫn `WASM_PATH` trỏ tới `../asar_extracted/...` (thư mục giải nén trên máy phát triển của tác giả). Code trong `src/chat.rs` fallback sang `generate_sync_v2_ed25519_public_key` tạo public key ngẫu nhiên không có private key tương ứng, khiến dữ liệu nhận từ điện thoại không thể giải mã được.\n- **Kỳ vọng:** `sync_v2_helper.js` tìm được file WASM hoặc logic sinh khóa Curve25519 / Ed25519 được cài đặt bằng thư viện Rust thuần (như `curve25519-dalek` / `ed25519-dalek`), giúp client hoàn tất bắt tay Sync v2 và giải mã tin nhắn độc lập không phụ thuộc Node.js hay file WASM bên ngoài.\n\n## Đoạn code liên quan\n- `sync_v2_helper.js:5`: Đường dẫn `WASM_PATH` bị hardcode:\n  ```javascript\n  const WASM_PATH = path.resolve(__dirname, '../asar_extracted/pc-dist/libs/libzproto_wasm_bg.ecc0555ba9d0f8867a4699ce943ec745.wasm');\n  ```\n- `src/history_sync.rs:744-754`: Hàm `generate_sync_v2_keys()` gọi Node.js và fail khi script ném lỗi.\n- `src/chat.rs:7097-7103`: Fallback sinh khóa giả khi lệnh thất bại:\n  ```rust\n  let (ik_pub, ek_pub) = match crate::history_sync::generate_sync_v2_keys() {\n      Ok(k) => (k.ik_pub, k.ek_pub),\n      Err(_) => (\n          crate::history_sync::generate_sync_v2_ed25519_public_key(0xA1),\n          crate::history_sync::generate_sync_v2_ed25519_public_key(0xB2),\n      ),\n  };\n  ```\n- `src/history_sync.rs:777-787`: Hàm `import_sync_v2_meta()` cũng gọi `sync_v2_helper.js decrypt-meta` và gặp lỗi tương tự khi giải mã metadata.\n\n## Đề xuất giải pháp\n1. Viết lại phần sinh khóa và bắt tay Sync v2 bằng crate Rust thuần (`curve25519-dalek` / `ed25519-dalek`) để client chạy độc lập hoàn toàn, không phụ thuộc Node.js.\n2. Nếu vẫn cần dùng WASM của Zalo, nên đóng gói file `libzproto_wasm_bg.wasm` đi kèm trong thư mục phát hành hoặc hỗ trợ cơ chế quét tự động thư mục cài đặt Zalo PC gốc trên máy (`%LOCALAPPDATA%\\Programs\\Zalo`).\n",
+      "closedAt": "2026-11-08T13:05:00Z",
+      "createdAt": "2026-11-07T08:14:13Z",
+      "labels": [],
+      "number": 116,
+      "state": "CLOSED",
+      "title": "bug: Đồng bộ tin nhắn điện thoại thất bại do đường dẫn WASM bị hardcode trong sync_v2_helper.js"
+    },
+    {
+      "author": {
+        "id": "U_kgDODU6QWg",
+        "is_bot": false,
+        "login": "lttkiet",
+        "name": "lk"
+      },
+      "body": "## Môi trường\n- **Hệ điều hành:** Ubuntu server 24.04.5 LTS headless\n- **Phiên bản `ctdozlite`:** v0.0.8\n- **Chế độ chạy:** TUI\n\n## Các bước tái hiện\n1. Chạy ctdozlite TUI `ctdozlite --tui --qr`\n2. Đăng nhập qua qr, xác nhận đăng nhập\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** App báo đăng nhập thành công, giao diện chính hiện lên nhưng không có tin nhắn, không có danh sách tin nhắn.\n- **Kỳ vọng:** App tải được danh sách tin nhắn và nội dung tin nhắn\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\nQuét mã bằng Zalo trên điện thoại…\n→ GET https://qr-id.zaloapp.com/polling/qr/waiting?src=pc&code=REDACTED&lang=vi\n← 200 {\"error_message\":\"Quét mã thành công. Vui lòng chọn Có trên thiết bị di động để đăng nhập\",\"data\":{\"avatar\":\"http:\\/\\/s120.avatar.talk.zdn.vn\\/default\",\"display_name\":\"Lê Trọng Tuấn Kiệt\"},\"error_code…\n✓ Đã quét: Lê Trọng Tuấn Kiệt\nĐã quét mã QR! Vui lòng bấm 'Đăng nhập' trên điện thoại…\n→ GET https://qr-id.zaloapp.com/polling/qr/pc-status?src=pc&code=I5111.0.1794019865783.d7335a45095c8fcd6573501fe3e440c8\n← 200 {\"error_message\":\"\",\"data\":{\"is_pcweb\":1,\"uid\":\"REDACTED\",\"dkey\":\"REDACTED\",\"zpw_kt\":\"1.ByTK73jqiuSTKc4eidBMBQyC47N5ZtR7\\/cX6sAHDul5ScSZrl4qz5tROngBTBVzkTOP1XRwWCilm5…\n  Captured zpw_sek cookie: xQjw.462…<redacted>\n✓ Đăng nhập thành công trên điện thoại! Đang đồng bộ khoá phiên…\n→ GET https://wpa.zaloapp.com/api/login/getLoginInfo?client_version=694&enc_ver=v2&params=<redacted>&signkey=<redacted>&type=30&zcid=REDACTED\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"REDACTED\n  data decrypted (27281 bytes)\n✓ Đã nạp khoá phiên zpw_enk và cập nhật endpoints!\n✓ Đã lưu phiên vào session.json (tự động khôi phục cho các lần chạy sau)\n→ GET https://tt-friend-wpa.chat.zalo.me/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 404 Not Found <html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly er…\n→ GET https://tt-friend-wpa.zaloapp.com/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 404 Not Found <html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly error page -->\n<!-- a padding to disable MSIE and Chrome friendly er…\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK {\"error_code\":600,\"error_message\":\"zpw_sek bị thiếu hoặc không đúng\",\"data\":null}\n```\n",
+      "closedAt": "2026-11-11T18:29:53Z",
+      "createdAt": "2026-11-07T03:00:19Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 115,
+      "state": "CLOSED",
+      "title": "bug: TUI trên ubuntu server 22.04.5 LTS không đồng bộ được danh sách tin nhắn"
+    },
+    {
+      "author": {
+        "id": "U_kgDODCW7uA",
+        "is_bot": false,
+        "login": "timaivn",
+        "name": "TìmAI"
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** : Debian 13 Trixie Wayland\n- **Phiên bản `ctdozlite`:** (xem góc trên bên trái cửa sổ ứng dụng hoặc chạy `ctdozlite --version`)\n- **Chế độ chạy:** GUI (`--gui`) / TUI (`--tui`) / Headless (`--mcp` hoặc `--api-port`)\n\n## Các bước tái hiện\n1. Không gõ được Fcitcx5 - bamboo (lotus) chế độ unicode trên ctdozlite \n2. ...\n3. ...\n\n## Kết quả thực tế vs. kỳ vọng\n-Hãy fix giúp cộng đồn \n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\n\n```\n",
+      "closedAt": "2026-11-11T18:29:56Z",
+      "createdAt": "2026-11-06T14:50:49Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 112,
+      "state": "CLOSED",
+      "title": "bug: Gõ tiếng việt trên debian 13 kde wayland"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjcxOTM1MzQx",
+        "is_bot": false,
+        "login": "fouze555",
+        "name": ""
+      },
+      "body": "## Môi trường\n- **Hệ điều hành:** (ví dụ: Windows 11 24H2 LTSC\n- **Phiên bản `ctdozlite`:** v0.07\n- **Chế độ chạy:** GUI (`--gui`) \n\n## Các bước tái hiện\n1. Gửi đường link một trang web bất kỳ\n2. Zalo tự tạo thumbnail cho đường link\n3. Chỉ hiện lên và mở được thumbnail như ảnh chứ không thấy được đường link\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Chỉ thấy được thumbnail và mở lên như ảnh\n- **Kỳ vọng:** Thấy được đường link và có thể click vào\n\n\n",
+      "closedAt": "2026-11-08T13:04:53Z",
+      "createdAt": "2026-11-06T06:35:04Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 111,
+      "state": "CLOSED",
+      "title": "bug: Link không xuất hiện trong tin nhắn"
+    },
+    {
+      "author": {
+        "id": "U_kgDODWIg2Q",
+        "is_bot": false,
+        "login": "LKW1989-kw",
+        "name": "Penguinitty"
+      },
+      "body": "### Summary\n\nTrong zalo PC có 1 chức năng về privacy khoá zalo bằng mặt mã 4 số và shortcut Ctrl + L để khoá nhanh zalo và nhập mk 4 số dc cài sẵn để truy cập vào zalo \n\n### Proposal\n\n.\n\n### Evidence\n\n- Evidence / capture:\n- Observed error_code:\n\n\n### Context\n\n- ADR / RFC: None\n- Alternatives considered:\n",
+      "closedAt": null,
+      "createdAt": "2026-11-06T03:51:30Z",
+      "labels": [],
+      "number": 110,
+      "state": "OPEN",
+      "title": "feat(<scope>): <summary>Thêm mã khoá Zalo để mục đích riêng tư hơn (có thể 4 chữ số hoặc custom lên)"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCIdiXA",
+        "is_bot": false,
+        "login": "Trinity030-dev",
+        "name": ""
+      },
+      "body": "win 11 26h2 \nv0.0.8\nMở app lên thì một số chữ trong chat cá nhân bị giật khung hình nhòe chữ\n",
+      "closedAt": null,
+      "createdAt": "2026-11-06T00:24:26Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 109,
+      "state": "OPEN",
+      "title": "bug: tin nhắn người khác gửi chữ bị giật"
+    },
+    {
+      "author": {
+        "id": "U_kgDOEShh-Q",
+        "is_bot": false,
+        "login": "clockertron",
+        "name": ""
+      },
+      "body": "## Môi trường\n-Hệ điều hành: Windows 10 IoT Enterprise LTSC 2021\n-Phiên bản `ctdozlite`: 0.0.8\n-Chế độ chạy GUI\n\n## Các bước tái hiện\n1. Bấm đồng bộ trong zlite\n2. Điện thoại báo về \n3. Bấm đồng bộ mà bên PC thì ko có đồng bộ dcd\n",
+      "closedAt": "2026-11-08T17:07:45Z",
+      "createdAt": "2026-11-05T15:06:44Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 108,
+      "state": "CLOSED",
+      "title": "bug: Không đồng bộ đc tin nhăn ở phiên bản mới nhất"
+    },
+    {
+      "author": {
+        "id": "U_kgDOBbygng",
+        "is_bot": false,
+        "login": "SanRocKk2005",
+        "name": "SRKK"
+      },
+      "body": "> **Trước khi mở issue:** Tôi đã kiểm tra danh sách tính năng và lỗi đã biết.\n\n## Môi trường\n- **Hệ điều hành:** Windows 10\n- **Phiên bản `ctdozlite`:** 0.0.8\n- **Chế độ chạy:** GUI (`--gui`)\n\n## Các bước tái hiện\n1. Mở ứng dụng `ctdozlite` trên Windows 10.\n2. Gửi một đường dẫn (link) trong cửa sổ hội thoại.\n3. Nhấp vào đường dẫn đã gửi để mở hoặc xem.\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Nhấp vào link không có phản hồi, link không thể xem/mở được trong trình duyệt.\n- **Kỳ vọng:** Khi bấm vào link, ứng dụng sẽ mở liên kết đó bằng trình duyệt mặc định trên Windows.\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây:\n```text\n\n<img width=\"671\" height=\"574\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/9899d493-ebc3-4fb1-abc1-3cdf9dd57ecb\" />",
+      "closedAt": "2026-11-11T18:29:58Z",
+      "createdAt": "2026-11-05T13:07:52Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 107,
+      "state": "CLOSED",
+      "title": "bug: Không mở/xem được link trên Windows 10"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjQ2NzAwNjYz",
+        "is_bot": false,
+        "login": "LeCmnGend",
+        "name": "LeCmnGend"
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** (ví dụ: Windows 11 23H2 / macOS 15.2 Apple Silicon / Ubuntu 24.04)\n- **Phiên bản `ctdozlite`:** (xem góc trên bên trái cửa sổ ứng dụng hoặc chạy `ctdozlite --version`)\n- **Chế độ chạy:** GUI (`--gui`) / TUI (`--tui`) / Headless (`--mcp` hoặc `--api-port`)\n\n## Các bước tái hiện\n1. Cài đặt -> cài đặt chung -> thư mục lưu dữ liệu\n2. ...\n3. ...\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Không cho chọn OK, có vẻ hộp thoại này đang thực hiện chọn file thay vì chọn thư mục\n- **Kỳ vọng:** Ấn xong bước 1 sẽ hiển thị ok thành công\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\n\n```\n\n<img width=\"539\" height=\"86\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/6c4acfed-3254-488d-9e55-769ccd5f5bd0\" />",
+      "closedAt": "2026-11-11T18:30:01Z",
+      "createdAt": "2026-11-05T08:41:47Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 106,
+      "state": "CLOSED",
+      "title": "bug: Không đổi được thư mục lưu dữ liệu"
+    },
+    {
+      "author": {
+        "id": "U_kgDOBqPbxA",
+        "is_bot": false,
+        "login": "vietsonbui",
+        "name": "Bùi Việt Sơn"
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:**Windows 11 26H2\n- **Phiên bản `ctdozlite`:** 0.0.8\n- **Chế độ chạy:** GUI\n\n## Các bước tái hiện\n1. Cài đặt\n2. Tài khoản\n3. Đa tài khoản\n4. Không thêm tài khoản\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:**  Dừng ở màn hình thêm tài khoản, không thể quay lại\n- **Kỳ vọng:** Huỷ thêm, quay lại tài khoản đang sử dụng\n",
+      "closedAt": "2026-11-11T18:30:06Z",
+      "createdAt": "2026-11-05T03:54:20Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 103,
+      "state": "CLOSED",
+      "title": "bug: Lỗi đa tài khoản"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjk2NTQ3MzI=",
+        "is_bot": false,
+        "login": "UhhhhOkayyyy",
+        "name": "UhhhhOkayyyy"
+      },
+      "body": "\n## Môi trường\n- **Hệ điều hành:** Windows 10 \n- **Phiên bản `ctdozlite`:** ctdozlite-0.0.8-setup-windows-x86_64.exe\n\n\nHi ad, mình thấy người khác gởi video nhưng mình ko bấm xem được, bấm nó tải file về máy tính nhưng cũng ko mở thư mục chứa file nên mình mất công tìm kiếm nữa. Nhờ bạn fix với ạ. Cảm ơn bạn. \n<img width=\"634\" height=\"1025\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/916fdb2f-49e9-4eb9-93f3-cea479d25735\" />\n\nKhi tải xong file bị mã hóa cũng ko mở được ạ\n\n<img width=\"905\" height=\"312\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/787c52d0-6a79-4356-b359-73eaec4a919d\" />",
+      "closedAt": "2026-11-11T18:30:09Z",
+      "createdAt": "2026-11-05T03:01:04Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 102,
+      "state": "CLOSED",
+      "title": "bug: Không xem video được trực tiếp trong tin nhắn"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCfKpOQ",
+        "is_bot": false,
+        "login": "baodinhgia2011github",
+        "name": ""
+      },
+      "body": "### Summary\n\nKhi sử dụng Zalo Rust GUI, không thể trò chuyện qua thanh chat hoặc tìm kiếm tên người dùng bằng tiếng Việt\n\n### Reproduction\n\n1. Mở ctdozlite\n2. Chạy Unikey bằng fcitx5\n3. Gõ trò chuyện vào thanh chat và tìm kiếm người dùng\n\n\n### Area\n\nauth\n\n### Server error_code (if any)\n\n_No response_\n\n### Environment\n\n- OS / Version: Arch Linux x86_64 6.18.55-1-lts\n- ctdozlite version: v0.0.8\n- Interface: GUI\n- Logs (redacted): None\n\n\n### Secret check\n\n- [x] I confirm no session tokens, cookies, IMEI, phone numbers or raw captures are included.",
+      "closedAt": "2026-11-11T18:30:12Z",
+      "createdAt": "2026-11-05T02:41:10Z",
+      "labels": [],
+      "number": 101,
+      "state": "CLOSED",
+      "title": "Bug: Không gõ được tiếng Việt"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCvFoNQ",
+        "is_bot": false,
+        "login": "lebad280324",
+        "name": "Lê Bá Dũng"
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** (ví dụ: Windows 11 23H2 / macOS 15.2 Apple Silicon / Ubuntu 24.04)\n- **Phiên bản `ctdozlite`:** (xem góc trên bên trái cửa sổ ứng dụng hoặc chạy `ctdozlite --version`)\n- **Chế độ chạy:** GUI (`--gui`) / TUI (`--tui`) / Headless (`--mcp` hoặc `--api-port`)\n\n## Các bước tái hiện\n1. ...\n2. ...\n3. ...\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** ...\n- **Kỳ vọng:** ...\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\n\n```\n",
+      "closedAt": "2026-11-08T17:07:47Z",
+      "createdAt": "2026-11-05T01:23:19Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 100,
+      "state": "CLOSED",
+      "title": "bug: trên mac chip apple , lỗi không đồng bộ tin nhắn được"
+    },
+    {
+      "author": {
+        "id": "U_kgDOEuocxQ",
+        "is_bot": false,
+        "login": "phamducit2005-bot",
+        "name": ""
+      },
+      "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** (ví dụ: Windows 11 23H2 / macOS 15.2 Apple Silicon / Ubuntu 24.04)\n- **Phiên bản `ctdozlite`:** (xem góc trên bên trái cửa sổ ứng dụng hoặc chạy `ctdozlite --version`)\n- **Chế độ chạy:** GUI (`--gui`) / TUI (`--tui`) / Headless (`--mcp` hoặc `--api-port`)\n\n## Các bước tái hiện\n1. ...\n2. ...\n3. ...\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** ...\n- **Kỳ vọng:** ...\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\n\n```\n",
+      "closedAt": "2026-11-07T19:06:15Z",
+      "createdAt": "2026-11-04T18:26:59Z",
+      "labels": [
+        {
+          "id": "LA_kwDOVRw7ac8AAAAC-X74yg",
+          "name": "bug",
+          "description": "Something isn't working",
+          "color": "d73a4a"
+        }
+      ],
+      "number": 98,
+      "state": "CLOSED",
+      "title": "Lỗi hiện tại là không trả lời tin nhắn chỉ định , không thả hiệu ứng được cho tin nhắn , âm thanh thông báo của app vẫn chưa có và chưa thấy nổi thông báo mới khi người khác nhắn tin cần ưu tiên hoàn thiện các tính năng thông báo trước"
+    },
     {
       "author": {
         "id": "U_kgDODU6QWg",
@@ -12,7 +659,7 @@ window.CTD_GITHUB_ISSUES = {
         "name": "lk"
       },
       "body": "## Môi trường\n- **Hệ điều hành:** openSUSE Tumbleweed 20261102\n- **Phiên bản `ctdozlite`:** 0.0.7\n- **Chế độ chạy:** GUI (`--gui`)\n\n## Các bước tái hiện\n1. Chạy ctdozlite\n2. Đăng nhập bằng mã QR\n3. Bấm đồng bộ tin nhắn tại màn hình chính hoặc qua tab đồng bộ trong menu cài đặt\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** App hiện thông báo đồng bộ thành công, lấy được danh sách nhóm và người đã có tin nhắn, nhưng không hiển thị nội dung tin nhắn. \n> [!NOTE]\n> App vẫn lấy được nội dung trong phần My Documents.\n- **Kỳ vọng:** App tải và hiển thị đầy đủ nội dung tin nhắn của các nhóm/cá nhân sau khi đồng bộ.\n\n## Log (`--dev`)\n\n[dev-gui.redacted.log](https://github.com/user-attachments/files/34372466/dev-gui.redacted.log)\n",
-      "closedAt": null,
+      "closedAt": "2026-11-04T15:39:02Z",
       "createdAt": "2026-11-04T12:54:43Z",
       "labels": [
         {
@@ -23,18 +670,18 @@ window.CTD_GITHUB_ISSUES = {
         }
       ],
       "number": 95,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug: Đồng bộ thành công nhưng không tải được nội dung tin nhắn (openSUSE)(GUI)"
     },
     {
       "author": {
         "id": "MDQ6VXNlcjk2NTQ3MzI=",
         "is_bot": false,
-        "login": "liwenjing93",
-        "name": ""
+        "login": "UhhhhOkayyyy",
+        "name": "UhhhhOkayyyy"
       },
       "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:**  macos 26.7 + Windows 10 \n- **Phiên bản `ctdozlite`:** ctdozlite-0.0.7 \n\nHi bạn, Cảm ơn bạn đã tạo app này, rất hữu ích cho mình cần đăng nhập zalo trên nhiều máy tính. \n\nMình muốn báo 1 vài lỗi là:\n- mình không bấm chuột phải vào tin nhắn để tạo reminder được, ko hiện các reminder đã thông báo trước đó\n(dù trong tài liệu bên bạn ghi là Nhắn tin & Hẹn giờ có thực hiện được)\n- ko sync tin nhắn mới nhất được, các tin nhắn không hiện\n- Ko có âm thanh khi có tin nhắn mới hoặc chờ 5s mới nghe thấy âm thanh, trên Windows \n- ko thả icon cho tin nhắn được\n\nCảm ơn bạn \n\n",
-      "closedAt": null,
+      "closedAt": "2026-11-07T19:06:17Z",
       "createdAt": "2026-11-04T09:40:43Z",
       "labels": [
         {
@@ -45,7 +692,7 @@ window.CTD_GITHUB_ISSUES = {
         }
       ],
       "number": 94,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug: Không tạo được reminder hẹn giờ, không có âm thanh tin nhắn mới, không thả icon được, không sync tin nhắn được"
     },
     {
@@ -56,7 +703,7 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "change the languages the saved download address is try to choose a file instead of a folder and although I selected english it still in the vietnamese interface without any button to make the change however the setting still remain in english even after restart and well the message sync future doesn't work at all although some new message of today still recived but the old messages on my personal phone don't And beside that hope you also reduce the annoying amount of notifications that show up in use. Thank you for hearing us.",
-      "closedAt": null,
+      "closedAt": "2026-11-08T17:07:50Z",
       "createdAt": "2026-11-04T06:31:12Z",
       "labels": [
         {
@@ -67,7 +714,7 @@ window.CTD_GITHUB_ISSUES = {
         }
       ],
       "number": 91,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug: Changing the languages the saved download file address problem and the sync message future doesn't seems to work"
     },
     {
@@ -78,7 +725,7 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "## Môi trường\n- **Hệ điều hành:** Windows 11 23H2\n- **Phiên bản `ctdozlite`:** v0.0.7\n- **Chế độ chạy:** GUI\n\n## Các bước tái hiện\n1. mở app\n2. vào một group bất kỳ\n3. nhấn @ để kiểm tra, list tên người không hiện ra, cũng không có đề xuất người trong group\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Không sử dụng được tag @name\n- **Kỳ vọng:** Sử dụng được\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\n\n```\n",
-      "closedAt": null,
+      "closedAt": "2026-11-06T16:04:47Z",
       "createdAt": "2026-11-04T04:23:46Z",
       "labels": [
         {
@@ -89,7 +736,7 @@ window.CTD_GITHUB_ISSUES = {
         }
       ],
       "number": 89,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug: tag tên người sử dụng @ không hoạt động"
     },
     {
@@ -100,11 +747,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "### Summary\n\ngiao diện hiện tại không thể đổi được font chữ trên windows 64\n\n### Proposal\n\nĐiều chỉnh trong setting của app thay vì sửa đổi json\n\n### Evidence\n\n- Evidence / capture:\n- Observed error_code:\n\n\n### Context\n\n- ADR / RFC: None\n- Alternatives considered:\n",
-      "closedAt": null,
+      "closedAt": "2026-11-11T18:30:15Z",
       "createdAt": "2026-11-04T04:21:04Z",
       "labels": [],
       "number": 88,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "feat(<scope>): <summary>Cho phép đổi font chữ của giao diện"
     },
     {
@@ -115,7 +762,7 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Truong Thanh Hieu"
       },
       "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** Fedora Linux 44\n- **Phiên bản `ctdozlite`:** Native 0.0.7\n- **Chế độ chạy:** GUI\n\n## Các bước tái hiện\n1. Đăng nhập Zalo\n2. Chọn đồng bộ tin nhắn\n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Không hiện yêu cầu đồng bộ lên điện thoại, và tin nhắn không hiện đúng ds đã ghim\n- **Kỳ vọng:** Hiện thông báo lên đt\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```text\n🔧 [DEV MODE ACTIVATED] – Quét log, chẩn đoán giao thức và trace chi tiết được bật.\n🚀 Đang khởi chạy giao diện đồ họa ctdozlite (egui)…\n→ GET https://wpa.zaloapp.com/api/login/getServerInfo?bkt=-1&client_version=694&computer_name=DESKTOP&imei=<redacted>&sp_mtn=-1&type=30&signkey=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":{\"server_time\":1793765873,\"setttings\":{\"authen\":{\"passw_rules\":[{\"regex\":\"^((?=.*[0-9])(?=.*[a-zA-Z]).{6,32})$\",\"msg\":\"Mật khẩu phải có ít nhất 6 ký tự, nhiều nhất 32 ký tự và bao gồm cả chữ lẫn số\"},{\"regex\":\"^\\\\S+.*?\",\"msg\":\"Mật khẩu không thể bắt đầu bằng khoảng trắng\"}],\"encryption\":{\"enable\":1},\"enable_change_password\":0,\"login_scr\":{\"flag_…\n→ GET https://wpa.zaloapp.com/api/login/reqqr?client_time=1793765873&client_version=694&computer_name=DESKTOP&imei=<redacted>&language=vi&logged_uids=%5B%5D&qr_form=0&self_g=1&signkey=<redacted>&type=30\n← 200 {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":{\"qr_timeout\":180,\"token_id\":\"<redacted>\",\"qr_retry\":3,\"chk_wait_cfirm\":\"ht…\n→ GET https://qr-id.zaloapp.com/polling/qr/waiting?src=pc&code=<redacted>&lang=vi\n← 200 {\"error_message\":\"Quét mã thành công. Vui lòng chọn Có trên thiết bị di động để đăng nhập\",\"data\":{\"avatar\":\"<redacted>\"…\nĐã quét mã QR! Vui lòng bấm 'Đăng nhập' trên điện thoại…\n→ GET https://qr-id.zaloapp.com/polling/qr/pc-status?src=pc&code=<redacted>\n← 200 {\"error_message\":\"\",\"data\":{\"is_pcweb\":1,\"uid\":\"<redacted>\",\"dkey\":\"<redacted>\",\"zpw_kt\":\"<redacted>\"…\n  Captured zpw_sek cookie: <redacted>\n→ GET https://wpa.zaloapp.com/api/login/getLoginInfo?client_version=694&enc_ver=v2&params=<redacted>&signkey=<redacted>&type=30&zcid=<redacted>&zcid_ext=<redacted>&nretry=0\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (27294 bytes)\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/profile/me-v2?zpw_ver=694&zpw_type=30&params=<redacted>&os=8\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (852 bytes)\n→ GET https://tt-friend-wpa.chat.zalo.me/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 404 Not Found <html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n→ GET https://tt-friend-wpa.zaloapp.com/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 404 Not Found <html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/friend/getfriends?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (164712 bytes)\n→ GET https://tt-group-wpa.zaloapp.com/api/group/getlg/v4?zpw_ver=694&zpw_type=30\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (2220 bytes)\n→ POST https://tt-group-wpa.zaloapp.com/api/group/getmg-v2?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (65918 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (16478 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (1689 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (1433 bytes)\n→ POST https://tt-group-wpa.zaloapp.com/api/group/getmg-v2?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (10079 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (5783 bytes)\n→ GET https://tt-group-wpa.zaloapp.com/api/group/getlg/v4?zpw_ver=694&zpw_type=30\nALSA lib pcm_dmix.c:1000:(snd_pcm_dmix_open) [error.pcm] unable to open slave\nALSA lib pcm_route.c:886:(find_matching_chmap) [error.pcm] Found no matching channel map\nALSA lib pcm_route.c:886:(find_matching_chmap) [error.pcm] Found no matching channel map\nALSA lib pcm_route.c:886:(find_matching_chmap) [error.pcm] Found no matching channel map\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (2220 bytes)\n→ POST https://tt-group-wpa.zaloapp.com/api/group/getmg-v2?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (65918 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (16478 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (1689 bytes)\n→ GET https://p4-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1793765890\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"<redacted>\"}\n  data decrypted (525 bytes)\n→ GET https://tt-convers-wpa.chat.zalo.me/api/preloadconvers/get-last-msgs?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (18080 bytes)\n→ GET https://tt-group-cm.api.zaloapp.com/api/cm/getrecentv2?zpw_ver=694&zpw_type=30&params=<redacted>&nretry=0\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (66814 bytes)\n→ POST https://tt-group-wpa.zaloapp.com/api/group/getmg-v2?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (10325 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (4837 bytes)\n→ GET https://tt-profile-wpa.chat.zalo.me/api/social/profile/getmute?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (678 bytes)\n→ GET https://tt-files-wpa.zaloapp.com/api/message/parselink?zpw_ver=694&zpw_type=30&params=<redacted>\n→ GET https://p4-msg-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1793765898\n→ GET https://p4-ctl-chat.zaloapp.com/?zpw_ver=694&zpw_type=30&params=<redacted>&ts=1793765898\n→ GET https://tt-files-wpa.zaloapp.com/api/message/pull_mobile_msg?zpw_ver=694&zpw_type=30&params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"\",\"data\":\"<redacted>\"}\n  data decrypted (545 bytes)\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (695 bytes)\n→ POST https://tt-files-wpa.zaloapp.com/api/message/pull_mobile_msg?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (572 bytes)\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (76 bytes)\n→ GET https://tt-files-wpa.zaloapp.com/api/transfer-sync-v2/request-sync?zpw_ver=694&zpw_type=30&params=<redacted>\n← 404 Not Found <html><head><title>404 Not Found</title></head><body><center><h1>404 Not Found</h1></center><hr><center>nginx</center></body></html>\n→ POST https://tt-files-wpa.zaloapp.com/api/transfer-sync-v2/request-sync?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 404 Not Found <html><head><title>404 Not Found</title></head><body><center><h1>404 Not Found</h1></center><hr><center>nginx</center></body></html>\n→ GET https://tt-group-cm.api.zaloapp.com/api/cm/getoldv2?zpw_ver=694&zpw_type=30&params=<redacted>&nretry=0\n← 200 OK {\"error_code\":-69,\"error_message\":\"Stop retry\",\"data\":null}\n→ POST https://tt-group-wpa.zaloapp.com/api/group/getmg-v2?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (9639 bytes)\n→ POST https://tt-profile-wpa.chat.zalo.me/api/social/group/members?zpw_ver=694&zpw_type=30\n  body: params=<redacted>\n← 200 OK {\"error_code\":0,\"error_message\":\"Successful.\",\"data\":\"<redacted>\"}\n  data decrypted (5071 bytes)\n```\n\n<img width=\"875\" height=\"191\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/395dd644-d887-4fcd-a034-c52b97ae449c\" />\n\n<img width=\"1920\" height=\"1080\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/8d0e32cc-27e5-407f-bc44-8e5a57a5e020\" />\n\n<img width=\"1115\" height=\"754\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/57a1281a-29a9-4ee6-91c3-bdea68f245d3\" />\nĐiện thoại không hiện bảng đồng bộ nào và báo đồng bộ thất bại\nkhông hiện đúng hội thoại ghim (như zl web ở ảnh dưới)\n\n<img width=\"1920\" height=\"1080\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/7b4f5fb3-4871-44eb-b9f9-741218fe6b2c\" />",
-      "closedAt": null,
+      "closedAt": "2026-11-08T17:07:53Z",
       "createdAt": "2026-11-04T04:20:09Z",
       "labels": [
         {
@@ -126,7 +773,7 @@ window.CTD_GITHUB_ISSUES = {
         }
       ],
       "number": 87,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug: Lỗi đồng bộ tin nhắn, đồng bộ trạng thái GHIM TIN NHẮN trên Zalo"
     },
     {
@@ -137,7 +784,7 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** Ubuntu 26.04 Gnome 50\n- **Phiên bản `ctdozlite`: Native v0.0.7\n- **Chế độ chạy:** GUI \n",
-      "closedAt": null,
+      "closedAt": "2026-11-08T17:07:56Z",
       "createdAt": "2026-11-04T03:18:28Z",
       "labels": [
         {
@@ -148,7 +795,7 @@ window.CTD_GITHUB_ISSUES = {
         }
       ],
       "number": 86,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug: Lỗi ko có icon dưới thanh dock trong ubuntu 26.04, ko đồng bộ đc tin nhắn vs điện thoại. Ko tương thích với bộ gõ ngó sen (gõ bị mất chữ tiếng Việt"
     },
     {
@@ -159,11 +806,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Nguyen Huu Tung"
       },
       "body": "### Summary\n\n<img width=\"1497\" height=\"903\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/63302807-377a-4058-b074-148e647579b6\" />\n\n### Proposal\n\nNên thêm nút Auto-Scroll button để xuống tin nhắn mới nhất, và hay bị flick khi ấn vào cuộc hội thoại có tin nhắn mới\n\n### Evidence\n\n- Evidence / capture:\n- Observed error_code:\n\n\n### Context\n\n- ADR / RFC: None\n- Alternatives considered:\n",
-      "closedAt": null,
+      "closedAt": "2026-11-04T15:53:31Z",
       "createdAt": "2026-11-04T02:59:29Z",
       "labels": [],
       "number": 84,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "feat(<scope>): <summary> Nên thêm nút Auto-Scroll button để xuống tin nhắn mới nhất, và hay bị flick khi ấn vào cuộc hội thoại có tin nhắn mới"
     },
     {
@@ -211,7 +858,7 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Saphira8585"
       },
       "body": "> **Trước khi mở issue:** Vui lòng kiểm tra bảng **[Tính năng & giới hạn (`docs/TINH_NANG.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md)** và **[Lỗi đã biết (`docs/DA_BIET.md`)](https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/DA_BIET.md)** để xem vấn đề đã được ghi nhận chưa.\n\n## Môi trường\n- **Hệ điều hành:** Arch Linux (ví dụ: Windows 11 23H2 / macOS 15.2 Apple Silicon / Ubuntu 24.04)\n- **Phiên bản `ctdozlite`:v0.0.7 Native ** (xem góc trên bên trái cửa sổ ứng dụng hoặc chạy `ctdozlite --version`)\n- **Chế độ chạy:** Run the Appimage file\n\n## Các bước tái hiện\n1. Send messaages normaly\nand the other User must be offline \n\n## Kết quả thực tế vs. kỳ vọng\n- **Thực tế:** Show Đã nhận\n- **Kỳ vọng:** Sent only when it really Delivered show Delivered  (Đã nhận). The app in mobile still say as Sent\n\n## Log (`--dev`)\nChạy lại với `ctdozlite --gui --dev` và dán đoạn log liên quan tại đây (nhớ xoá thông tin nhạy cảm / cookie nếu có):\n```bash\n       ctdozlite --gui --dev\nzsh: command not found: ctdozlite\n```\n",
-      "closedAt": null,
+      "closedAt": "2026-11-11T18:30:18Z",
       "createdAt": "2026-11-03T12:11:58Z",
       "labels": [
         {
@@ -222,7 +869,7 @@ window.CTD_GITHUB_ISSUES = {
         }
       ],
       "number": 81,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug:"
     },
     {
@@ -233,11 +880,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "### Summary\n\ngóp ý\n\n### Proposal\n\nmình thấy nên thêm tính năng lưu acc chứ mỗi lần đăng nhập vào phải quét lại mã nó mất khá nhiều tin nhắn\n\n### Evidence\n\n- Evidence / capture:\n- Observed error_code:\n\n\n### Context\n\n- ADR / RFC: None\n- Alternatives considered:\n",
-      "closedAt": null,
+      "closedAt": "2026-11-11T18:30:22Z",
       "createdAt": "2026-11-03T11:25:46Z",
       "labels": [],
       "number": 80,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "mình thấy nên thêm tính năng lưu acc chứ mỗi lần đăng nhập vào phải quét lại mã nó mất khá nhiều tin nhắn"
     },
     {
@@ -248,11 +895,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "### Summary\n\nNhằm nâng cao trải nghiệm nhắn tin hàng ngày trên `ctdozlite` tương đương hoặc vượt trội so với Zalo PC chính thức, nhóm tính năng tương tác hội thoại cốt lõi sau đã được bổ sung & hoàn thiện:\n\n1. **Chống xoá / xem lại tin nhắn đã bị thu hồi (Anti-Recall)**: Giữ lại toàn bộ văn bản và media/ảnh/sticker của tin nhắn thay vì xoá trắng thành `[Tin nhắn đã thu hồi]`.\n2. **Chuyển tiếp tin nhắn (Forward Message)**: Hỗ trợ chuyển tiếp mượt mà cả Text, Sticker và Hình ảnh (tự động nhận diện CDN Zalo để tải về và forward đính kèm).\n3. **Gửi ảnh gốc HD (Original Quality)**: Thêm nút chuyển đổi `[HD]` trên thanh soạn thảo, gọi endpoint `/api/message/photo_original/send` giữ nguyên 100% độ phân giải & dung lượng, không bị Zalo nén mờ.\n4. **Chụp ảnh màn hình (Screenshot) & Dán ảnh Clipboard**: Phím tắt `Alt+A` / `Cmd+Shift+A` hoặc icon Camera 📷 để kéo chọn vùng màn hình macOS, nạp trực tiếp vào composer xem trước trước khi gửi.\n5. **Hiển thị trạng thái gõ \"... đang soạn thảo\" & \"Đã xem\" (Typing & Seen Receipts)**: Bắt các gói tin điều khiển `typing` và `seen` từ WebSocket & Long-polling `lp_control`, hiển thị thanh thái thời gian thực và cập nhật trạng thái `Đã xem` của tin nhắn gửi đi.\n\n---\n\n### Proposal\n\n1. **Anti-Recall (Chống thu hồi tin nhắn)**:\n   - Trong `merge_thread_into` và `GuiEvent::MessageRecalled`: khi nhận tin nhắn thu hồi, gắn tiền tố `[Đã thu hồi]` và giữ nguyên `sticker_id`, `link_url`, `link_thumb`, ảnh đính kèm.\n   - Giao diện: Hiển thị badge màu đỏ `🚫 Đã thu hồi` phía trên bubble, vẫn cho phép nhấp phóng to xem ảnh và sao chép văn bản.\n2. **Forwarding Media**:\n   - Trong `forward_message_with_client_id`: phân loại tin nhắn, nếu có Zalo CDN photo URL thì tải xuống file tạm và gửi qua `send_attachment`. Lọc bỏ tiền tố `[Đã thu hồi]`.\n3. **Gửi ảnh Original HD**:\n   - Bổ sung `send_attachment_ext(..., is_original_hd)`. Khi bật HD, gửi params `isHD: 1, hd: 1, isOriginal: 1, oriUrl: ...`.\n   - Nút `[HD]` trên toolbar composer bật/tắt linh hoạt.\n4. **Chụp ảnh màn hình tương tác**:\n   - Gọi `screencapture -i -x` (macOS), convert sang texture RGBA cho composer preview.\n   - Bổ sung phím tắt `Alt+A` / `Cmd+Shift+A` và icon Camera trong thanh công cụ.\n5. **Typing Indicator & Seen Receipts**:\n   - Trích xuất `act_type: \"typing\"` và `\"seen\"` từ `lp_control` và WebSocket payload (trước đây bị lọc bỏ do chỉ xử lý `voip`/`mute`).\n   - Hiển thị `✍ <Tên> đang soạn thảo…` ở Sidebar, Thread Header và ngay trên khung nhập tin nhắn.\n   - Debounce gửi tín hiệu `WorkerCmd::SendTyping` khi người dùng nhập nội dung.\n   - Cập nhật `DeliveryState::Read` màu xanh `17:30 · Đã xem` khi đối phương đã đọc hoặc phản hồi.\n\n---\n\n### Evidence\n\n- Đã kiểm thử thực tế và toàn bộ 194 unit tests trong thư viện đều vượt qua: `194 passed; 0 failed`.\n- Đã build và chạy mượt mà trên macOS Native app (`ctdozlite.app`).\n\n---\n\n### Context\n\n- Affected modules: `src/chat.rs`, `src/call.rs`, `src/gui.rs`, `src/gui/worker.rs`, `src/gui/workspace.rs`, `src/gui/messages.rs`, `src/gui/theme.rs`, `src/gui/modals.rs`.\n- Tham khảo mã nguồn & full diff:\n  - Nhánh: https://github.com/hoanglong149/ctdozlite/tree/v0.0.7-local\n  - Full Compare: https://github.com/ctdoteam1110/ctdozlite/compare/main...hoanglong149:ctdozlite:v0.0.7-local\n",
-      "closedAt": null,
+      "closedAt": "2026-11-06T16:03:05Z",
       "createdAt": "2026-11-03T10:32:29Z",
       "labels": [],
       "number": 79,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "feat: chống thu hồi tin nhắn, chuyển tiếp media, gửi ảnh gốc HD, chụp màn hình và hiển thị đang soạn thảo / đã xem"
     },
     {
@@ -263,11 +910,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "### Summary\n\nAvatar nhóm (cả avatar tổng hợp `zavatar-multi` và ảnh đại diện nhóm tùy chỉnh) hiện đang gặp các vấn đề nghiêm trọng về mặt hình học và tỷ lệ hiển thị (aspect ratio):\n\n1. **Avatar nhóm tổng hợp (`zavatar-multi` / `multi:`) bị phình to và lồi 4 góc ra ngoài**:\n   - Trong `src/gui/theme.rs`, toạ độ của các avatar con 4 góc được tính bằng `center ± (radius - sub_r)`.\n   - Khoảng cách từ tâm đến các góc là $d = \\sqrt{2} \\cdot (R - r)$.\n   - Với $r = 0.52 R$, điểm xa nhất của avatar con đạt tới $d + r = \\sqrt{2}(0.48 R) + 0.52 R \\approx 1.20 R$.\n   - **Hậu quả**: Bốn góc của avatar nhóm bị lồi ra ngoài đường tròn tới 20%, tạo thành hình chữ thập / hoa mai 4 góc méo mó, phình to bất thường so với avatar người dùng cá nhân (vốn có bán kính chuẩn $R$).\n   - Ngoài ra, không có vòng tròn nền chuẩn bán kính $R$ ở dưới, khiến khoảng trống giữa các avatar con bị rỗng/thủng nền.\n\n2. **Ảnh nhóm tùy chỉnh (hoặc ảnh người dùng không vuông) bị kéo dẹt (méo aspect ratio) & lòi 4 góc nhọn**:\n   - `paint_single_circle_avatar` hiện đang dùng `painter.image(...)` với UV cố định `[0, 1]` vào khung vuông `Rect::from_center_size(center, Vec2::splat(radius * 2.0))`.\n   - Nếu ảnh gốc tải lên không phải tỉ lệ 1:1 vuông (ảnh ngang/dọc từ CDN), ảnh bị ép dẹt méo mó.\n   - `painter.image` trong egui vẽ một mesh chữ nhật 4 góc vuông chứ không được clip tròn, khiến các góc ảnh bị thò ra ngoài viền tròn.\n\n3. **Nhóm không có avatar thành viên bị hiển thị 3 chữ cái li ti**:\n   - Khi không có ảnh thành viên, logic fallback hiện tại tách tên nhóm thành 3 chữ cái rời rạc (hoặc thêm \"TV\", \"N\") và vẽ vào 3 góc, nhìn rất rối mắt và không chuẩn UX.\n\n### Proposal & Solution\n\nĐã có implementation hoàn chỉnh và kiểm thử thành công tại commit [82f906b](https://github.com/hoanglong149/ctdozlite/commit/82f906b83f46f345c26b5278c2e6f4a5ec40ee79) trên nhánh `v0.0.7-local`:\n\n1. **Vẽ ảnh tròn chuẩn bằng Circle Mesh & UV Center-Crop**:\n   - Tạo hàm `paint_circular_image` dùng `egui::Mesh` hình tròn (32 đỉnh) cắt tròn mượt mà.\n   - Tự động tính toán UV center-crop (cover) dựa trên tỷ lệ thực `tw` và `th` của texture, đảm bảo ảnh luôn giữ đúng tỷ lệ 1:1 chuẩn xác, không bao giờ bị méo dẹt hay lòi góc vuông.\n2. **Căn chỉnh toạ độ hình học avatar nhóm composite**:\n   - Vẽ vòng tròn nền lớn bán kính $R$ màu `border_col` bên dưới.\n   - Tính toán lại bán kính và toạ độ các avatar con để đảm bảo điểm xa nhất $d + r \\le R$:\n     - 2 avatar: `sub_r = 0.46 R`, `delta = 0.25 R`.\n     - 3 avatar: `sub_r = 0.42 R`, `top` tại $0.40 R$, 2 đáy tại $(\\pm 0.38 R, +0.34 R)$.\n     - 4 avatar: `sub_r = 0.38 R`, `delta = 0.38 R` (kèm ô đếm số `+N` nếu $> 4$).\n     - Tất cả các avatar con đều nằm lọt 100% bên trong vòng tròn bán kính $R$.\n3. **Fallback nhóm đơn**:\n   - Nếu nhóm không có ảnh thành viên nào, hiển thị một avatar tròn đơn với màu sắc thương hiệu nhóm và chữ cái đầu to rõ ràng, đồng nhất với Zalo Mobile / Web.\n\n### Context\n- File: `src/gui/theme.rs`\n- Nhánh demo / source: https://github.com/hoanglong149/ctdozlite/tree/v0.0.7-local\n",
-      "closedAt": null,
+      "closedAt": "2026-11-06T16:03:03Z",
       "createdAt": "2026-11-03T07:24:36Z",
       "labels": [],
       "number": 77,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "bug(gui): avatar nhóm bị sai tỷ lệ hình học (phình to lòi góc) và méo aspect ratio"
     },
     {
@@ -278,11 +925,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "### Summary\n\nTrải nghiệm trò chuyện nhóm (Group Chat) trong ctdozlite hiện còn thiếu một số thành phần quan trọng so with Zalo PC chuẩn:\n\n1. **Avatar người gửi trong nhóm chat**: Các tin nhắn đến từ thành viên nhóm hiện chỉ hiển thị chữ cái đầu trên nền màu (fallback), chưa hiển thị ảnh đại diện thật của từng người gửi (do `avatar_by_name` hiện tại chỉ lấy từ danh bạ chat 1-1 `threads.filter(|th| !th.is_group)`, chưa lấy từ danh sách thành viên của nhóm).\n2. **Không xem được danh sách thành viên nhóm**: Khi ở trong nhóm chat, Info Drawer bên phải và Header chưa có mục xem danh sách thành viên nhóm, khiến người dùng không nắm được nhóm gồm những ai, ai là Trưởng/Phó nhóm và không thể bấm vào để nhắn tin riêng hoặc xem trang cá nhân.\n3. **Mention thành viên (@All, @Tên)**: Các đoạn mention như `@All`, `@Tất cả` hoặc `@<Tên người dùng>` đang hiển thị ở dạng plaintext thô, chưa được render thành link/chip nổi bật màu xanh Zalo (`#0068FF` / `#61AFEF`) như trên Zalo PC.\n\n### Proposal\n\nĐề xuất bổ sung & hoàn thiện giao diện nhóm chat:\n\n1. **Fetch thông tin thành viên & hiển thị avatar thật trong bubble chat**:\n   - Khi vào nhóm chat, worker gọi `fetch_group_profiles` (`POST /api/group/getmg-v2`) và `get_mini_profiles` (`POST /api/social/group/members`) để lấy danh sách thành viên nhóm kèm `displayName`, `avatar` URL và vai trò `creatorId` / `adminIds`.\n   - Ánh xạ `sender_id` (hoặc UID) của bubble tin nhắn tới avatar URL thật của thành viên nhóm và tải ảnh đại diện thật.\n2. **Bổ sung mục Danh sách thành viên nhóm trong Info Drawer & Header**:\n   - Thêm khối **Thành viên nhóm (X)** trong Info Drawer: hiển thị avatar tròn 26-28px, tên thành viên, badge \"Trưởng nhóm\" / \"Phó nhóm\", ô tìm kiếm nhanh thành viên, nút nhắn tin 1-1 trực tiếp và xem profile.\n   - Cập nhật subtitle trên Header nhóm thành `👥 X thành viên` (cho phép click để mở nhanh danh sách thành viên).\n3. **Highlight @Mention trong tin nhắn**:\n   - Phân tích cú pháp `@All`, `@Tất cả`, `@<Tên>` trong `render_markdown_inline_rich` để hiển thị chip nổi bật màu xanh Zalo bo góc nhẹ thay vì plaintext thô.\n\n### Evidence\n\n- Quan sát thực tế khi dùng nhóm chat trên ctdozlite Native: tin nhắn nhóm chỉ có avatar chữ cái, không biết danh sách thành viên nhóm, tag tên hiển thị text thông thường.\n- Đã test giải pháp gọi API nhóm `getmg-v2` và `get_mini_profiles` hoạt động ổn định và chính xác.\n\n### Context\n\n- Affected modules: `src/chat.rs`, `src/gui/worker.rs`, `src/gui/workspace.rs`, `src/gui/messages.rs`.\n- Alternatives considered: None\n",
-      "closedAt": null,
+      "closedAt": "2026-11-06T16:03:02Z",
       "createdAt": "2026-11-03T07:11:36Z",
       "labels": [],
       "number": 76,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "feat(group): hiển thị avatar người gửi, danh sách thành viên nhóm và highlight @mention"
     },
     {
@@ -932,17 +1579,347 @@ window.CTD_GITHUB_ISSUES = {
   "prs": [
     {
       "author": {
+        "id": "U_kgDOBkRHDA",
+        "is_bot": false,
+        "login": "ziq3",
+        "name": "Nguyen Tuan Khoi"
+      },
+      "body": "## What\r\n- Stop showing OS banners again, on every launch, for reactions that were already shown in an earlier run.\r\n- Persist, per account, how far reaction banners have been handled (`accounts/<uin>/reaction_banner_mark`): a mark (highest server id handled) plus pending ids whose target message was not loaded yet. Show a banner, and count the reaction as unread, only for reactions that are not done yet.\r\n\r\n## Why\r\n- Each connect pulls `610_1`/`611_1` with `lastId: 1`, so the server replays every reaction it still retains.\r\n- The dedup in `ReactionInbox` is in RAM only.\r\n- `ReactionEvent::historical` is always `false`, so the existing banner gate never fires.\r\n- Result: the same 4 reaction banners appeared on every launch (reproduced with `dbus-monitor`). Reading the messages did not help.\r\n\r\n## How\r\n- `reactions::{banner_seq, BannerMark, load_banner_mark, save_banner_mark}`.\r\n  - The id is `ReactionEvent::event_id` (`msgId`), which equals the queue `actionId` and increases in server order. `ts` does not follow that order (see the capture).\r\n  - Events without a numeric id are never suppressed.\r\n  - The path is only built for `is_safe_uin`, under `account_dir`, so it is deleted together with the account.\r\n- In the `GuiEvent::ReactionEventsReceived` handler:\r\n  - Load the mark once per uin.\r\n  - Gate both the banner loop and the reaction-unread loop on the mark.\r\n  - Advance the mark to the max id in the batch. A peer reaction whose target message is not loaded yet has no banner decision, so it stays in `pending` (capped at 256) and a later replay can still banner it. Save on a background thread. Each save takes a generation number on the UI thread, and the writer drops any save older than the last one written for that account, so a late writer cannot put back a lower mark.\r\n- The replay is kept on purpose: `ReactionInbox` needs it for correct counts, because history snapshots are stale. No socket or protocol change.\r\n- Rejected: persisting the queue cursor. The server accepts it, but it removes the replay that counts rely on and loses control events for passive accounts.\r\n- Capture (`ZALO_REACTION_TRACE=1`): the `610_1` answer held 5 reacts with `msgId` = `actionId` 8491736742795 … 8492421889729, in increasing order, while `ts` was out of order on two of them.\r\n\r\n## Verification\r\n- [x] `cargo test --locked`\r\n- [ ] `cargo clippy --all-targets -- -D warnings`: the baseline `1ff6ee2` already has warnings. No new warnings on the changed lines.\r\n- [ ] `cargo fmt --all --check`: the baseline `1ff6ee2` already has diffs. The changed code is rustfmt-clean.\r\n- [x] Manual: GUI, Linux (CachyOS), existing session (no re-login). `dbus-monitor` watching `org.freedesktop.Notifications.Notify`:\r\n  - Run 1 (no mark yet): the 4 old reaction banners appear once, then the mark is written (`8492421889729`).\r\n  - Run 2, with `ZALO_REACTION_TRACE=1` confirming the server replayed the same 5 reactions: 0 banners.\r\n  - Reaction counts on the affected messages are unchanged (❤️×3, ❤️×1, 👍×1).\r\n  - After the pending-ids fix: relaunched with the previous one-line mark file, the replay arrived and 0 banners were shown (old format still loads).\r\n- [x] Unit tests: `banner_gate_uses_server_seq_not_ts`, `unresolved_reaction_stays_eligible_until_its_message_loads` (early reaction stays eligible, newer resolved one is not re-bannered, pending cap) and `older_banner_save_never_replaces_a_newer_one`.\r\n\r\n## Risk & Rollback\r\n- Risk: two-way door.\r\n- Blast radius: reaction banners and the reaction-unread badge only. Counts, socket, messages and the other control consumers are unchanged.\r\n  - If a live push carried a different id, that reaction would be bannered once more after a restart.\r\n  - If a future `603_1` reaction used its own id range, its banner would be suppressed.\r\n- Rollback: revert the commit. Deleting `accounts/<uin>/reaction_banner_mark` resets the mark, so old reactions are bannered once and the mark is saved again.\r\n\r\n## Context\r\n- Resolves: None\r\n- Relates to: None\r\n- ADR / RFC: None\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\r\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Reaction banners and per-thread unread counts now exclude reactions that have already been processed, preventing them from appearing again.\n  * Reactions whose target message is not yet available remain eligible to appear later, so delayed message resolution does not hide them permanently.\n  * Processing progress is maintained separately for each account and preserved across app restarts.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": null,
+      "createdAt": "2026-11-15T16:03:53Z",
+      "labels": [],
+      "number": 154,
+      "state": "OPEN",
+      "title": "fix(chat): stop re-showing reaction banners on every launch"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc3MTQyMDUw",
+        "is_bot": false,
+        "login": "nguyenhoclaptrinh",
+        "name": "Nguyen Truong"
+      },
+      "body": "## What\n- Align Sync V2 handshake payload with upstream Zalo PC two-phase flow to trigger mobile confirmation prompt.\n- Replace HTTP GET query string with POST form submission on command 12888 to avoid URI line length limits.\n- Resolve Windows sync diagnostic log path under AppData.\n\n## Why\n- Initiating Sync V2 with massive message partition query lists causes HTTP 414 URI Too Long on upstream reverse proxies and causes mobile clients to reject the unconfirmed session.\n- Logging to Unix `/tmp` on Windows silently discards diagnostic logs.\n\n## How\n- Split Sync V2 into an initiation phase (`req.type: \"conversation\"`) and a post-confirmation query phase (`req.type: \"message\"`).\n- Switched `request_phone_sync_v2_http` to `post_form`.\n- Configured Windows diagnostic logs to write to `%APPDATA%/ctdozlite/sync_debug.log`.\n- Added unit test `sync_v2_initiation_payload_uses_conversation_partition`.\n- Documented upstream findings in `re-notes/38_sync_v2_handshake_and_windows_fixes.md` and updated ADR 0001.\n\n## Verification\n- [x] `cargo test --lib sync_v2_initiation_payload_uses_conversation_partition` passed.\n- [x] `cargo check --lib` passed with zero errors.\n- [x] Upstream payload contract verified against Zalo PC 26.11.11 `app.asar`.\n\n## Risk & Rollback\n- Transport fallback remains backward compatible with active sessions.\n- Rollback: Revert commit on `fix/sync-v2-mobile-handshake`.\n\nFixes #151\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Improved phone message sync by separating conversation setup from message retrieval. Message partitions are requested after phone confirmation, helping the sync flow work across devices.\n  * Sync setup now uses a direct POST request, improving handling of larger requests.\n  * Sync diagnostic logs are stored in platform-appropriate locations, including on Windows and macOS.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T09:00:01Z",
+      "createdAt": "2026-11-15T06:06:52Z",
+      "labels": [],
+      "number": 153,
+      "state": "CLOSED",
+      "title": "fix(net): resolve sync v2 mobile handshake failure and windows sync logger path"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc3MTQyMDUw",
+        "is_bot": false,
+        "login": "nguyenhoclaptrinh",
+        "name": "Nguyen Truong"
+      },
+      "body": "## What\n- Suppress console window flicker when loading video thumbnails and native dialogs on Windows.\n\n## Why\n- Subprocesses executed via `std::process::Command::new` without `CREATE_NO_WINDOW` allocate a console host window on Windows, causing visual flicker during chat browsing.\n\n## How\n- Attached `CREATE_NO_WINDOW` (`0x0800_0000`) flag to ffmpeg and powershell subprocess calls on Windows via `std::os::windows::process::CommandExt`.\n- Documented upstream findings in `re-notes/38_sync_v2_handshake_and_windows_fixes.md` and updated ADR 0001.\n\n## Verification\n- [x] `cargo check --lib` passed with zero errors.\n- [x] Verified on Windows: thumbnail extraction runs silently without cmd window flashing.\n\n## Risk & Rollback\n- Subprocess window flags are guarded with `#[cfg(target_os = \"windows\")]` and introduce no API changes on Linux or macOS.\n- Rollback: Revert commit `e172917`.\n\nFixes #150\n",
+      "closedAt": "2026-11-15T08:59:57Z",
+      "createdAt": "2026-11-15T05:59:46Z",
+      "labels": [],
+      "number": 152,
+      "state": "CLOSED",
+      "title": "fix(ui): suppress console window flicker on windows media thumbnails"
+    },
+    {
+      "author": {
+        "id": "U_kgDOClROHw",
+        "is_bot": false,
+        "login": "Fin12n",
+        "name": "Trần Đức Thịnh"
+      },
+      "body": "feat(ui,media,sync): redesign file cards, fix video playback, polish composer & sync v2 protobuf\n\n<!--\nTier guide (see docs/standards/git-flow-and-pr-matrix.md):\n- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.\n- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.\n- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.\nUse concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.\n-->\n\n## What\n- Redesign thẻ tập tin (File Card): bổ sung badge icon 40x40px phân loại màu theo định dạng (.pdf, .docx, .xlsx, .zip...), chuẩn hóa kích thước nút `[ Mở ]` (64x28px) và `[ Lưu về máy ]` (96x28px), thêm khoảng đệm 14px chống dính timestamp footer.\n- Sửa lỗi phát video: bổ sung nhận diện đường dẫn file local (`file://`, `C:\\...`) trong `open_external_url_with_monitor`, ngăn chặn việc tự thêm tiền tố `https://` gây lỗi DNS, kích hoạt trực tiếp video player mặc định của hệ điều hành qua `ShellExecuteW`.\n- Tối ưu modal xem video: thêm chu kỳ repaint 250ms trong lúc tải video để tự động phát ngay khi hoàn tất tải mà không bị đông cứng ở frame đầu tiên.\n- Tinh chỉnh thanh soạn thảo (Composer): tăng chiều cao input lên 38px, tăng khoảng cách toolbar lên 8px, căn giữa nút gửi và mở rộng không gian nhập liệu (tối thiểu 108px).\n- Nâng cấp parser Protobuf Sync V2: bóc tách Field 8 (`MetaData` -> repeated `Attach`), ánh xạ chính xác `msg_type` 18 (`chat.video.msg`) để lấy CDN URL, thumbnail và tiêu đề thay vì hiển thị chuỗi token hash 40 ký tự (`2aOboRCN...`).\n- Tự động hydrate tin nhắn cũ trong SQLite: tự phát hiện và nâng cấp các bản ghi video lưu dạng file thô về lại `MessageKind::Video` kèm thumbnail preview.\n\n## Why\n- Xử lý các lỗi UI/UX: nút bấm mở/lưu tệp bị bẹp dí sát giờ gửi, thanh soạn thảo chật chội gây cảm giác gò bó.\n- Sửa lỗi video không chạy được và bị kẹt cứng ở thumbnail (frame 1) do sai giao thức mở tệp trên Windows.\n- Ngăn chặn tin nhắn video bị suy thoái thành thẻ file thô chứa chuỗi hash vô nghĩa do thiếu parser Protobuf Field 8.\n\n## How\n- `src/gui/messages.rs`: tái cấu trúc `render_file_bubble_content`, chuẩn hóa layout container với `min_width` 280px và padding 14px; sửa `open_external_url_with_monitor` bổ sung cờ `is_local_file` trước khi xử lý mở tệp.\n- `src/gui/modals.rs`: thêm `ctx.request_repaint_after(Duration::from_millis(250))` trong `render_video_player_modal` khi `!viewer.is_downloaded`.\n- `src/gui/workspace.rs`: tăng chiều cao và padding của composer bar, căn giữa nút gửi.\n- `src/history_sync.rs`: bổ sung struct `ParsedProtoAttach`, bóc tách wire types cho Field 8 và chuyển đổi thành metadata attachment cho `ChatMessage`.\n- `src/store.rs`: thêm hàm `is_video_url` trong `hydrate_threads` để tự động nâng cấp record video cũ khi tải từ SQLite.\n\n## Verification\n- [x] `cargo test --locked` (318/318 tests passed)\n- [x] `cargo clippy --all-targets -- -D warnings`\n- [x] `cargo fmt --all --check`\n- [x] Manual: GUI, Windows 11 x64, kiểm tra phát video mượt qua OS player, thẻ file thoáng mắt, composer thoải mái, tin nhắn video từ sync hiển thị đúng thumbnail và tên.\n\n## Risk & Rollback\n- Risk: two-way door (toàn bộ thay đổi nằm ở tầng UI render, parser protobuf và hydration dữ liệu đọc từ SQLite, không làm thay đổi hay phá vỡ cấu trúc schema SQLite).\n- Blast radius: Giao diện thẻ tin nhắn (`messages.rs`), thanh soạn thảo (`workspace.rs`), modal phát video (`modals.rs`) và parser đồng bộ tin nhắn (`history_sync.rs`).\n- Rollback: `git revert 9c7fae9`\n\n## Context\n- Resolves: None\n- Relates to: Commit `9c7fae9`, tài liệu `Diff.md`\n- ADR / RFC: None\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added in-app video playback, improved media and attachment previews, and clearer message status indicators.\n  * Added configurable animation settings, more responsive layouts, and improved theme and accessibility options.\n  * Added group-leaving controls and hidden password entry in the terminal.\n  * Improved chat history syncing and message handling for media, links, and other message types.\n  * Improved sticker loading with retry options, and added script management tools.\n\n* **Improvements**\n  * Refined navigation, search, dialogs, and message composition across desktop and terminal interfaces.\n  * Updated design documentation and change log.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T02:33:53Z",
+      "createdAt": "2026-11-14T04:54:31Z",
+      "labels": [],
+      "number": 148,
+      "state": "MERGED",
+      "title": "feat(ui,media,sync): redesign file cards, fix video playback, polish …"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc1OTMxMzE=",
+        "is_bot": false,
+        "login": "gr219",
+        "name": "Tuyến Trần"
+      },
+      "body": "## What\n- \"Đồng bộ tin nhắn từ điện thoại\" now finds the Sync V2 WASM (`libzproto_wasm_bg.*.wasm`) inside an installed Zalo PC's `resources/app.asar`, not only in plain folders.\n- When the phone (V2) step cannot open a session, the sync no longer idles in the 90 s \"waiting for confirmation\" loop; it moves straight on to the pinned / queue / Cloud / group phases.\n- The final summary keeps the reason the phone step failed (\"Không đồng bộ được từ điện thoại: …\") instead of overwriting it.\n- Clearer error when no Zalo PC is installed; the \"Cài Zalo PC…\" hint is no longer printed twice.\n\n## Why\n- On Windows, Zalo PC 26.11.11 packs `pc-dist/libs/libzproto_wasm_bg.5ea0fb2c….wasm` inside `app.asar`; `app.asar.unpacked` only holds native libs. `find_wasm_path` only globs directories, so every phone sync failed with \"Không sinh được khóa Sync V2: Không tìm thấy libzproto_wasm_bg.*.wasm\" even with Zalo PC installed.\n- With no session opened (no `590` sent), no confirmation can ever arrive, but the UI showed a spinner for 90 s at 20 % — it looked hung.\n\n## How\n- `zproto_host.rs`: `ZprotoHost::load` keeps the existing lookup order (`CTDOZLITE_ZPROTO_WASM` → plain-folder glob → `scripts/assets`) and then falls back to `find_wasm_in_zalo_asar`:\n  - candidates: `%LOCALAPPDATA%\\Programs\\Zalo\\Zalo-<ver>\\resources\\app.asar` (newest version first, numeric compare) and `%ProgramFiles%\\Zalo`; `/Applications/Zalo.app/…/app.asar` and `~/Applications` on macOS;\n  - parses the asar index (header pickle + JSON), finds the packed `libzproto_wasm_bg.*.wasm` (skips `libzproto_backup_wasm_bg`, skips entries flagged `unpacked`), seeks and reads only that entry (size-bounded, `\\0asm` magic checked);\n  - new `ZprotoHost::load_from_bytes`; `load_from(path)` delegates to it. Nothing is written to disk and the WASM is still never committed.\n- `history_sync.rs`: records the phone-step failure (`last_phone_sync_error`) and uses a zero confirm window when `v2_sync_id` is `None`.\n- `gui.rs`: `phone_sync_completion_message` gains `phone_error` and shows it in place of \"Lịch sử điện thoại chưa được tải vào ứng dụng\".\n- `chat.rs`: `wake_phone_sync_v2` no longer appends a second install hint to the loader's error.\n- No protocol change: params, signing, frame ids and the `590`/`591` flow are untouched.\n\n## Verification\n- [x] `cargo test --locked` — 313 lib tests pass (6 new: asar extraction, unpacked/missing entries skipped, non-WASM/garbage rejected, numeric version ordering, opt-in real-archive test, phone-error summary) plus all integration tests.\n- [x] `cargo clippy --all-targets` — diffed against `main`: no new warnings (`main` itself is not `-D warnings` clean).\n- [x] `cargo check --all-targets --target x86_64-pc-windows-gnu`.\n- [x] Real archive: `CTDOZLITE_TEST_ASAR=<Zalo-26.11.11>/resources/app.asar` → module read from `/pc-dist/libs/libzproto_wasm_bg.5ea0fb2c9af4a45bc7882b71307b6f83.wasm`, instantiates, generates a 33/32-byte keypair.\n- [x] Windows 11 host with Zalo PC 26.11.11 installed (no env vars): the lib test binary run natively finds the WASM via `app.asar`; key generation, uniqueness and agreement tests run instead of skipping.\n- [ ] Manual end to end: click \"Đồng bộ tin nhắn từ điện thoại ngay\" with the phone online and confirm on the phone.\n- [ ] macOS `app.asar` path (code path compiles; not run).\n\n## Risk & Rollback\n- Read-only access to Zalo PC's installation; only the index and one ~0.3 MB entry are read. A malformed archive is logged and skipped.\n- Without Zalo PC the phone step still cannot run (the WASM also performs Sync2 decryption). The public `stc-zlogin.zdn.vn` WASM was checked and lacks the `zprotoSync2*` exports, so it is not a substitute.\n- Rollback: revert this commit; behaviour returns to plain-folder lookup and the 90 s wait.\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Zproto can now be loaded from supported Zalo PC installations when it isn’t available as a separate file.\n* **Bug Fixes**\n  * Phone-sync startup errors are now included in the completion message, separately from overall sync failures.\n  * Phone syncing no longer waits for confirmation if a sync session cannot be started, allowing later sync steps to proceed.\n  * Key-generation failures are reported without the previous setup instructions.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T02:33:53Z",
+      "createdAt": "2026-11-13T08:37:15Z",
+      "labels": [],
+      "number": 145,
+      "state": "MERGED",
+      "title": "fix(sync): load Sync V2 WASM from Zalo PC app.asar"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjMxODg0NDg3",
+        "is_bot": false,
+        "login": "hoanglong149",
+        "name": ""
+      },
+      "body": "## What\nTUI thành mini-workspace per-thread (không đụng bridge):\n- Console `/`: note/watch/stats/script/sum/help/find/privacy/model/provider + popup gợi ý (↑↓/Tab/Enter/Esc), Ctrl+F tìm trong chat (n/N, highlight vàng), sort recency + ghim theo GUI, footer 1 dòng + model indicator, splash boot animation, focus ring + sidebar Ctrl+B, linkify + OSC8 + attachment lines.\n- LLM đa provider (OpenAI-compatible): resolve env → opencode.json → ollama local; registry 20+ hãng (deepseek/minimax/openai/anthropic/google/qwen/moonshot/zhipu/groq/together/fireworks/deepinfra/openrouter/cerebras/novita/siliconflow/xai/mistral/volcengine/stepfun/baidu/tencent/iflytek/internlm/opencode-go); `fetch_models` live; `/model` + `/provider` chọn trong TUI, sync vào settings.\n- `src/auth.rs`: Keychain macOS (`zlite --auth`) + env + settings; không đọc app khác.\n- `src/agent.rs`: loop decide-act-log per-thread, dry-run mặc định, fail-closed 4 verb, reply gate (chỉ khi có tin operator), anti-injection (`<TIN_NHAN>` + red-team tests).\n- MCP: `--thread` lock tools theo thread (`wrong_thread`), chặn autoreply global trong bound mode, `zalo_privacy` tool, stdio sạch JSON.\n- Privacy gate M1: attachment chỉ vào context khi consent per-thread (TUI/GUI/MCP), audit log đầy đủ.\n- Data dir chung macOS (GUI/TUI/agent/MCP cùng Application Support); `zlite` binary rename.\n\n## Why\nBiến zlite thành nền tảng: chat + console + AI + agent trong 1 TUI; MCP cho agent ngoài (omp/Claude/Cursor) lái theo thread. Cộng đồng chỉ cần thêm provider vào registry là chạy.\n\n## Verification\n- [x] `cargo test --locked`: 315 passed (12 TUI + 5 agent + 4 llm/auth mới)\n- [x] `cargo clippy --all-targets`: không warning mới ở file chạm\n- [x] Smoke: `/sum` tóm tắt thật qua opencode-go local proxy; `/provider opencode-go` + `/model` đổi live\n\n## Risk & Rollback\n- Không đụng protocol/schema/bridge. Rollback = revert 1 commit.\n- Key không vào code/log (mask + Keychain 0600). Dry-run mặc định cho agent.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added an interactive terminal interface with chat search, slash commands, pinned threads, provider and model selection, and improved link and attachment display.\n  * Added LLM provider settings, model discovery, and API-key management, including secure keychain storage on macOS.\n  * Added per-thread controls for whether AI can read attachments, plus an optional AI agent mode with dry-run behavior by default.\n  * Added offline startup and the ability to open a specific thread from the command line.\n  * Updated the application’s command-line binary name to `zlite`.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T08:59:21Z",
+      "createdAt": "2026-11-13T08:28:56Z",
+      "labels": [],
+      "number": 144,
+      "state": "MERGED",
+      "title": "feat(tui): console workspace + LLM providers + agent loop + MCP thread lock + privacy gate"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjMxODg0NDg3",
+        "is_bot": false,
+        "login": "hoanglong149",
+        "name": ""
+      },
+      "body": "## What\nBridge 2 chiều text-only Zalo ⇄ Telegram qua topic map (auto-provision forum topic):\n- `src/tg_bridge.rs` mới: poll Zalo → queue gửi Telegram (`TgJob` + retry backoff);\n  long-poll Telegram → gửi Zalo. Batch flush 1 lần/poll giữ thứ tự.\n- Quota LRU 10GB (`--bridge-quota-gb`), từ chối file đơn quá quota, bảng `bridge_files` + `bridge_sent` (echo-guard riêng, `zalo_privacy` tool).\n- CLI: `--tg-bridge --tg-map --tg-owner [--dry-run] [--media]`. Mặc định text-only; media PR sau.\n- Skip `get_server_info` khi `--offline` (rabbit review).\n\n## Why\nChat với người dùng Zalo từ Telegram; file/ảnh lưu vĩnh viễn bên TG, local chỉ đệm chuyển tiếp. Học zalo-tg/node: topic-per-thread, msg-id 2 chiều, graceful degradation.\n\n## Verification\n- [x] `cargo test --locked`: 319 passed (4 bridge tests: topic-map, sanitize, quota LRU, echo-guard)\n- [x] `cargo clippy --all-targets`: không warning mới ở file chạm\n- [x] Smoke `--dry-run`: poll 2 chiều sống, heartbeat log, không gửi\n\n## Risk & Rollback\n- Module mới + 2 bảng mới (CREATE IF NOT EXISTS). Không đụng protocol/schema hiện có. Rollback = revert.\n- Token qua env, không vào code/log. Owner gate mặc định tắt (chỉ bật khi dùng thật).\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added a Telegram–Zalo bridge with message and optional media forwarding, topic mapping, and configurable storage limits.\n  * Added an AI assistant with configurable provider settings, per-thread controls, and attachment privacy settings.\n  * Expanded the terminal interface with in-chat search, slash commands, model selection, pinned threads, and richer message display.\n  * Added offline startup and thread-bound MCP tools.\n* **Improvements**\n  * Added macOS keychain support for API keys and moved default macOS data storage to Application Support.\n  * Renamed the default executable to `zlite`.\n* **Documentation**\n  * Added Vietnamese setup and usage guidance for the Telegram–Zalo bridge.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T08:59:21Z",
+      "createdAt": "2026-11-13T07:45:06Z",
+      "labels": [],
+      "number": 143,
+      "state": "MERGED",
+      "title": "feat(bridge): Telegram ↔ Zalo text relay + quota LRU + echo-guard"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjMzMjQxMDI0",
+        "is_bot": false,
+        "login": "ducseul",
+        "name": "ducseul"
+      },
+      "body": "## What\r\n- Avatar menu lists the signed-in accounts (unread badge per inactive account, check mark on the current one), switches on click, and has a \"Thêm tài khoản\" entry.\r\n- \"Thêm tài khoản\" opens the existing login screen (QR or phone) with a \"Thoát thêm tài khoản\" button that returns to the previous account and cancels any pending QR/password login.\r\n- Inactive accounts keep a passive `zpw_ws` socket: their messages are stored in their own history database and raise OS banners labelled `sender → account`.\r\n- Media is separated per account: image cache in `accounts/<uin>/media_cache`, downloads in `<download_dir>/<uin>/`.\r\n- Saved accounts are labelled by profile name, then phone number, never by the raw account id.\r\n- SQLite connections now use WAL, `synchronous=NORMAL` and a 5 s busy timeout.\r\n\r\n## Why\r\n- Only one account could be live at a time; the others were silent until switched to.\r\n- The saved-account list showed the numeric id because the session never stored a name or avatar.\r\n- After signing in a new account the window froze in multi-second steps and ignored clicks on the avatar: UI-thread SQLite reads waited behind the worker's first-sync writes.\r\n\r\n## How\r\n- `background_accounts.rs` (new): a supervisor in the worker runtime reconciles one listener per saved account other than the connected one, on a 3 s cadence plus an explicit wake-up on switch.\r\n- `socket.rs`: `spawn_passive` never registers as the outbound target; any socket now closes as soon as its receiver is dropped, so a switched account does not keep a second connection.\r\n- `store.rs`: `configure_connection` applies the pragmas required by `docs/standards/database-and-migrations.md`; `persist_received_messages` writes messages without overwriting stored vanish settings or read-points from a stale thread snapshot.\r\n- `session.rs`: `sync_profile_me` accepts the profile under `data.profile`, `data.info` or bare `data`, no longer drops everything when `userId` is absent, and falls back to the existing `getprofiles` call on the own uid. `LoginInfo` gains an optional `phone` field.\r\n- `account_manager.rs`: active-account id, per-account paths (ids validated before use in paths), account labels, snapshot refresh from `session.json`.\r\n- `gui/worker.rs`: `SwitchAccount` aborts pending logins, resets poll state and releases the session lock before touching it; QR login snapshots the account and keeps the name/avatar reported at scan time; startup refresh now persists avatar and phone.\r\n- No new endpoint, host, parameter, signing or frame id; no schema change.\r\n\r\n## Verification\r\n- [ ] `cargo test --locked` — not run as written: debug builds fail to link `audiopus_sys` on the test machine (debug CRT mismatch). Ran `cargo test --release --locked --lib` instead: 327 passed, 1 ignored.\r\n- [ ] `cargo clippy --all-targets -- -D warnings` — not clean on `main` already; `cargo clippy --release --lib` reports no lints in the new code.\r\n- [ ] `cargo fmt --all --check` — not run; it would reformat unrelated legacy code.\r\n- [x] Manual: GUI, Windows 11, release build. Signed in a second account via the add-account flow; both accounts now store name, avatar and phone; the avatar menu opens immediately after login (previously 10–15 s).\r\n- Not verified manually: background OS banners for an inactive account, the unread badge, and per-account download folders.\r\n\r\n## Risk & Rollback\r\n- Risk: two-way door, with one persistent side effect — a database opened by this build stays in WAL mode (older builds read it fine).\r\n- Blast radius: account switching, login, media cache location, notifications, every SQLite connection.\r\n- Behaviour changes users will notice: downloads land in a `<uin>` subfolder; the old shared `stickers_cache/` is no longer used once signed in (images re-download once); after an explicit logout no account notifies.\r\n- Rollback: revert the branch. Per-account media folders can be deleted; they only hold cache.\r\n\r\n## Context\r\n- Resolves: None\r\n- Relates to: #103, #130 (saved accounts / add-account flow)\r\n- ADR / RFC: None\r\n- Known gaps: an expired background session retries every 30 s without telling the user; a poll already in flight during a switch can still deliver the previous account's messages (pre-existing).\r\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Manage multiple saved accounts from the profile menu or login screen, with account-switching controls and unread-message badges.\n  * Receive notifications for new messages in inactive accounts; muted conversations and outgoing messages are excluded.\n  * Account names and phone numbers appear in account lists, with clearer account labels and subtitles.\n  * Media and attachment downloads are separated by account.\n* **Bug Fixes**\n  * Profile details are retained when a refresh omits them, and older saved sessions remain compatible with phone-number details.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T02:33:53Z",
+      "createdAt": "2026-11-13T06:41:42Z",
+      "labels": [],
+      "number": 142,
+      "state": "MERGED",
+      "title": "Feature/multi account switcher"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjMxODg0NDg3",
+        "is_bot": false,
+        "login": "hoanglong149",
+        "name": ""
+      },
+      "body": "# feat(bridge): Telegram ↔ Zalo text relay + quota LRU + echo-guard (PR1)\n\n## What\nCầu chat 2 chiều text giữa Zalo thread và Telegram topic:\n- `src/tg_bridge.rs` mới: poll Zalo (tái dùng `poll_new_messages`) → forward sang\n  Telegram (`sendMessage` + `reply_parameters`), Telegram long-poll → gửi về\n  Zalo (`send_message`/`send_group_message`).\n- Topic map `--tg-map \"<tg_chat>[/topic]:<zalo_tid>[,...]\"`, owner gate\n  `--tg-owner`, quota `--bridge-quota-gb` (mặc định 10), `--dry-run`.\n- SQLite: bảng `bridge_files` (msg↔path↔tg_file_id↔zalo_url↔offset) +\n  `bridge_sent(tg_key)` echo-guard riêng (không dùng KV hack).\n- Docs: `docs/CAU_TELEGRAM_ZALO.md`.\n\n## Why\nChat với người dùng Zalo đầu kia hoàn toàn từ Telegram; Telegram giữ file/ảnh\nvĩnh viễn, local chỉ là bộ đệm chuyển tiếp. Học từ `zalo-tg`/`zca-bridge`:\ntopic-per-thread, msg-id 2 chiều, graceful degradation — bỏ phần thừa\n(poll sync, reaction mapping đầy đủ).\n\n## How\n- Text trước, media sau (PR2): attachment hiện chỉ forward URL chữ, chưa tải file.\n- Echo-guard bảng riêng, không lẫn logic note/watch.\n- Quota LRU + `ensure_quota` đã có + unit test; file đơn > quota trống → từ chối ngay.\n\n## Verification\n- [x] `cargo test --locked`: tg_bridge 4 passed (topic-map, split target, sanitize, quota LRU) — full suite 319 passed trước khi tách (1 test cũ fail do schema SQL hỏng đã fix, re-run pass)\n- [x] `cargo clippy --all-targets`: không warning mới ở file chạm\n- [x] `cargo build --locked` pass\n- [ ] Smoke `--tg-bridge --dry-run` với nhóm test (cần TELEGRAM_BOT_TOKEN thật — chưa chạy ở đây)\n\n## Risk & Rollback\n- Module mới hoàn toàn + 2 bảng mới (CREATE IF NOT EXISTS), không đụng\n  protocol/threads hiện có. Rollback = revert 1 commit.\n- Token qua env, không vào code/log. Owner gate mặc định tắt (0) — bật khi dùng thật.\n- PR tiếp theo: PR2 media (album buffer 500ms + resume + local Bot API doc), PR3 recall/reply-chain đầy đủ.\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added a Telegram–Zalo bridge for forwarding messages and media, with topic mapping, configurable storage quota, and dry-run support.\n  * Added an optional per-thread AI agent and settings for LLM endpoint, API key, and model.\n  * Added in-chat search, slash commands, thread sorting, and model/provider selection in the TUI.\n  * Added an attachment-reading privacy control for each conversation; it is off by default.\n  * Added offline mode and API-key management options.\n* **Documentation**\n  * Added Vietnamese setup and usage guidance for the Telegram–Zalo bridge.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T09:00:19Z",
+      "createdAt": "2026-11-13T04:12:35Z",
+      "labels": [],
+      "number": 140,
+      "state": "CLOSED",
+      "title": "feat(bridge): Telegram ↔ Zalo text relay + quota LRU + echo-guard (PR1)"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjMxODg0NDg3",
+        "is_bot": false,
+        "login": "hoanglong149",
+        "name": ""
+      },
+      "body": "## What\nTUI thành mini-workspace per-thread: console lệnh `/` (note/watch/stats/script/sum/help/find/privacy/model/provider) với popup gợi ý, Ctrl+F tìm trong chat (n/N, highlight), sort recency + ghim theo GUI, footer hiện model đang dùng, splash boot animation.\n\nLLM đa provider (OpenAI-compatible): resolve env → opencode.json → ollama local; registry hãng (deepseek/minimax/openai/anthropic/google/qwen/moonshot/zhipu/groq/together/xAI/Mistral/Nga+TQ...); `fetch_models` live từ server; key qua Keychain (`zlite --auth`), không đọc auth file app khác.\n\nAgent loop `--agent --thread`: decide→act→log, dry-run mặc định, fail-closed 4 verb + reply gate (chỉ khi có tin operator).\n\nMCP: `--thread` lock + tool `zalo_privacy`, stdio sạch JSON.\n\nPrivacy: opt-in per-thread (TUI/GUI/MCP), M1 attachment gate + audit log.\n\n## Why\nBiến zlite thành nền tảng: chat + console + AI + agent trong 1 TUI, MCP cho agent ngoài (omp/Claude) lái theo thread. Cộng đồng chỉ cần thêm provider vào registry là chạy.\n\n## How\n- TUI slash dispatch + popup + find-mode; sort/pin dùng fingerprint cache\n- `src/llm.rs`, `src/auth.rs`, `src/agent.rs` mới; GUI settings section + workspace toggle\n- Chuẩn repo: comment EN, string VI; worker-thread cho I/O\n\n## Verification\n- [x] `cargo test --locked`: 315 passed, 0 failed (+12 test mới: console/find/sort/pin/privacy/injection)\n- [x] `cargo clippy --all-targets`: không warning mới ở file chạm\n- [x] Smoke: `/sum` tóm tắt thật qua opencode-go, `/model` đổi provider live\n\n## Risk & Rollback\n- TUI-only + additive modules; GUI cũ giữ nguyên path. Rollback: revert 1 commit.\n- Key không bao giờ vào code/log (mask + Keychain 0600).\n- Anti-injection: tin nhắn bọc `<TIN_NHAN>`, reply gate, rule fallback chỉ note/silence — có red-team test.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added configurable AI assistant support, including provider/model selection, API key management, connection checks, and optional per-thread automation.\n  * Added controls for whether AI features can read a thread’s attachments.\n  * Added offline mode and thread-specific MCP access.\n  * Added chat search, pinned threads, adjustable sidebar modes, slash commands, and model/provider selection in the TUI.\n  * Added attachment labels, clickable links, and search-result highlighting.\n* **Improvements**\n  * The executable is now named `zlite`.\n  * macOS data is stored in the app’s Application Support folder.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T08:59:21Z",
+      "createdAt": "2026-11-12T10:36:00Z",
+      "labels": [],
+      "number": 137,
+      "state": "MERGED",
+      "title": "feat(tui): console workspace + LLM providers + MCP thread lock + privacy gate"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjMxODg0NDg3",
+        "is_bot": false,
+        "login": "hoanglong149",
+        "name": ""
+      },
+      "body": "## What\n- Worker poll 1.2s gửi `ThreadsUpdated` vô điều kiện → relayout toàn bộ message list mỗi tick kể cả khi không có tin mới.\n- Sidebar filter+sort ~1300 threads chạy lại mỗi frame repaint.\n- Thêm fingerprint gate (id/preview/len/last-msg/unread) và sidebar cache 500ms.\n\n## Why\nFixes #135 — bản 0.1.1 ăn 100% CPU trên máy yếu (Air 2020 i3). Đo trên Mac: idle 43% → 20%, RAM 864MB → 421MB.\n\n## How\n- `src/gui/worker.rs`: fingerprint trước khi send, bỏ tick không đổi.\n- `src/gui/workspace.rs` + `src/gui.rs`: cache filtered+sorted indices (`ThreadListCache`, `MsgHits`).\n\n## Verification\n- [x] `cargo test --locked` — 233 passed\n- [x] `cargo clippy --all-targets` — không warning mới\n- [x] Manual: idle 1 phút không chạm chuột, Activity Monitor 43% → 20%\n\n## Risk & Rollback\n- Pure UI perf, không đụng protocol/schema/DB. Rollback = revert commit.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **Improvements**\n  * Sidebar filtering, sorting, and message-search results can be reused briefly, helping the thread list feel more responsive.\n  * The thread list now refreshes when its displayed content or unread state changes, rather than refreshing unnecessarily.\n  * If search-result processing encounters an error, the app continues to recover by clearing the query and showing a notification.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T02:33:53Z",
+      "createdAt": "2026-11-12T10:25:50Z",
+      "labels": [],
+      "number": 136,
+      "state": "MERGED",
+      "title": "fix(gui): gate poll-driven relayout + cache sidebar filter/sort"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjgwOTM2MjAw",
+        "is_bot": false,
+        "login": "cuongdm75",
+        "name": ""
+      },
+      "body": "- In send_link_message_with_client_id: when sendlink fails, text fallback retains URL even if caption omitted it\n- In forward_message_with_client_id: add rich-link card forwarding flow and robust text fallback\n- In parse_chat_message: prioritize link cards over photo CDN thumbnails and correctly classify MessageKind::Link\n- Add comprehensive regression tests in tests/test_message_forward.rs\n\n<!--\nTier guide (see docs/standards/git-flow-and-pr-matrix.md):\n- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.\n- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.\n- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.\nUse concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.\n-->\n\n## What\n-\n\n## Why\n-\n\n## How\n-\n\n## Verification\n- [ ] `cargo test --locked`\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [ ] Manual: <GUI/TUI, OS, flow, observed error_code>\n\n## Risk & Rollback\n- Risk: two-way door / one-way door\n- Blast radius:\n- Rollback:\n\n## Context\n- Resolves: None\n- Relates to:\n- ADR / RFC: None\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Forwarding supports richer content, including media, captions, and link cards, with a text fallback when a link card can’t be sent.\n  * Recipients can be filtered by thread name or ID, and the forwarding flow supports dismissal and selection-state handling.\n* **Bug Fixes**\n  * Failed link sends now preserve the link URL in the text fallback.\n  * Link cards are distinguished from photos, including when a photo thumbnail contains an image URL.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T02:33:53Z",
+      "createdAt": "2026-11-12T01:38:10Z",
+      "labels": [],
+      "number": 134,
+      "state": "MERGED",
+      "title": "fix(chat): preserve url in rich link forward text fallback"
+    },
+    {
+      "author": {
+        "id": "U_kgDOClROHw",
+        "is_bot": false,
+        "login": "Fin12n",
+        "name": "Trần Đức Thịnh"
+      },
+      "body": "<!--\nTier guide (see docs/standards/git-flow-and-pr-matrix.md):\n- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.\n- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.\n- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.\nUse concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.\n-->\n\n## What\n-\n\n## Why\n-\n\n## How\n-\n\n## Verification\n- [x] `cargo test --locked`\n- [x] `cargo clippy --all-targets -- -D warnings`\n- [x] `cargo fmt --all --check`\n- [x] Manual: <GUI/TUI, OS, flow, observed error_code>\n\n## Risk & Rollback\n- Risk: two-way door / one-way door\n- Blast radius:\n- Rollback:\n\n## Context\n- Resolves: None\n- Relates to:\n- ADR / RFC: None\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added searchable Contacts and Social Feed pages, with friend and group views, timelines, image viewing, and packet tools.\n  * Added scheduled-message management and history import feedback in the app.\n  * Added safer Windows data storage selection and migration for existing app data.\n\n* **Improvements**\n  * Improved the login screen, title bar, icons, tooltips, and window resizing.\n  * Windows shortcuts now launch the app from its installation directory.\n\n* **Bug Fixes**\n  * Improved preservation of account history and handling of local conversation data during account changes and shutdown.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-11T18:29:18Z",
+      "createdAt": "2026-11-11T07:40:28Z",
+      "labels": [],
+      "number": 132,
+      "state": "CLOSED",
+      "title": "Fix UI ux"
+    },
+    {
+      "author": {
         "id": "U_kgDOBeZLAA",
         "is_bot": false,
         "login": "Leoaxo098",
         "name": ""
       },
-      "body": "## What\n- Respect group posting restrictions and administrator roles.\n- Show a localized notice when members cannot send messages.\n\n## Why\n- Match Zalo’s group chat behavior when only the owner and deputies can post.\n\n## How\n- Read `lockSendMsg` and group administrator metadata during group refresh.\n- Hide the composer for restricted members; show a Vietnamese or English notice based on the selected language.\n\n## Verification\n- [x] Library tests: 190 passed, 1 ignored.\n- [ ] `cargo test --locked` — full suite not completed.\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [ ] Manual: Windows GUI, restricted group; verify members see the notice and owners/deputies can still compose. Live verification not performed.\n\n## Risk & Rollback\n- Risk: two-way door; restriction display depends on group metadata.\n- Blast radius: group chat composer in the desktop GUI.\n- Rollback: revert the commit.\n\n## Context\n- Resolves: None\n- Relates to: Zalo’s `lockSendMsg` group setting.\n- ADR / RFC: None",
-      "closedAt": null,
+      "body": "## What\n\n- Replace FFmpeg call-video discovery, capture, preview and decoding with native camera APIs and bundled source-built OpenH264.\n- Rebase onto current upstream v0.1.0, preserving native Wasmtime Sync v2, persisted read points and upstream UI behavior.\n- Retain the reviewed account/history isolation, camera-off, reaction replay and read-receipt fixes.\n\n## Why\n\n- Call video should work without an FFmpeg executable/library or runtime codec download.\n- Integrate the feature without reverting the newer sync, read-point and UI changes already on main.\n\n## How\n\n- Pin Nokhwa 0.10.11 and source-linked OpenH264 0.9.9. Keep upstream Wasmtime 50.0.1 and regenerate the combined lockfile with Cargo.\n- Reflect Wasmtime's existing Rust 1.97 requirement in the manifest and setup docs; retain edition 2021. Verification used Rust 1.99, not the historical video-only 1.89 baseline.\n- Share camera permission and bounded ordered video queues across call legs, use fresh-IDR recovery and coalesce generation-tagged frames.\n- Preserve upstream native Sync v2 while routing its imports to account-owned stores/caches. Require verified ownership for automatic legacy migration; unmarked files require explicit Settings import. Preserve last-read IDs and scheduler rows, serialize migration, and preflight unsupported import files before writes.\n- Bind queued actions to the visible account and generation at enqueue time, snapshot accepted action sessions, and reject/clean up late calls. Independent work generations let history wipes cancel old writes/events while active calls retain their account lifetime.\n- Preserve cached history during authentication restarts, clear reply/forward state on owner changes, and restore usable command scopes after failed switches/wipes. TUI logout retains its retry identity until disk cleanup succeeds.\n- Recover abandoned schedules under exclusive delivery ownership, warning that delivery may have completed. Current-schema history reads avoid the writer lock.\n- Fix device-discovery completion ordering and primary-video SSRC recovery; use direct signalling/SRTP for per-member group fallbacks. Reconcile queued reactions against late-loaded persisted event identities.\n- Keep embedded dependency notices. No Cisco binary-module royalty coverage is claimed for this source build.\n\n## Verification\n\n- [x] `cargo +stable test --locked --no-run` — all targets/tests compile on Windows x64, Rust 1.99.\n- [x] `cargo +stable test --locked` — 385 passed, zero failed, one ignored live-network test.\n- [x] Upstream WASM tests: framing and missing-module handling pass. Key generation/agreement self-skip because the Zalo WASM module is absent; no real phone-sync claim.\n- [x] Final rebuilt v0.1.0 debug binary with PATH limited to Windows system tools: bundled native codec encoded/decoded 10/10 frames at 320×240, without external tools. This is a codec smoke check, not a real-call latency measurement.\n- [x] Latest main is an ancestor; rebase conflicts resolved; `git diff --check` passes.\n- [x] Final `coderabbit review --plain` against `origin/main`: no new findings. The retained historical reply/forward finding is fixed and verified against the current owner-transition handlers.\n- [x] Regressions cover wipe barriers, stale generations, cached-history ownership, failed-switch recovery, failed TUI logout/retry, group fallback cancellation, interleaved video SSRCs and current-schema reads during a writer.\n- [x] Prior legacy-import concurrency stress: 10/10 repeated runs pass; account fixture suite passes five repeated runs. Focused formatting and patch whitespace checks pass.\n- [ ] Strict Clippy and repository-wide formatting — Clippy stops at the unchanged `build.rs:123` `manual_is_multiple_of` lint under Rust 1.99. Existing formatting findings remain; no unrelated cleanup included.\n- [ ] Dependency audit — earlier advisories remain documented; this is not a clean release gate.\n- [ ] Physical camera checks, real-peer direct/relay/group calls, latency, repeated calls, Linux and both macOS architectures.\n\n## Risk & Rollback\n\n- Risk: two-way door for runtime changes; back up a local profile before evaluating account-history migration.\n- Blast radius: call video, worker lifetime, account/history storage and message presentation. Attachment playback and screen sharing remain outside the video change.\n- The upstream merge-conflict blocker is resolved. Hardware, interoperability, cross-platform and distribution checks remain release gates; this work does not claim release readiness.\n- Rollback: revert the PR changes and restore the pre-test profile backup when necessary; do not copy live SQLite/WAL files or reassign account-owned history.\n\n## Context\n\n- Resolves: the merge-conflict blocker on this PR; no unrelated issue closure requested.\n- ADRs: [native video](https://github.com/Leoaxo098/ctdozlite/blob/codex/native-video-v009/docs/adr/0005-native-call-video.md), [account ownership](https://github.com/Leoaxo098/ctdozlite/blob/codex/native-video-v009/docs/adr/0004-account-history-and-sync-failure-policy.md), [v0.1.0 integration](https://github.com/Leoaxo098/ctdozlite/blob/codex/native-video-v009/docs/adr/0006-native-video-on-v010.md).\n- Earlier v0.0.9 verification remains historical. The integration ADR records the rebased baseline; `re-notes/40` and `re-notes/41` distinguish historical results from the current review fixes and verification.\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Video calls now use native camera capture and integrated H.264 encoding and decoding; FFmpeg is no longer required.\n  * Chat history, scheduled messages, and account data are isolated by account, with safer account switching and history import.\n  * Added clearer camera setup and troubleshooting guidance, plus video-library license notices.\n* **Bug Fixes**\n  * Improved recovery from interrupted video streams and handling of camera permissions and unavailable devices.\n  * Prevented history and previews from changing outgoing message delivery status.\n  * Improved scheduled-message handling and prevented access to account history when logged out.\n* **Documentation**\n  * Updated build requirements to Rust 1.97+ and added architecture, migration, and release-readiness notes.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T09:01:04Z",
+      "createdAt": "2026-11-10T07:22:49Z",
+      "labels": [],
+      "number": 129,
+      "state": "CLOSED",
+      "title": "feat(media): replace FFmpeg call video with native capture and bundled H.264"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc1OTMxMzE=",
+        "is_bot": false,
+        "login": "gr219",
+        "name": "Tuyến Trần"
+      },
+      "body": "## What\n- Composer attachment queue (up to 50 files, same limit as Zalo PC): paste, drag-and-drop, screenshots and pickers now **append** instead of replacing the previous file.\n- `Ctrl+V` pastes every copied file — Explorer `CF_HDROP` (all entries, any type), Finder (NSURL via JXA), Linux `text/uri-list` — not only the first image.\n- Attach button opens **Chọn File / Chọn Thư mục**; file and image dialogs are multi-select; folder pick queues the visible top-level files (skips hidden, empty, subfolders).\n- Queue strip above the composer: thumbnails or file-type tiles, click a tile to drop it, `Esc` / \"Hủy tất cả\" to clear, `Enter` to send.\n- Two or more still photos in one send go out as a single **album** (shared `groupLayoutId`).\n- Incoming / stored album photos are drawn as one **grid bubble** (2–3 columns, center-cropped, click a tile to zoom).\n- Settings → download folder now uses a real folder picker instead of \"pick a file, take its parent\".\n\n## Why\n- Official Zalo lets users paste/attach many files at once; ctdozlite kept a single `Option` slot, so each paste overwrote the last one and only one file could be picked.\n- Photos sent one by one show as separate bubbles on the recipient's phone; albums match the official client.\n\n## How\n- New `src/gui/attachments.rs`: native multi-select/folder dialogs (Win32 `GetOpenFileNameW` + `OFN_ALLOWMULTISELECT`, `SHBrowseForFolderW`; `osascript`; zenity/kdialog), clipboard file lists, folder listing, preview preparation, album slot planning. The old single-file `pick_native_file_dialog` and the `CF_HDROP` branch of the clipboard-image reader are removed.\n- `WorkerCmd::PickAndSendAttachment` → `PickAttachments` / `PrepareAttachments` (thumbnails on a blocking worker thread, never the UI thread) / `SendAttachments` (sequential, preserves order; caption on the first file).\n- Album send: `chat::MediaGroupLayout` adds `groupLayoutId`, `isGroupLayout`, `idInGroup`, `totalItemInGroup`, `extMsgProp` to `photo_original/send` — field set from zca-js `sendMessage.ts`. Upload stage unchanged. GIFs, videos and files stay standalone. `send_attachment_ext` keeps its signature (delegates with no layout).\n- Album display: `MediaGroupLayout::from_content` reads `group_layout_id` / `is_group_layout` / `id_in_group` from incoming `content.params`; stored as `ChatMessage::media_group` (serde-optional) and persisted in the `raw_json` metadata column — no schema change. `album_run_lengths` folds consecutive same-sender photos of one album into the first bubble.\n- Evidence and field sources: `re-notes/38_photo_album_group_layout.md`.\n\n## Verification\n- [x] `cargo test --locked` — 252 lib tests pass (15 new: dialog-buffer/uri-list parsing, folder listing, queue cap/dedupe, album slots, layout params in/out, album runs, grid columns/crop), plus all integration tests.\n- [x] `cargo check --all-targets --target x86_64-pc-windows-gnu` passes.\n- [ ] `cargo clippy --all-targets -- -D warnings` — not clean on `main` today; diffed before/after: no new warning kinds. `render_message_body` / `render_chat_bubble` were already over `too_many_arguments` and gained one parameter each.\n- [x] Manual (Windows 11, portable gnu build): multi-select files, folder pick, repeated `Ctrl+V` of Explorer files, queue + send.\n- [x] Manual: several photos sent from ctdozlite show as **one album** on the official Zalo mobile client.\n- [ ] Manual: album grid rendering inside ctdozlite (not yet clicked through).\n- [ ] macOS (JXA clipboard, `choose file … multiple selections`) and Linux (zenity `--multiple`, `wl-paste`/`xclip` uri-list) paths compile but are untested.\n\n## Risk & Rollback\n- Behaviour change: pickers and drag-and-drop now queue files instead of sending immediately (press `Enter` to send) — intentional, lets users review before sending a whole folder.\n- Protocol: album fields are additive on `photo_original/send`; not yet confirmed with a Zalo PC capture. Rollback = stop passing a layout in `SendAttachments` (single call site) to return to per-photo sends.\n- Photos stored before this change have no `media_group` and keep rendering one by one.\n- `cargo fmt` was not run repo-wide: `main` is not fmt-clean and it would touch ~30 unrelated files.\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Select multiple images or files, attach files from a folder, or add items from the clipboard or by dragging and dropping. Review or remove queued attachments, clear the queue, or cancel it with Escape. Queues support up to 50 files.\n  * Send eligible image batches as albums with captions on the first image. Received albums appear in an organized thumbnail grid.\n* **Bug Fixes**\n  * Pasting multiple files now adds them to the queue without replacing earlier attachments, including non-image files.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T08:59:21Z",
+      "createdAt": "2026-11-09T03:35:53Z",
+      "labels": [],
+      "number": 127,
+      "state": "MERGED",
+      "title": "feat(ui): attach many files and send photos as one album"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc1OTMxMzE=",
+        "is_bot": false,
+        "login": "gr219",
+        "name": "Tuyến Trần"
+      },
+      "body": "## What\n- The friend list (\"Danh sách bạn bè\") and the sidebar now show the alias (tên gợi nhớ) the user set for a contact on the phone or official Zalo app, the same name \"Nhật Ký\" already shows.\n- `SidebarPresentation::contact_name` marks names from the friend list (`getfriends` `displayName`). These names win in `merge_thread_into` and are no longer overridden by `hydrate_threads`.\n- `upsert_thread` now stores the latest real name. Placeholders (`''`, `Người dùng …`, `Nhóm …`, all-digit IDs) never overwrite a stored name.\n- `displayName` is preferred over `zaloName` in `resolve_thread_names`, the group avatar slots and the Zalo PC `Index.db` import.\n\n## Why\n- `getfriends` already returns the alias: `displayName` is the alias and `zaloName` is the owner's own name. But three layers dropped it:\n  1. `upsert_thread` never replaced a stored real name, so the first name ever saved for a thread (e.g. the sender's `dName` from a message) stuck forever.\n  2. `hydrate_threads` then overwrote the fresh `getfriends` name with that stale stored name.\n  3. In the GUI, `ThreadsUpdated` → `merge_thread_into` only replaced placeholder names, so the name loaded from the cache never got updated either.\n- \"Nhật Ký\" was correct because it uses `displayName` from the feed API directly, without going through the DB.\n\n## How\n- Friend-list names are authoritative for 1-1 threads: `parse_thread` sets `contact_name`, and the worker merges that copy `ft.name` also copy the flag. Every other source keeps the old rule (fill placeholders only), so message, cache and preview names still can't overwrite a real name.\n- The DB now mirrors the in-memory name, so stale names self-heal on the next friend-list load. No migration is needed.\n\n## Verification\n- [x] `cargo test --locked`: all pass (lib: 236 passed, 1 ignored), on Linux (Docker, rust 1.97). New tests:\n  - `friend_list_alias_wins_over_stale_names`: `parse_thread` and `merge_thread_into`; placeholders are still filled by non-contact names.\n  - `stored_thread_name_tracks_renames_but_never_overrides_friend_list_names`: `upsert_thread` and `hydrate_threads`.\n- [x] `cargo clippy --all-targets -- -D warnings`: no errors on the changed lines. The existing repo-wide errors are unchanged.\n- [x] `cargo fmt --check`: no diffs on the changed lines. The two hunks reported in `chat.rs` are pre-existing on `main`.\n- [x] Manual, live account (a read-only probe on a copy of the data dir, not included in this PR):\n  - For a contact with an alias, `getfriends` returned `displayName` = alias and `zaloName` = owner's name.\n  - `chat::get_friends` returned the owner's name before this change and the alias after it.\n- [x] Windows: a MinGW cross-build of this branch started on the same data dir (`--version` OK). I haven't clicked through the friend list in that build.\n- [ ] Not run on macOS or with the official MSVC build.\n\n## Risk & Rollback\n- Risk: two-way door. No schema change: `contact_name` is a new `#[serde(default)]` field, so old caches load with `false`.\n- Blast radius: thread and contact names in the sidebar, the contact list and stored threads. A group or contact rename now also updates the stored name; previously the first stored name stuck.\n- Rollback: revert this commit.\n\n## Context\n- Resolves: None (no existing issue)\n- Relates to: None\n- ADR / RFC: None\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Friend lists and conversations now show a contact’s display name when available, rather than an outdated name from a message or saved data.\n  * Real contact names are preserved when conversation details refresh, and saved names can be updated when a real name becomes available.\n  * Generic placeholder names no longer replace real contact names.\n  * Profile names now prefer the display name, falling back to the alternate name when no display name is available.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-11T18:29:11Z",
+      "createdAt": "2026-11-09T02:21:25Z",
+      "labels": [],
+      "number": 125,
+      "state": "CLOSED",
+      "title": "fix(chat): show contact aliases in the friend list"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjg4NzMzNTAy",
+        "is_bot": false,
+        "login": "TIPC1110",
+        "name": "ctdo"
+      },
+      "body": "Fixes #119.\n\n- Add last_read_msg_id column to threads table with migration and ON CONFLICT preservation\n- Persist read-point to active account SQLite on thread selection\n- Restore last_seen_id during thread hydration\n- Don't clear unread counts on session refresh under the same account\n- Only count incoming messages newer than last_seen_id for newly loaded threads\n- Add unit test verifying read-point roundtrip and re-upsert preservation\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Read progress is now saved per conversation, so reopening the app preserves where you last read.\n  * Selecting a conversation with messages updates its saved read position.\n* **Bug Fixes**\n  * Unread counts now exclude incoming messages at or before the saved read position; outgoing messages are not counted.\n  * Refreshing a logged-in session preserves conversations, unread counts, and the selected conversation instead of clearing them.\n  * Conversations without a saved read position continue to count all incoming messages as unread.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-08T12:46:41Z",
+      "createdAt": "2026-11-08T12:41:34Z",
+      "labels": [],
+      "number": 124,
+      "state": "MERGED",
+      "title": "fix(unread): persist thread read-point to prevent recount on app reopen (#119)"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjMxODg0NDg3",
+        "is_bot": false,
+        "login": "hoanglong149",
+        "name": ""
+      },
+      "body": "# PR body — feat/reaction-noti-preview → ctdoteam1110:main\n\n## feat: OS banner, reaction unread, preview file, vanish, voice, UI Zalo + fix 13 issues (trên v0.0.9)\n\n15 commit, đối chiếu hành vi Zalo PC chính thức 26.11.10. Giữ nguyên incoming_popup + chime + reaction_inbox của upstream.\n\n### Đợt 1 — notification & preview\n1. **Preview file đa dạng** (`c11b030`): video thumbnail inline (CDN/ffmpeg); voice bubble ▶ + duration, mở player ngoài; doc-card phân loại PDF/Word/Excel/PPT + Mở/Lưu. Không dep mới.\n2. **OS banner ngoài app** (`2b72e46`, `74f183c`): module `os_notify` dùng chung; tin mới (kể cả thread mới toanh) → unread + popup in-app (upstream) + OS banner + chime. Fix thread mới `push` trơ không đếm.\n3. **Reaction** (`2b72e46`): banner riêng \"X đã bày tỏ cảm xúc…\" + `reaction_unread_counts` với pill ❤+n sidebar, clear khi mở thread.\n\n### Đợt 2 — vanish, voice, UI\n4. **Tin tự xoá local-only** (`899ef66`→`e8652bc`): bật/tắt theo thread + 1h/1d/7d/14d; badge ⏳ + countdown; hết hạn → \"[Tin nhắn đã biến mất]\"; persist SQLite + sweep rẻ. LOCAL-ONLY (không có API server).\n5. **Gửi ghi âm** (`5cbe668`): nút mic 🎤 + strip thu (timer/meter/Gửi/Huỷ); cpal → MP3 rusty_mp3 CBR 64k; upload đúng flow `sendVoice` (`voicemp3`/`sendmp3`). Dep mới duy nhất: `rusty_mp3`.\n6. **UI token Zalo PC** (`d538fbd`, visual-only): light #0068FF/#E5F1FF, dark #1D2025/#3384FF; bubble 12; bỏ indicator xanh; badge unread xanh; nút Gửi pill.\n\n### Đợt 3 — fix issues cộng đồng\n7. **Folder picker** (`cd4f81a`, #106 #91): `pick_native_folder_dialog` riêng (Win/macOS/Linux) cho download dir + nút migrate cả thư mục.\n8. **Multi-account** (`37c9a39`, #103): nút \"Hủy, quay lại tài khoản trước\" ở login; add-account không gửi Logout; Logout không xóa `zalo_history.db`.\n9. **Download reveal** (`bdf426c`, #102): tải xong mở thư mục chứa file (open -R / explorer /select / xdg-open cha).\n10. **Mở link** (`925b6ca`, #107): check ShellExecuteW + fallback `cmd /C start`, normalize link không scheme, toast lỗi.\n11. **Sync V2 ngắn hạn** (`08b2f7d`, #108 #116 #87): xóa khóa giả (fail rõ thay vì request rác); viết lại helper JS (syntax, path động, multi-chunk, unpack zstd/gzip/zlib); session gate theo sync_id; decompress Rust đa chuẩn. Giới hạn: cần glue WASM đúng/wasmtime mới chạy end-to-end.\n12. **Link/ảnh/unread** (`856aca9`, #111 #118 #119): link card hiện URL rút gọn click được + copy; ảnh ưu tiên msgType + mở rộng CDN (jxl/heic/avif, zpsocial); unread persist read-point SQLite + bỏ clear-recount khi refresh.\n\n### Verify\n- `cargo test`: 241 lib + 14 integration passed, 0 failed.\n- `cargo clippy --all-targets`: +1 (too-many-args 13→14 do param vanish — chấp nhận).\n- GUI khởi chạy OK. `node --check` helper JS OK.\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n- **New Features**\n  - Record, send, and play voice messages, with microphone-level and recording-time indicators.\n  - Set local disappearing-message timers for conversations, with expiry labels and remaining-time indicators.\n  - Translate messages and choose a preferred translation language.\n  - Add group notes and keyword watches, review matching messages, and view group activity statistics.\n  - View desktop notifications for new messages and reactions, and see reaction unread counts.\n  - Import chat history from a selected data folder; open downloaded files in the system file manager.\n  - See richer attachment previews and actions for audio, video, documents, and links.\n  - Cancel adding an account and return to the previous account.\n\n- **Improvements**\n  - Improved history-sync compatibility with additional compression formats and more reliable processing.\n  - Updated chat colors, layouts, and unread indicators.\n  - Chat history is now kept separate for each account.\n  - Incoming calls remain passive until answered.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-11T18:28:24Z",
+      "createdAt": "2026-11-08T04:42:48Z",
+      "labels": [],
+      "number": 121,
+      "state": "MERGED",
+      "title": "feat: OS banner, reaction unread, preview file, vanish, voice, UI Zalo + fix 13 issues"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCvFoNQ",
+        "is_bot": false,
+        "login": "lebad280324",
+        "name": "Lê Bá Dũng"
+      },
+      "body": "<!--\nTier guide (see docs/standards/git-flow-and-pr-matrix.md):\n- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.\n- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.\n- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.\nUse concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.\n-->\n\n## What\n-\n\n## Why\n-\n\n## How\n-\n\n## Verification\n- [ ] `cargo test --locked`\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [ ] Manual: <GUI/TUI, OS, flow, observed error_code>\n\n## Risk & Rollback\n- Risk: two-way door / one-way door\n- Blast radius:\n- Rollback:\n\n## Context\n- Resolves: None\n- Relates to:\n- ADR / RFC: None\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added a free community build for Apple Silicon Macs, with a refreshed glass-style interface.\n  * Added global search, conversation details, emoji and recent-sticker pickers, group member and reaction views, contact aliases, pinned topics, and group mentions.\n  * Added previews for supported attachments, access to media already downloaded by Zalo PC, richer Official Account content, and native macOS video support.\n  * Phone-history sync remains experimental and may import only part of the history.\n* **Bug Fixes**\n  * Improved message recall, update package selection, and recovery when an app update fails.\n  * Kept automatic history refresh separate from phone sync to reduce interference.\n* **Documentation**\n  * Added macOS installation, update, and troubleshooting guidance.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T09:01:00Z",
+      "createdAt": "2026-11-06T17:40:40Z",
+      "labels": [],
+      "number": 113,
+      "state": "CLOSED",
+      "title": "Codex/macos arm64 public release"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjgwOTM2MjAw",
+        "is_bot": false,
+        "login": "cuongdm75",
+        "name": ""
+      },
+      "body": "## What\n- **R1 (Download Directory)**: Replaces file picker with native Windows COM folder dialog (`IFileOpenDialog` with `FOS_PICKFOLDERS`, `SHBrowseForFolderW` / PowerShell fallbacks). Auto-creates missing target directories and displays full directory tooltips.\n- **R2 (UI Customization)**: Adds direct visual theme customizer in Appearance settings:\n  - Font family selector (`Be Vietnam Pro`, `Segoe UI`, `Arial`, `Tahoma`) with full Vietnamese glyph fallbacks.\n  - UI scaling slider (80%..=140%) with quick preset buttons (90%, 100%, 110%, 125%).\n  - Native color pickers (`color_edit_button_srgba`) for primary, accent, and chat bubble background colors with 7 one-click presets.\n  - Live chat bubble preview box with automatic WCAG AAA contrast ratio calculation.\n  - Immediate live reload without manual JSON editing, persisted to `app_settings.json`.\n- **R3 (Message Quote & Reply)**:\n  - Supports double-click on message bubbles or right-click context menu (\"Trả lời\") to initiate quote-reply.\n  - Auto-focuses composer text input; quick cancel via `Escape` key or `✕` button.\n  - Composer banner shows sender name and smart media indicators (`[Hình ảnh]`, `[Nhãn dán]`, `[Tập tin]`).\n  - Chat bubble renders an elegant quote preview block with accent border and jump-to-original scroll on click.\n  - Syncs quote metadata (`reply_to_id`, `reply_to_sender`, `reply_to_text`) through Zalo API and local SQLite storage.\n- **R4 (Message Forwarding)**:\n  - Adds context menu \"Chuyển tiếp\" opening a dedicated thread/contact selection modal.\n  - Case-insensitive real-time search across contacts and group chats with empty state feedback.\n  - Pressing `Escape` cancels/dismisses the modal.\n  - Preserves original media URLs (`msg.link_url`) in `src/chat.rs` when forwarding photos, videos, and files instead of sending placeholder text.\n  - Shows Toast confirmation upon successful forwarding.\n- **R5 (Testing & Verification)**:\n  - Added 11 automated test suites in `tests/` covering download settings, theme live updates, quote-reply interactions, and message forwarding stress tests.\n\n## Why\n- Resolves issue where users could not modify the default download folder from the General Settings modal due to path truncation and file-selection dialog.\n- Enables end-users to customize fonts, scaling, and theme colors directly from the GUI without manually editing `app_settings.json`.\n- Fulfills essential messaging capabilities: quoting messages with direct reply context and forwarding text/media to other users or groups.\n\n## How\n- **src/gui/modals.rs**: Implemented pick_native_folder_dialog(), wired directory update logic with create_dir_all, added font/color controls to Settings modal, and built the Forward modal with search filtering.\n- **src/gui/theme.rs**: Extended ThemeConfig and AppSettings with font family, UI scale, and custom RGBA colors; added WCAG luminance calculation for auto text contrast.\n- **src/gui/messages.rs & src/gui/workspace.rs**: Implemented quote reply state management, double-click message handling, composer banner preview, jump-to-message scrolling, and keybind listener (Escape).\n- **src/chat.rs**: Fixed media forwarding logic to retain file and image download URLs in forward payloads.\n- **\tests/**: Added 11 comprehensive unit and adversarial integration test suites.\n\n## Verification\n- [x] cargo test --locked (305+ tests passed, 0 failed)\n- [x] cargo clippy --all-targets -- -D warnings (clean, 0 warnings)\n- [x] cargo check --locked (clean)\n- [x] Manual: Tested on Windows 11 — folder picker dialog opens and persists; theme color/font changes apply live; double-click quotes and reply scrolls to origin; forwarding forwards actual media attachments with toast notifications.\n\n## Risk & Rollback\n- Risk: Two-way door. All modifications are additive UI enhancements and backward-compatible with existing ^Gpp_settings.json schemas (gracefully falling back to defaults if keys are missing).\n- Blast radius: GUI layer (src/gui/) and message forwarding logic in src/chat.rs. Core protocol cipher, auth sessions, and SQLite store schemas remain untouched.\n- Rollback: Revert the commit on this branch.\n\n## Context\n- Resolves: None\n- Relates to: #105\n- ADR / RFC: None\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Customize fonts, interface scaling, and theme colors, with a live message-bubble preview.\n  * Search conversations by name or ID when forwarding messages; previews reflect content such as photos, files, and links.\n  * Choose a download folder with a native folder picker and receive a warning if it isn’t writable.\n* **Improvements**\n  * Replies show clearer quote details and sender names, with easier reply controls.\n  * Forwarded messages better preserve media, stickers, links, and message text.\n* **Bug Fixes**\n  * Improved message-bubble double-click handling and quote display when message details are incomplete.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-11T18:29:15Z",
+      "createdAt": "2026-11-05T08:18:55Z",
+      "labels": [],
+      "number": 105,
+      "state": "CLOSED",
+      "title": "feat(ui): add native download folder picker, direct UI customizer, message quote-reply, and forward dialog"
+    },
+    {
+      "author": {
+        "id": "U_kgDOCvFoNQ",
+        "is_bot": false,
+        "login": "lebad280324",
+        "name": "Lê Bá Dũng"
+      },
+      "body": "<!--\nTier guide (see docs/standards/git-flow-and-pr-matrix.md):\n- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.\n- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.\n- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.\nUse concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.\n-->\n\n## What\n-\n\n## Why\n-\n\n## How\n-\n\n## Verification\n- [ ] `cargo test --locked`\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [ ] Manual: <GUI/TUI, OS, flow, observed error_code>\n\n## Risk & Rollback\n- Risk: two-way door / one-way door\n- Blast radius:\n- Rollback:\n\n## Context\n- Resolves: None\n- Relates to:\n- ADR / RFC: None\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * macOS now offers an optional Liquid Glass appearance, with translucent windows and interface elements.\n* **Bug Fixes**\n  * Improved mobile backup imports by better identifying outgoing messages and correcting message direction when reliable sender information is available.\n  * Sync operations now report an error when valid keys cannot be generated, rather than continuing with placeholder keys.\n  * Improved compatibility when locating the components needed to load sync data, including in packaged macOS apps.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-15T09:00:57Z",
+      "createdAt": "2026-11-05T06:29:01Z",
+      "labels": [],
+      "number": 104,
+      "state": "CLOSED",
+      "title": "Feat/liquid glass"
+    },
+    {
+      "author": {
+        "id": "MDQ6VXNlcjc1OTMxMzE=",
+        "is_bot": false,
+        "login": "gr219",
+        "name": "Tuyến Trần"
+      },
+      "body": "## What\n- `native_notifications::invoke` now spawns the helper through a new `spawn_helper`. It retries up to 5 times (10, 20, … 50 ms backoff) when spawning fails with `ErrorKind::ExecutableFileBusy` (`ETXTBSY`).\n- Every other spawn error still maps to `HelperUnavailable`.\n\n## Why\n- The `Cargo Test Suite (Linux x86_64)` job failed on `main` at `477d6de` (a README-only commit) in [run 41862925699](https://github.com/ctdoteam1110/ctdozlite/actions/runs/41862925699):\n  - `mock_executable_timeout_and_missing_helper` returned `Err(HelperUnavailable)` where `Err(Timeout)` was expected.\n  - The same code passed on `7e409ee`, which points to a flaky test.\n- Root cause: the mock-helper tests write a shell script and execute it immediately. If another test thread forks at that moment, the child briefly inherits the script's write handle until it reaches `exec`. During that window, `execve` on the script fails with `ETXTBSY` (\"Text file busy\").\n- Reproduced locally by logging the spawn error: `Os { code: 26, kind: ExecutableFileBusy, message: \"Text file busy\" }`, 2 failures in 300 runs of `native_notifications::tests::mock`. Any of the `mock_executable_*` tests can hit it, not just the timeout one.\n\n## How\n- Retry only on `ExecutableFileBusy`, which is a transient condition. A real missing or broken helper still fails on the first attempt.\n- Behaviour for the packaged macOS helper is otherwise unchanged; the retry only adds up to about 150 ms in the busy case.\n\n## Verification\n- [x] `cargo test --locked`: all pass (lib: 204 passed, 1 ignored). Run on Linux (Docker, rust 1.91).\n- [x] Stress test: `native_notifications::tests::mock` run 1000×, 0 failures (before: 2/300). Full lib test binary run 30×, 0 failures.\n- [x] `cargo clippy`: no warnings in the changed code. The repo-wide `-D warnings` errors are pre-existing on `main`.\n- [x] `rustfmt --check src/native_notifications.rs`: clean.\n- [ ] Manual: not applicable (test harness / process-spawn path only). Not run on macOS.\n\n## Risk & Rollback\n- Risk: two-way door.\n- Blast radius: `native_notifications` helper spawning only (`status` / `request_if_user_action`).\n- Rollback: revert this commit.\n\n## Context\n- Resolves: None\n- Relates to: #85 (the CI on `main` has been red since v0.0.8, which also blocks a release that includes the #75 fix)\n- ADR / RFC: None\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Notification requests now retry when the notification service is temporarily busy, with a short wait between attempts. This can help notifications proceed during brief periods of launch contention. Requests still report the service as unavailable if it cannot be started after the retries or encounters another startup error; notification output and completion handling are unchanged.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-06T16:19:09Z",
+      "createdAt": "2026-11-05T00:39:34Z",
+      "labels": [],
+      "number": 99,
+      "state": "MERGED",
+      "title": "fix(harness): retry notification helper spawn on ETXTBSY"
+    },
+    {
+      "author": {
+        "id": "U_kgDOBeZLAA",
+        "is_bot": false,
+        "login": "Leoaxo098",
+        "name": ""
+      },
+      "body": "## What\n- Respect group posting restrictions and administrator roles.\n- Show a localized notice when members cannot send messages.\n\n## Why\n- Match Zalo’s group chat behavior when only the owner and deputies can post.\n\n## How\n- Read `lockSendMsg` and group administrator metadata during group refresh.\n- Hide the composer for restricted members; show a Vietnamese or English notice based on the selected language.\n\n## Verification\n- [x] Library tests: 190 passed, 1 ignored.\n- [ ] `cargo test --locked` — full suite not completed.\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [ ] Manual: Windows GUI, restricted group; verify members see the notice and owners/deputies can still compose. Live verification not performed.\n\n## Risk & Rollback\n- Risk: two-way door; restriction display depends on group metadata.\n- Blast radius: group chat composer in the desktop GUI.\n- Rollback: revert the commit.\n\n## Context\n- Resolves: None\n- Relates to: Zalo’s `lockSendMsg` group setting.\n- ADR / RFC: None\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Group posting restrictions are now reflected in the chat workspace. When a group allows only owners and deputies to send messages, other members see a notice and the message composer is hidden.\n  * Owners and deputies retain access to the composer. Restricted members also no longer see contextual sticker suggestions or link previews in that workspace.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-06T16:48:50Z",
       "createdAt": "2026-11-04T14:27:49Z",
       "labels": [],
       "number": 97,
-      "state": "OPEN",
+      "state": "MERGED",
       "title": "feat(chat): lock composer for restricted group members"
     },
     {
@@ -953,11 +1930,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": ""
       },
       "body": "## What\n\n- Add local Zalo Desktop V2 backup import: decrypt and validate archives, merge messages, and restore matched media in conversations.\n- Recover account keys locally; preserve existing history and make repeat imports safe.\n\n## Why\n\n- Let users recover backed-up Zalo history and attachments in ctdozlite without exposing account keys or private backup data.\n\n## How\n\n- Stream and validate encrypted archives before a transactional SQLite merge.\n- Match conversations and messages by identity while retaining richer existing records.\n- Recover keys locally and connect matched media to conversation display and file-opening flows.\n- Add coverage for archive safety, identity matching, duplicate imports, preservation, and rollback.\n\n## Verification\n\n- [ ] `cargo test --locked`\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [x] Manual: Windows, F: verification build; imported the supplied backup, reopened conversations, and checked sampled recovered images.\n\n## Risk & Rollback\n\n- Risk: two-way door; importer writes recovered history and media to the selected local profile.\n- Blast radius: local ctdozlite profile and imported media only; installed C: executable and remote Zalo account are unaffected.\n- Rollback: use the pre-import profile backup or restore the profile from its saved copy; remove the imported F: build if needed.\n\n## Context\n\n- Resolves: None\n- Relates to: None\n- ADR / RFC: None",
-      "closedAt": null,
+      "closedAt": "2026-11-15T09:00:55Z",
       "createdAt": "2026-11-04T13:29:01Z",
       "labels": [],
       "number": 96,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "feat(chat): import Zalo Desktop backups"
     },
     {
@@ -968,11 +1945,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Nguyễn Văn Trãi"
       },
       "body": "## Nội dung\n- Chuyển tiếp sự kiện preedit và commit của bộ gõ tiếng Việt trên Linux qua bản vá tích hợp `egui-winit`.\n- Xem sự kiện IME `Enabled` là thông báo tiêu điểm nhập liệu, không phải trạng thái đang ghép chữ.\n\n## Lý do\n- Trước đây, nội dung từ bộ gõ Linux không được chuyển đúng vào các ô nhập liệu; thao tác Enter cũng có thể bị chặn khi IME chỉ vừa được bật.\n\n## Cách thực hiện\n- Đưa `egui-winit 0.29.1` vào repository và chỉnh sửa để chuyển tiếp các sự kiện ghép chữ trên Linux.\n- Cập nhật trạng thái IME phía ứng dụng để chỉ bắt đầu ghép chữ khi nhận được preedit.\n\n### Trước khi sửa\n\nhttps://github.com/user-attachments/assets/71067ab6-b3d0-4c9b-8ffc-6db1d15c67b2\n\n### Sau khi sửa\n\nhttps://github.com/user-attachments/assets/2ddc9be3-ca7c-4b2a-b345-d9f92f206d36\n\n## Kiểm tra\n- [x] `cargo build --locked`\n- [x] `cargo test --locked` (239 test thành công, 1 test bị bỏ qua; chạy trước khi tách commit)\n- [x] Kiểm tra thủ công: người dùng xác nhận gõ tiếng Việt bằng IME trên Linux hoạt động.\n- [ ] `cargo clippy --all-targets -- -D warnings`\n\n## Rủi ro và hoàn tác\n- Thay đổi chuyển tiếp sự kiện chỉ áp dụng trên Linux; xử lý IME trên các hệ điều hành khác không đổi.\n- Hoàn tác commit này sẽ khôi phục hành vi `egui-winit` ban đầu.",
-      "closedAt": null,
+      "closedAt": "2026-11-11T18:28:24Z",
       "createdAt": "2026-11-04T08:19:47Z",
       "labels": [],
       "number": 93,
-      "state": "OPEN",
+      "state": "MERGED",
       "title": "fix(gui): restore Linux IME composition events"
     },
     {
@@ -982,12 +1959,12 @@ window.CTD_GITHUB_ISSUES = {
         "login": "bqqhuy",
         "name": "henryb"
       },
-      "body": "## What\nHarden the Windows `CF_DIB` / `CF_DIBV5` clipboard fallback with a small pure-Rust decoder and eight synthetic regression tests.\n\n## Why\nThe current reader advertises DIBV5 support but only probes/requests format 8 (`CF_DIB`), so a clipboard exposing only format 17 is missed. It also treats bitfield pixels as fixed BGRA, which swaps colors for alternative masks and mishandles 10-bit channels/alpha. Dimensions, planes and compression are not fully validated before allocating the destination bitmap.\n\n## How\n- Add a checked layout parser: at most 80 MiB input, 8192 per edge and 16 million pixels; checked stride/offset arithmetic, valid planes/compression, nonoverlapping contiguous masks and complete pixel data.\n- Handle top-down/bottom-up rows, padding, external/embedded masks, alpha normalization and optional truecolor palettes.\n- Prefer validated DIBV5, fall back to DIB, and unlock/close the clipboard before pixel conversion. Invalid format-17 data can fall back to format 8.\n- Keep PNG, copied-file and non-Windows behavior intact; no dependency/lockfile, protocol, schema, updater or packaging changes.\n\nThe decoder is adapted from the Windows ARM64 fork (`bqqhuy/ctdozlite`, v0.003-arm) and isolated from its platform/release choices. It also validates/skips optional palettes. This is complementary to #90: that PR addresses macOS/Linux paste detection and a macOS backend; this one changes the Windows DIB fallback.\n\n## Verification\n- [x] `cargo test --locked`: **247 passed, 0 failed, 1 ignored** on Linux, Rust 1.99.1.\n- [x] Eight new tests cover BGRX, bottom-up 24-bit padding, DIBV5 channel masks, 10-bit color/2-bit alpha, external masks, optional palettes, truncation/extreme dimensions and invalid compression/masks.\n- [x] Cross-compile check of the changed Win32 reader and decoder using an isolated `aarch64-pc-windows-msvc` harness. This was a component check, not a native Windows app build.\n- [x] New decoder passes rustfmt; `git diff --check` is clean.\n- [ ] Strict Clippy is not clean on current upstream: **139 errors on both unchanged bcecc40 and this branch**, with identical error-message multisets on Rust 1.99.1. No new errors are introduced; no unrelated lint sweep included.\n- [ ] Native clipboard test: paste a Windows screenshot, then a producer exposing DIBV5-only / non-BGRA masks; confirm preview/colors, cancellation and subsequent pastes.\n\n## Risk & Rollback\nWindows DIB fallback only. Malformed, oversized or unsupported bitmaps are rejected. This does not move the existing clipboard invocation off the UI thread, or bound the separate PNG/file decoders; those remain separate work. No proprietary resources or account data are included. Revert the commit to roll back.\n",
-      "closedAt": null,
+      "body": "## What\nHarden the Windows `CF_DIB` / `CF_DIBV5` clipboard fallback with a small pure-Rust decoder and eight synthetic regression tests.\n\n## Why\nThe current reader advertises DIBV5 support but only probes/requests format 8 (`CF_DIB`), so a clipboard exposing only format 17 is missed. It also treats bitfield pixels as fixed BGRA, which swaps colors for alternative masks and mishandles 10-bit channels/alpha. Dimensions, planes and compression are not fully validated before allocating the destination bitmap.\n\n## How\n- Add a checked layout parser: at most 80 MiB input, 8192 per edge and 16 million pixels; checked stride/offset arithmetic, valid planes/compression, nonoverlapping contiguous masks and complete pixel data.\n- Handle top-down/bottom-up rows, padding, external/embedded masks, alpha normalization and optional truecolor palettes.\n- Prefer validated DIBV5, fall back to DIB, and unlock/close the clipboard before pixel conversion. Invalid format-17 data can fall back to format 8.\n- Keep PNG, copied-file and non-Windows behavior intact; no dependency/lockfile, protocol, schema, updater or packaging changes.\n\nThe decoder is adapted from the Windows ARM64 fork (`bqqhuy/ctdozlite`, v0.003-arm) and isolated from its platform/release choices. It also validates/skips optional palettes. This is complementary to #90: that PR addresses macOS/Linux paste detection and a macOS backend; this one changes the Windows DIB fallback.\n\n## Verification\n- [x] `cargo test --locked`: **247 passed, 0 failed, 1 ignored** on Linux, Rust 1.99.1.\n- [x] Eight new tests cover BGRX, bottom-up 24-bit padding, DIBV5 channel masks, 10-bit color/2-bit alpha, external masks, optional palettes, truncation/extreme dimensions and invalid compression/masks.\n- [x] Cross-compile check of the changed Win32 reader and decoder using an isolated `aarch64-pc-windows-msvc` harness. This was a component check, not a native Windows app build.\n- [x] New decoder passes rustfmt; `git diff --check` is clean.\n- [ ] Strict Clippy is not clean on current upstream: **139 errors on both unchanged bcecc40 and this branch**, with identical error-message multisets on Rust 1.99.1. No new errors are introduced; no unrelated lint sweep included.\n- [ ] Native clipboard test: paste a Windows screenshot, then a producer exposing DIBV5-only / non-BGRA masks; confirm preview/colors, cancellation and subsequent pastes.\n\n## Risk & Rollback\nWindows DIB fallback only. Malformed, oversized or unsupported bitmaps are rejected. This does not move the existing clipboard invocation off the UI thread, or bound the separate PNG/file decoders; those remain separate work. No proprietary resources or account data are included. Revert the commit to roll back.\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n- **Bug Fixes**\n  - Improved Windows clipboard image support, including images in the DIBV5 format.\n  - Added safeguards for oversized or malformed bitmap data and improved handling of color, transparency, and image orientation.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-06T17:02:51Z",
       "createdAt": "2026-11-04T06:36:40Z",
       "labels": [],
       "number": 92,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "fix/upstream-clipboard-dibfix(ui): validate Windows clipboard DIB layouts"
     },
     {
@@ -998,11 +1975,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Kyle Nguyễn"
       },
       "body": "## What\n- `Cmd+V` dán ảnh từ Clipboard vào khung chat trên macOS (ảnh chụp màn hình, \"Copy Image\" từ trình duyệt/Preview, file ảnh copy trong Finder) → hiện thanh xem trước có sẵn, nhập chú thích, `Enter` để gửi.\n- Menu chuột phải khung chat hiển thị `Cmd+V` trên macOS.\n\n## Why\n- `egui-winit` 0.29.1 (`on_keyboard_input`) chỉ phát `Event::Paste` khi Clipboard có **text**, rồi `return` — sự kiện nhấn `V` bị nuốt, chỉ còn sự kiện nhả. Với Clipboard chỉ chứa ảnh, `is_clipboard_paste_triggered` không bao giờ kích hoạt ngoài Windows (Windows đã có workaround `GetAsyncKeyState`).\n- `read_clipboard_image_to_png` không có backend macOS (chỉ gọi `wl-paste`/`xclip`) nên luôn trả `None`.\n\n## How\n- `PasteKeyTracker` (`src/gui/messages.rs`): phát hiện sự kiện nhả `V` không có cặp nhấn khi `command` đang giữ (hoặc vừa nhả ≤ 0,5 s). Điều kiện `command` bắt buộc để IME Telex (#71) nuốt `v` thường không dán nhầm ảnh. Áp dụng cho mọi nền tảng non-Windows → Linux `Ctrl+V` ảnh cũng hoạt động.\n- Nhánh macOS dùng `arboard` (chỉ target macOS, feature `image-data`; arboard 3.7 đã có sẵn trong lock qua egui-winit): ưu tiên file ảnh từ Finder (`file_list`), sau đó bitmap TIFF trên pasteboard.\n- Gom code tạo thumbnail vào `clipboard_image_preview`, dùng chung cho Windows `CF_HDROP`.\n- `Cargo.lock`: chỉ thêm các crate macOS-only (`tiff`, `objc2-core-graphics`, ...), không đổi phiên bản crate nào.\n\n## Verification\n- [x] `cargo test --locked` (Linux, Docker `rust:1-bookworm`): toàn bộ pass, gồm 6 test mới `clipboard_paste_tests` (Cmd+V bị nuốt, gõ `v` thường, nhả `v` từ IME, không dán 2 lần khi đã paste text, nhả Cmd ngay trước `V`, nhả Cmd đã quá hạn).\n- [x] Cross-build `aarch64-apple-darwin`, `x86_64-apple-darwin`, `universal2-apple-darwin` (cargo-zigbuild + macOS 11.3 SDK): build & link thành công.\n- [x] `cargo clippy --all-targets -- -D warnings`: không có cảnh báo trong code thay đổi; toolchain stable mới báo các lint có sẵn ở chỗ khác trong repo.\n- [x] `rustfmt --check` sạch cho `src/gui/messages.rs`, `src/gui/workspace.rs`.\n- [x] Manual (macOS): screenshot → `Cmd+V` → gửi; Copy Image từ Safari/Chrome; file `.png` từ Finder (không dán tên file); text vẫn dán 1 lần; gõ Telex chứa `v` khi Clipboard có ảnh không hiện banner; menu chuột phải.\n  - Đã kiểm chứng trên macOS (bản DMG universal): `Cmd+V` ảnh → hiện thanh xem trước → gửi thành công, người nhận hiển thị ảnh.\n\n  ![macOS: dán ảnh bằng Cmd+V và gửi thành công](https://raw.githubusercontent.com/zt-hky/ctdozlite/pr-assets/pr90/macos-paste-sent.png)\n\n## Risk & Rollback\n- Risk: two-way door; không đổi protocol/params/signing.\n- Blast radius: phát hiện phím tắt dán trên macOS/Linux; đọc Clipboard trên macOS. Windows không đổi hành vi (chỉ refactor thumbnail).\n- Rollback: revert commit.\n\n## Context\n- Resolves: None\n- Relates to: #71\n- ADR / RFC: None\n\n",
-      "closedAt": null,
+      "closedAt": "2026-11-15T09:00:23Z",
       "createdAt": "2026-11-04T05:02:38Z",
       "labels": [],
       "number": 90,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "fix(ui): paste clipboard images into composer on macOS"
     },
     {
@@ -1027,12 +2004,12 @@ window.CTD_GITHUB_ISSUES = {
         "login": "hoanglong149",
         "name": ""
       },
-      "body": "## Mô tả các tính năng & sửa lỗi (Resolves #76, Resolves #77, Resolves #79)\n\nPR này bao gồm toàn bộ các tính năng hoàn thiện trải nghiệm trò chuyện, quản lý nhóm và các tương tác cốt lõi trên `ctdozlite`:\n\n### 1. Hiển thị Avatar thật & Tên người gửi trong nhóm chat (Closes #76)\n• Bổ sung `WorkerCmd::FetchGroupMembers`: gọi `fetch_group_profiles` (`getmg-v2`) và `get_mini_profiles` (`/api/social/group/members`) để lấy thông tin thành viên (`displayName`, `avatar` URL, vai trò `creator`/`admin`).\n• Xây dựng map avatar & tên người gửi trong nhóm chat để bubble tin nhắn hiển thị avatar tròn thật và tên hiển thị chuẩn (thay vì UID số thô).\n\n### 2. Danh sách thành viên nhóm trong Info Drawer & Header (Closes #76)\n• Thêm khối **Thành viên nhóm (X)** trong Info Drawer bên phải: danh sách cuộn mượt mà có avatar, tên, huy hiệu \"Trưởng nhóm\" (vàng cam), \"Phó nhóm\" (xanh dương), ô tìm kiếm nhanh, nút nhắn tin 1-1 trực tiếp và xem profile.\n• Header hiển thị `👥 X thành viên`, click vào mở ngay danh sách thành viên.\n\n### 3. Highlight Mention Chip & Gợi ý `@mention` thông minh (Closes #76)\n• Nhận diện cú pháp `@All`, `@Tất cả`, `@<Tên>` trong `render_markdown_inline_rich` và hiển thị chip bo góc mềm mại màu xanh Zalo (`#0068FF` / `#61AFEF`).\n• **Autocomplete Popover**: Gõ `@` trong ô soạn thảo hiển thị popup danh sách thành viên nhóm / bạn bè, hỗ trợ lọc theo tên, điều hướng bằng phím mũi tên `↑`/`↓`, `Enter`/`Tab` để chèn tag tên dạng link `zalo://mention/...`.\n\n### 4. Sửa lỗi tỷ lệ hình học avatar nhóm & chống méo ảnh (Closes #77)\n• Dùng Circle Mesh (32 vertices) và UV center-crop (cover) trong `paint_circular_image`: cắt tròn mượt mà, giữ nguyên tỉ lệ 1:1, không bị kéo dẹt hay thò 4 góc vuông.\n• Căn chỉnh lại toạ độ hình học avatar nhóm composite (`multi:`): vẽ vòng tròn nền chuẩn bán kính $R$, đặt các avatar con nằm lọt 100% bên trong vòng tròn bán kính $R$.\n\n### 5. Preview hình ảnh Zalo\n• Bao quát toàn diện các domain Zalo CDN (`photo-stal`, `zpcloud`, `zfcloud`,...).\n• Ẩn hoàn toàn raw CDN URL thô kệch, hiển thị thumbnail ảnh to, sắc nét, có trạng thái thông báo ảnh hết hạn lịch sự.\n\n### 6. Chống thu hồi, Chuyển tiếp media, Ảnh gốc HD, Chụp màn hình & Typing/Seen (Closes #79)\n• **Chống xoá / xem lại tin nhắn thu hồi (Anti-recall)**: Giữ nguyên văn bản, media, link ảnh, sticker của tin nhắn đã thu hồi; hiển thị badge đỏ `🚫 Đã thu hồi` và cho phép bấm phóng to ảnh như bình thường.\n• **Chuyển tiếp tin nhắn (Forward)**: Hỗ trợ forward cả text, sticker và hình ảnh (tự động nhận diện CDN URL tải về gửi đính kèm sang hội thoại đích).\n• **Gửi ảnh gốc HD (Original Quality)**: Nút bật/tắt `[HD]` trên toolbar composer; gửi qua endpoint `/api/message/photo_original/send` giữ nguyên 100% chất lượng ảnh gốc không nén.\n• **Chụp ảnh màn hình (Screenshot) & Clipboard**: Phím tắt `Alt+A` / `Cmd+Shift+A` hoặc icon 📷 Camera kéo chọn vùng màn hình macOS, nạp ngay vào khung xem trước composer; hỗ trợ dán ảnh `Cmd+V`.\n• **Trạng thái đang soạn thảo (Typing) & Đã xem (Seen)**: Bắt các gói tin điều khiển `typing` và `seen` từ WebSocket & `lp_control`; hiển thị `✍ <Tên> đang soạn thảo…` ở Sidebar, Header và ô nhập; tự động đồng bộ trạng thái `Đã xem` màu xanh khi tin nhắn được đọc.\n\n### 7. Thanh cảm xúc nổi (Hover Reaction Bar) & Menu chuột phải chuẩn Zalo PC\n• **Thanh reaction capsule**: Hover chuột qua bong bóng chat hiển thị thanh nổi 6 emoji cảm xúc cùng nút thao tác nhanh (Trả lời `”`, Chia sẻ `↷`). Áp dụng cơ chế kiểm tra toạ độ màn hình tuyệt đối (`hover_zone`), loại bỏ hoàn toàn hiện tượng thanh reaction bị biến mất khi lia chuột giữa bóng chat và thanh reaction.\n• **Menu chuột phải (Context Menu)**: Hỗ trợ cả chuột phải (`Secondary Click`) lẫn `Control + Click` trên macOS trackpad. Render nổi độc lập ở tầng `Order::Foreground` với 9 mục chuẩn Zalo PC (*Trả lời, Chia sẻ, Copy tin nhắn, Ghim/Bỏ ghim, Đánh dấu sao, Xem ảnh phóng to, Lưu tập tin, Thu hồi, Xóa chỉ ở phía tôi*). Tự động đóng khi click thao tác, click ra ngoài hoặc nhấn phím `Esc`.\n\n---\n\n**Kiểm thử tự động**: Đã vượt qua 100% bộ kiểm thử tự động (**196 passed; 0 failed**).\n",
-      "closedAt": null,
+      "body": "## Mô tả các tính năng & sửa lỗi (Resolves #76, Resolves #77, Resolves #79)\n\nPR này bao gồm toàn bộ các tính năng hoàn thiện trải nghiệm trò chuyện, quản lý nhóm và các tương tác cốt lõi trên `ctdozlite`:\n\n### 1. Hiển thị Avatar thật & Tên người gửi trong nhóm chat (Closes #76)\n• Bổ sung `WorkerCmd::FetchGroupMembers`: gọi `fetch_group_profiles` (`getmg-v2`) và `get_mini_profiles` (`/api/social/group/members`) để lấy thông tin thành viên (`displayName`, `avatar` URL, vai trò `creator`/`admin`).\n• Xây dựng map avatar & tên người gửi trong nhóm chat để bubble tin nhắn hiển thị avatar tròn thật và tên hiển thị chuẩn (thay vì UID số thô).\n\n### 2. Danh sách thành viên nhóm trong Info Drawer & Header (Closes #76)\n• Thêm khối **Thành viên nhóm (X)** trong Info Drawer bên phải: danh sách cuộn mượt mà có avatar, tên, huy hiệu \"Trưởng nhóm\" (vàng cam), \"Phó nhóm\" (xanh dương), ô tìm kiếm nhanh, nút nhắn tin 1-1 trực tiếp và xem profile.\n• Header hiển thị `👥 X thành viên`, click vào mở ngay danh sách thành viên.\n\n### 3. Highlight Mention Chip & Gợi ý `@mention` thông minh (Closes #76)\n• Nhận diện cú pháp `@All`, `@Tất cả`, `@<Tên>` trong `render_markdown_inline_rich` và hiển thị chip bo góc mềm mại màu xanh Zalo (`#0068FF` / `#61AFEF`).\n• **Autocomplete Popover**: Gõ `@` trong ô soạn thảo hiển thị popup danh sách thành viên nhóm / bạn bè, hỗ trợ lọc theo tên, điều hướng bằng phím mũi tên `↑`/`↓`, `Enter`/`Tab` để chèn tag tên dạng link `zalo://mention/...`.\n\n### 4. Sửa lỗi tỷ lệ hình học avatar nhóm & chống méo ảnh (Closes #77)\n• Dùng Circle Mesh (32 vertices) và UV center-crop (cover) trong `paint_circular_image`: cắt tròn mượt mà, giữ nguyên tỉ lệ 1:1, không bị kéo dẹt hay thò 4 góc vuông.\n• Căn chỉnh lại toạ độ hình học avatar nhóm composite (`multi:`): vẽ vòng tròn nền chuẩn bán kính $R$, đặt các avatar con nằm lọt 100% bên trong vòng tròn bán kính $R$.\n\n### 5. Preview hình ảnh Zalo\n• Bao quát toàn diện các domain Zalo CDN (`photo-stal`, `zpcloud`, `zfcloud`,...).\n• Ẩn hoàn toàn raw CDN URL thô kệch, hiển thị thumbnail ảnh to, sắc nét, có trạng thái thông báo ảnh hết hạn lịch sự.\n\n### 6. Chống thu hồi, Chuyển tiếp media, Ảnh gốc HD, Chụp màn hình & Typing/Seen (Closes #79)\n• **Chống xoá / xem lại tin nhắn thu hồi (Anti-recall)**: Giữ nguyên văn bản, media, link ảnh, sticker của tin nhắn đã thu hồi; hiển thị badge đỏ `🚫 Đã thu hồi` và cho phép bấm phóng to ảnh như bình thường.\n• **Chuyển tiếp tin nhắn (Forward)**: Hỗ trợ forward cả text, sticker và hình ảnh (tự động nhận diện CDN URL tải về gửi đính kèm sang hội thoại đích).\n• **Gửi ảnh gốc HD (Original Quality)**: Nút bật/tắt `[HD]` trên toolbar composer; gửi qua endpoint `/api/message/photo_original/send` giữ nguyên 100% chất lượng ảnh gốc không nén.\n• **Chụp ảnh màn hình (Screenshot) & Clipboard**: Phím tắt `Alt+A` / `Cmd+Shift+A` hoặc icon 📷 Camera kéo chọn vùng màn hình macOS, nạp ngay vào khung xem trước composer; hỗ trợ dán ảnh `Cmd+V`.\n• **Trạng thái đang soạn thảo (Typing) & Đã xem (Seen)**: Bắt các gói tin điều khiển `typing` và `seen` từ WebSocket & `lp_control`; hiển thị `✍ <Tên> đang soạn thảo…` ở Sidebar, Header và ô nhập; tự động đồng bộ trạng thái `Đã xem` màu xanh khi tin nhắn được đọc.\n\n### 7. Thanh cảm xúc nổi (Hover Reaction Bar) & Menu chuột phải chuẩn Zalo PC\n• **Thanh reaction capsule**: Hover chuột qua bong bóng chat hiển thị thanh nổi 6 emoji cảm xúc cùng nút thao tác nhanh (Trả lời `”`, Chia sẻ `↷`). Áp dụng cơ chế kiểm tra toạ độ màn hình tuyệt đối (`hover_zone`), loại bỏ hoàn toàn hiện tượng thanh reaction bị biến mất khi lia chuột giữa bóng chat và thanh reaction.\n• **Menu chuột phải (Context Menu)**: Hỗ trợ cả chuột phải (`Secondary Click`) lẫn `Control + Click` trên macOS trackpad. Render nổi độc lập ở tầng `Order::Foreground` với 9 mục chuẩn Zalo PC (*Trả lời, Chia sẻ, Copy tin nhắn, Ghim/Bỏ ghim, Đánh dấu sao, Xem ảnh phóng to, Lưu tập tin, Thu hồi, Xóa chỉ ở phía tôi*). Tự động đóng khi click thao tác, click ra ngoài hoặc nhấn phím `Esc`.\n\n---\n\n**Kiểm thử tự động**: Đã vượt qua 100% bộ kiểm thử tự động (**196 passed; 0 failed**).\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n<!-- coderabbit-ai-generated:v1 -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added typing indicators, read receipts, `@mentions`, group-member search, and member profile and chat actions.\n  * Added screenshot capture, original-quality attachment sending, and clearer forwarding progress and results.\n  * Added message hover actions, clickable reactions, delivery states, and expanded conversation menu options.\n  * Pinned conversations now appear in the sidebar and sync from phone history.\n  * Added a command-line option for sending an attachment.\n* **Bug Fixes**\n  * Improved preservation of conversation names and display settings during refresh and sync.\n  * Improved recalled-message display, photo previews, and group-avatar rendering.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "closedAt": "2026-11-06T16:03:00Z",
       "createdAt": "2026-11-03T07:24:58Z",
       "labels": [],
       "number": 78,
-      "state": "OPEN",
+      "state": "MERGED",
       "title": "feat(chat): nhóm chat, chống thu hồi, forward media, gửi ảnh gốc HD, chụp màn hình & typing/seen"
     },
     {
@@ -1043,11 +2020,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Dương Quang Thoại"
       },
       "body": "<!--\nTier guide (see docs/standards/git-flow-and-pr-matrix.md):\n- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.\n- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.\n- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.\nUse concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.\n-->\n\n## What\n-\n\n## Why\n-\n\n## How\n-\n\n## Verification\n- [ ] `cargo test --locked`\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [ ] Manual: <GUI/TUI, OS, flow, observed error_code>\n\n## Risk & Rollback\n- Risk: two-way door / one-way door\n- Blast radius:\n- Rollback:\n\n## Context\n- Resolves: None\n- Relates to:\n- ADR / RFC: None\n",
-      "closedAt": null,
+      "closedAt": "2026-11-15T09:00:52Z",
       "createdAt": "2026-11-02T13:30:57Z",
       "labels": [],
       "number": 70,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "Claude/v0.1.2"
     },
     {
@@ -1058,11 +2035,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Dương Quang Thoại"
       },
       "body": "<!--\nTier guide (see docs/standards/git-flow-and-pr-matrix.md):\n- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.\n- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.\n- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.\nUse concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.\n-->\n\n## What\n-\n\n## Why\n-\n\n## How\n-\n\n## Verification\n- [ ] `cargo test --locked`\n- [ ] `cargo clippy --all-targets -- -D warnings`\n- [ ] `cargo fmt --all --check`\n- [ ] Manual: <GUI/TUI, OS, flow, observed error_code>\n\n## Risk & Rollback\n- Risk: two-way door / one-way door\n- Blast radius:\n- Rollback:\n\n## Context\n- Resolves: None\n- Relates to:\n- ADR / RFC: None\n",
-      "closedAt": null,
+      "closedAt": "2026-11-15T09:00:27Z",
       "createdAt": "2026-11-02T13:30:43Z",
       "labels": [],
       "number": 69,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "Claude/a8 media"
     },
     {
@@ -1073,11 +2050,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Thanh Ngoc"
       },
       "body": "- Add a persisted Linux-only close-to-tray preference.\\n- Add a StatusNotifier tray item for restore and quit actions.\\n- Preserve Ctrl+Q as an explicit application exit.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n",
-      "closedAt": null,
+      "closedAt": "2026-11-15T09:00:49Z",
       "createdAt": "2026-11-02T05:52:00Z",
       "labels": [],
       "number": 65,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "feat(ui): add Linux close-to-tray setting"
     },
     {
@@ -1088,11 +2065,11 @@ window.CTD_GITHUB_ISSUES = {
         "name": "Ethan"
       },
       "body": "## Nội dung và mục tiêu\n\nPR này khôi phục các phần tính năng còn lại từ nhánh phát triển cũ lên upstream v0.0.4, lấy `20e742c` làm nền. Mục tiêu là giữ lại tính năng đã xây dựng nhưng nối chúng vào kiến trúc worker, mô hình tin nhắn và vòng đời hiện tại của upstream, thay vì chép đè nguyên GUI archive.\n\nThay đổi có cả phần người dùng nhìn thấy như **emoji, reaction, mention, ảnh và điều hướng lịch sử**, lẫn nền tảng cần thiết để các phần đó giữ đúng dữ liệu khi tải lại, đổi tài khoản, gửi lỗi hoặc hủy đồng bộ.\n\n## Thay đổi cụ thể và lý do\n\n### 1. Emoji inline, Unicode và nội dung sao chép\n\n**Thay đổi:**\n- Thêm renderer emoji inline cho alias trong tin nhắn; giữ nguyên raw alias trong dữ liệu lưu, selection và nội dung copy.\n- Xử lý theo grapheme để giữ nguyên tổ hợp màu da, cờ và chuỗi ZWJ, thay vì tách từng code point.\n- Bổ sung font Noto fallback và helper CoreText trên macOS cho glyph màu; worker xử lý bất đồng bộ, có giới hạn tác vụ và cache.\n- Artwork Zalo là pack local opt-in qua `ZL_EMOJI_PACK`, được kiểm bounds, PNG và hash. Default build không chứa hoặc tự tải artwork. 88 mục không có Unicode canonical giữ raw alias thay vì đoán hình thay thế.\n\n**Vì sao:** Emoji cần hiển thị đúng mà không làm biến đổi nội dung tin nhắn hoặc tạo ô trống khi helper/pack chưa có. Việc giữ raw text cũng tránh tình trạng copy rồi gửi lại cho ra nội dung khác bản gốc; giới hạn cache/tác vụ tránh decode ảnh và font trên UI thread.\n\n**Phần chính:** `src/gui/emoji_text.rs`, `src/gui/emoji_text/visual_tests.rs`, `src/gui/theme.rs`, `src/assets/emojis/zalo/`, `src/assets/fonts/`, `build.rs`, `docs/zalo-message-emoji.md`.\n\n### 2. Reaction bền vững và replay đúng tin nhắn\n\n**Thay đổi:**\n- Thêm journal SQLite theo tài khoản; ghi reaction trước khi phát sự kiện lên GUI.\n- Replay reaction cho đúng định danh tin nhắn, kể cả tin chưa nằm trong phần lịch sử đang nạp.\n- Giữ số đếm, trạng thái clear và nguồn snapshot/ledger; biểu diễn giới hạn dưới khi chưa đủ bằng chứng về số đếm đầy đủ.\n- Thêm import cache reaction được người dùng chọn rõ ràng, kiểm schema/chủ tài khoản/nguồn dữ liệu trước khi đưa vào cache quản lý riêng. Tệp nguồn không bị sửa.\n\n**Vì sao:** Chỉ cập nhật bubble đang hiển thị sẽ làm mất reaction sau restart hoặc khi tin nằm ngoài viewport. Reaction cũng không được hợp nhất bằng nội dung/thời gian, vì hai tin giống nhau vẫn có thể là hai tin khác nhau. Import có kiểm tra tránh đưa cache của tài khoản khác vào hội thoại hiện tại.\n\n**Phần chính:** `src/reaction_journal.rs`, `src/original_reactions.rs`, `src/gui/messages.rs`, worker consumers; `tests/reaction_journal_regressions.rs`, `tests/original_reaction_import_regressions.rs`.\n\n### 3. Mention incoming và mention trong composer\n\n**Thay đổi:**\n- Đọc span mention theo UTF-16, kiểm range/grapheme và UID trước khi hiển thị hoặc mở hồ sơ.\n- Click mention đi qua luồng profile có target UID và request version, không suy người dùng từ tên hiển thị.\n- Thêm picker thành viên cho composer; giữ UID/range đã chọn cùng raw text, reply và nháp bền.\n- Kiểm metadata mention khi đọc nháp và trước gửi; giữ client ID đã stage khi gửi text/reply/mention.\n\n**Vì sao:** Tên hiển thị có thể trùng, thay đổi hoặc bị gõ tay. Emoji trước mention cũng khiến offset UTF-16 khác byte offset. Cần giữ đúng danh tính và range xuyên suốt render, click, lưu nháp và gửi, đồng thời chặn phản hồi profile cũ ghi đè lựa chọn mới.\n\n**Phần chính:** `src/composer_mentions.rs`, `src/message_navigation.rs`, `src/gui/composer.rs`, `src/gui/workspace.rs`, `src/chat.rs`; bằng chứng/fixture tại `re-notes/36_composer_group_mentions.md`, `tests/fixtures/composer_group_mentions.json`.\n\n### 4. Metadata, hợp nhất chính xác và bảo vệ tin đã Recall\n\n**Thay đổi:**\n- Giữ metadata ảnh, sticker, link, reply, mention, reaction, delivery và raw JSON qua lưu/đọc SQLite; cô lập dữ liệu malformed thay vì làm hỏng toàn lượt hydrate.\n- Hợp nhất bằng định danh đã xác minh, không gộp thread bằng tên/avatar và không coi text/timestamp là danh tính tin nhắn.\n- Khi import/hydrate cache, chỉ bổ sung phần còn thiếu, không tua ngược nội dung hoặc thời gian live.\n- Chặn cache khôi phục nội dung và attachment của tin đã Recall.\n\n**Vì sao:** Chỉ lưu text làm tính năng trông như hoạt động trong phiên hiện tại nhưng mất sau restart. Ghép theo thông tin hiển thị có thể nhập nhầm hội thoại; cache cũ cũng không được phép hồi sinh nội dung đã bị thu hồi.\n\n**Phần chính:** `src/store.rs`, `src/chat.rs`, `src/gui.rs`; `tests/store_metadata_regressions.rs`.\n\n### 5. Kho lịch sử theo tài khoản, tìm kiếm và điều hướng ngoài viewport\n\n**Thay đổi:**\n- Thêm `AccountStore` tại `accounts/<sha256(account_id)>/history-v2.sqlite3`, tách khỏi DB legacy đang chứa scheduler/sync/API độc lập.\n- Dùng định danh tin theo thread; chuyển GUI sang adapter worker cho đọc/ghi, trạng thái chưa đọc, mute và xóa cục bộ.\n- Đọc trang cục bộ theo keyset cursor, tối đa 200 tin; tìm kiếm literal hỗ trợ tiếng Việt không dấu; mở trích dẫn cả khi tin chưa có trong viewport.\n- Gắn revision/request ID cho page, search và quote để kết quả trễ không ghi đè thread mới hoặc làm tin vừa xóa xuất hiện lại.\n- Import dữ liệu cũ là thao tác rõ ràng, đọc nguồn chỉ đọc và ghi đích theo transaction; không tự nhận kho legacy làm dữ liệu của tài khoản đang đăng nhập.\n\n**Vì sao:** Một DB/cache toàn cục dễ lẫn dữ liệu giữa tài khoản. Tăng dần LIMIT hoặc chỉ tìm trong phần đang nạp không giải quyết lịch sử dài. Cần vừa tải có giới hạn, vừa giữ dữ liệu ngoài viewport và đúng trạng thái sau restart.\n\n**Phần chính:** `src/store_v2.rs`, `src/gui/history.rs`, `src/gui/worker.rs`, `src/main.rs`; `tests/store_v2_regressions.rs`, `docs/LICH_SU_THEO_TAI_KHOAN.md`, ADR-0004.\n\n### 6. Dấu xóa schema 3 và xung đột client/server ID\n\n**Thay đổi:**\n- Nâng schema 2 lên 3, giữ thêm `server_id` đã xác minh trong tombstone và index theo thread/server ID.\n- Khi xóa tin/hội thoại, lưu provenance trước khi xóa hàng dữ liệu.\n- Chặn replay của đúng tin máy chủ đã xóa, nhưng giữ tin mới có server ID khác dù dùng lại client ID.\n- Tombstone cũ thiếu provenance hoặc khóa đụng một danh tính khác được báo lỗi mơ hồ rõ ràng, không đoán hoặc ghi đè.\n\n**Vì sao:** Canonical ID trong dữ liệu cũ có thể là client ID. Tombstone chỉ có khóa đó dễ xóa nhầm tin mới hoặc cho tin cũ xuất hiện lại khi đổi canonical key. Migration giữ nguyên dữ liệu cũ thay vì dựng lại provenance đã mất.\n\n**Phần chính:** `src/store_v2.rs`, `tests/schema_migrations.rs`, `tests/store_v2_regressions.rs`, ADR-0005. Tên DB mới vẫn là `history-v2.sqlite3`; số schema hiện tại là 3.\n\n### 7. Nháp bền, stage trước gửi và khôi phục gửi dở\n\n**Thay đổi:**\n- Lưu nháp theo tài khoản/thread, gồm raw text, reply, mention và attachment paths; coalesce bằng `LatestSnapshot`, một wake không mang payload, worker debounce rồi ghi.\n- Nút chọn tệp/ảnh, drag/drop và clipboard thêm vào nháp; thao tác gửi diễn ra khi người dùng nhấn Gửi.\n- Ghi outbox và cấp client ID decimal trước network; text và từng attachment có ID riêng. Persisted floor/khóa interprocess bảo vệ allocator của durable store.\n- Chỉ xóa nháp trên UI sau stage ACK và khi nháp vẫn khớp bản đã gửi; không xóa nội dung người dùng vừa sửa trong lúc chờ.\n- Ghi ACK text và từng tệp độc lập, phân biệt cả hai attachment có cùng path. Text thành công không bị hạ trạng thái vì tệp sau đó lỗi.\n- Sau restart/hủy phiên, phần pending trở thành chưa rõ kết quả; người dùng mở phần chưa xác nhận để sửa, không tự gọi lại transport.\n\n**Vì sao:** Enqueue command không đồng nghĩa đã lưu hoặc server đã nhận. Xóa nháp quá sớm làm mất nội dung; gửi lại toàn lượt khi chỉ một tệp lỗi có thể tạo bản trùng. Client ID và trạng thái từng phần cần sống qua restart để khôi phục có căn cứ.\n\n**Thay đổi hành vi có chủ đích:** Text/reply/mention gửi trước các tệp; tệp không lặp caption. Không thêm field mention/reply chưa có bằng chứng vào attachment protocol.\n\n**Phần chính:** `src/composer_store.rs`, `src/gui/durable_composer.rs`, `src/latest_snapshot.rs`, composer/workspace/worker và allocator trong `src/chat.rs`; `docs/durable-composer.md`.\n\n### 8. Giữ trang chờ ghi, backpressure và flush khi đóng/đổi phiên\n\n**Thay đổi:**\n- Đặt chỗ trước khi đọc nguồn tiếp theo, tối đa 8 lượt; giữ toàn bộ trang mạng tối đa 128 MiB trong mailbox trước await ghi đầu tiên.\n- Chia SQL thành chunk tối đa 32 MiB, chỉ tăng tiến độ sau SQL ACK. Giữ cả tail chưa ghi nếu DB lỗi hoặc waiter bị hủy giữa chừng.\n- Snapshot GUI thay thế có giới hạn riêng 1 MiB; không dùng snapshot 200 tin để ghi đè delta chứa các trang chưa nạp.\n- Giữ dữ liệu ghi lỗi để thử lại; chỉ công bố kết quả confirmed lên GUI sau ACK kho lịch sử.\n- Flush lịch sử và nháp dưới cùng hàng rào vòng đời trước xác nhận đóng/đăng xuất/đổi phiên. Lỗi flush chặn xác nhận hoàn tất và giữ dữ liệu để thử lại.\n- ACK đồng bộ nhóm không chặn socket loop, để lệnh hủy/control tiếp tục được xử lý khi SQLite lỗi.\n\n**Vì sao:** Một queue chỉ giữ chunk hiện tại vẫn mất phần còn lại khi future bị hủy. Snapshot mới nhất cũng không thay thế được immutable delta. Giới hạn hàng đợi tạo backpressure thay vì để tác vụ/dữ liệu tăng vô hạn; flush phải có kết quả thật, không chỉ gửi command đóng.\n\n**Ranh giới:** Mailbox bộ nhớ không bảo đảm sống qua crash trước khi ghi đĩa. Một tin/metadata riêng vượt 32 MiB hoặc trang vượt 128 MiB bị từ chối rõ, không được ACK là đã lưu. Composer có durable intent trước transport; legacy buttons/scheduler chưa có cùng bảo đảm đó và không được mô tả là exactly-once.\n\n**Phần chính:** `src/gui/history_retention.rs`, `src/latest_snapshot.rs`, `src/gui/history.rs`, `src/gui/worker.rs`, `src/gui/confirmed_history.rs`.\n\n### 9. Epoch fence cho event, side effect và auth commit\n\n**Thay đổi:**\n- Gắn generation tại lúc enqueue; task/blocking task và GUI event giữ epoch gốc, không tự nhận tài khoản hiện tại sau await.\n- Kiểm lại scope ở ranh giới ghi storage, dispatch request, cập nhật cache và chạy helper native.\n- Chặn cả A/B/A hoặc đăng nhập lại cùng UID và cùng khóa phiên; không dùng mỗi UID để xác định một incarnation.\n- Drain công việc đã bắt đầu trước cleanup; auth commit blocking chỉ cập nhật ticket task khởi tạo, không chuyển quyền cho task con cũ.\n- Cho phép flush dữ liệu immutable đã ràng buộc owner trong callback cleanup đồng bộ được kiểm intent; thao tác thông thường vẫn từ chối owner sai.\n\n**Vì sao:** So UID sau khi await không phát hiện trường hợp quay lại cùng tài khoản. Task cũ có thể phát sự kiện, ghi lại DB vừa wipe hoặc mở helper sau logout. Cần phân biệt phiên thực thi, không chỉ danh tính tài khoản, và giữ việc flush có chủ đích tách khỏi quyền chạy tiếp network.\n\n**Phần chính:** `src/runtime_scope.rs`, worker/GUI event bridge, `src/session.rs`, call/audio/scheduler và các media/reaction consumers.\n\n### 10. Receipt giao tin và đọc theo vùng thực sự hiển thị\n\n**Thay đổi:**\n- Parse/apply delivery receipt bằng định danh wire đã xác minh, không dựng từ display ID hoặc timestamp.\n- Chỉ nhận ứng viên đọc khi hàng tin thực sự nằm trong vùng clip, ở cuối chat không lọc, cửa sổ foreground/không minimized và không bị overlay che; yêu cầu dwell liên tục 500 ms.\n- Ticket hiển thị hết hạn sau 250 ms thiếu sample; kho kiểm lại ticket trước khi ghi unread, Session kiểm epoch trước HTTP.\n- Tách kết quả đọc cục bộ khỏi seen lên máy chủ. Chỉ live ledger đủ wire identity mới đủ điều kiện gửi seen, không gửi vì vừa hydrate/import lịch sử.\n- Mỗi request tối đa 50 identity; không tự retry kết quả transport chưa rõ. Attempt ledger tối đa 4096 identity/epoch, đạt giới hạn thì báo rõ và dừng wire seen mới, đọc cục bộ vẫn hoạt động.\n\n**Vì sao:** Đã tải tin không có nghĩa đã đọc. Công việc chờ trong queue có thể chạy sau khi người dùng đổi cửa sổ/thread; còn tự retry write chưa rõ kết quả sẽ thay đổi ngữ nghĩa transport.\n\n**Ngoại lệ giao thức cần review:** Bằng chứng client gốc cho hai seen-v2 endpoint dùng session AES JSON/form `params`, cookie, timeout 10 giây, retry 0; không có signing tag ParamCipher. PR giữ đúng hợp đồng đó trong Session, không tự đặt tag `seenv2`. ADR-0006 ở trạng thái đề xuất; nguồn và primary excerpts nằm trong `re-notes/visible-read-seen-v2*`.\n\n**Phần chính:** `src/delivery_receipts.rs`, `src/read_receipts.rs`, `src/session.rs`, workspace/worker/history; `re-notes/strict-delivery-receipts.md`.\n\n### 11. Preview ảnh, bản gốc và trình xem native\n\n**Thay đổi:**\n- Khi thumbnail lỗi, cho phép lấy bản gốc qua cùng pipeline, giữ nguyên signed URL; có retry/HD rõ ràng.\n- Cache/tác vụ/texture có giới hạn, key theo tài khoản và định danh ảnh đã xác minh; không gộp hai ảnh chỉ vì client ID đụng nhau.\n- Decode ảnh và orientation qua worker/helper, không làm trên UI thread.\n- Mở viewer macOS bằng tệp private và argv, không dùng shell để ghép URL; quản lý một viewer và dọn lease khi đóng/lỗi/hủy.\n\n**Vì sao:** Thumbnail lỗi không nên làm mất đường xem ảnh. Decode lớn và cache không giới hạn gây giật/tăng bộ nhớ; kết quả từ tài khoản cũ cũng không được xuất hiện trong tài khoản mới. Lease private giúp quản lý tài nguyên và vòng đời helper rõ ràng.\n\n**Phần chính:** `src/gui/media_preview.rs`, `src/gui/native_photo_viewer.rs`, `src/media_resources.rs`, worker/media consumers.\n\n### 12. Thông báo native và presence không bị phản hồi cũ chi phối\n\n**Thay đổi:**\n- Hiển thị trạng thái quyền thông báo macOS riêng với kết quả gửi thông báo.\n- Lọc thông báo theo tài khoản, enabled/mute/foreground và server ID ổn định; chống lặp, không thông báo lại toàn lịch sử bootstrap.\n- Kiểm cấu trúc lỗi/quyền riêng tư/timestamp trong phản hồi presence; bỏ phản hồi profile cũ bằng target/request version và epoch.\n- Giữ ngưỡng online hiện có, không đổi chỉ để giống implementation archive.\n\n**Vì sao:** Khởi động app không nên tạo hàng loạt thông báo cũ, và helper chạy được không đồng nghĩa hệ điều hành đã cấp quyền. Presence sai timestamp hoặc response trễ có thể làm người dùng hiểu sai trạng thái của người đang xem.\n\n**Phần chính:** `src/native_notifications.rs`, `src/presence.rs`, GUI/worker/profile handlers.\n\n### 13. Đồng bộ điện thoại/nhóm và giữ khả năng resume HTTP của upstream\n\n**Thay đổi:**\n- Bổ sung provider socket dùng các command 511/590/591/592, coordinator, progress và cancel; giữ luồng HTTP history/resume hiện có.\n- Download archive có giới hạn/kiểm host, redirect và kích thước; blob download không mang cookie phiên. Decode qua helper có timeout và cleanup.\n- Giữ raw page theo owner trước lookup UID. Nếu sender còn opaque, không đoán UID để ép chuyển thành tin nhắn.\n- Lưu raw page private tại `phone-pending-v1`; chỉ resume khi người dùng bắt đầu đồng bộ rõ ràng, trước yêu cầu transfer mới. Chỉ unlink sau khi toàn bộ chunk đã nhận AccountStore ACK.\n- Wipe xóa dữ liệu chờ đúng tài khoản, giữ tài khoản khác/session/legacy. Raw spool giới hạn 8 tệp, 256 MiB tổng và 128 MiB/trang.\n- Với HTTP sync, reserve trước mỗi fetch, capture page đồng bộ trước future ghi; chỉ tiến cursor sau ACK. Fallback HTTP cũng giữ kết quả mỗi response trước await tiếp.\n- Merge archive theo semantics cache: bổ sung lịch sử nhưng không tua ngược body/clock/reaction/Recall/unread của dữ liệu live.\n\n**Vì sao:** Hủy lúc đang lookup UID hoặc ghi chunk đầu có thể làm mất cả shard đã tải. Đoán mapping lại gây sai danh tính. Spool và cursor ACK cho phép tiếp tục có căn cứ, đồng thời tránh vô tình thay thế tính năng resume đã có của upstream.\n\n**Phần chính:** `src/gui/phone_history.rs`, `src/gui/phone_pending.rs`, `src/gui/group_history.rs`, `src/socket.rs`, `src/history_sync.rs`, `src/endpoints.rs`; `re-notes/phone-history-pipeline.md`.\n\n### 14. API HTTP/MCP nhúng đọc đúng kho của GUI\n\n**Thay đổi:**\n- Pin account, root và epoch lúc listener chấp nhận connection; kiểm account khớp `Session.login.uin`, hủy connection cũ khi đổi phiên.\n- Chuyển threads/messages/search/resources/export/status của API nhúng sang AccountStore, query có giới hạn; không fallback sang DB/cache global khi kho account mới trống hoặc lỗi.\n- Giữ hình dạng payload hiện có; search V2 là literal text tiếng Việt không dấu, không giả lập là legacy substring/sender-name search.\n- CLI/TUI, API chạy độc lập và bảng scheduler giữ đường legacy tương ứng; PR không thêm API xóa lịch sử/mark-read mới.\n\n**Vì sao:** GUI đọc kho mới nhưng API vẫn đọc global legacy sẽ trả dữ liệu khác màn hình hoặc lẫn tài khoản. Request đã nhận trước A/B/A cũng không được nhận quyền của phiên mới.\n\n**Phần chính:** `src/api_mcp.rs`, `docs/verification/account-scoped-gui-api.md`; test qua HTTP/MCP loopback thật với dữ liệu A/B/A và legacy poison row.\n\n## Cách tích hợp và phạm vi upstream\n\n### 15. Tài liệu, phạm vi upstream và cách đọc PR\n\n**Thay đổi và lý do:**\n- Thêm hướng dẫn tính năng, history/composer/emoji, ADR-0004/0005/0006 và protocol notes để reviewer truy được thay đổi schema/giao thức, giới hạn và quyết định thiết kế; cập nhật mục lục docs.\n- Giữ scheduler, feed, updater, HTTP sync và TUI của upstream thay vì đưa lại phiên bản cũ từ archive, nhằm tránh mất các cải tiến đã merge.\n- PR chứa ba thay đổi cũng đang có trong #59, #60 và #61. Chúng được giữ thành commit độc lập; cần chọn thứ tự merge/rebase để tránh áp lại cùng patch. PR này không tự đóng ba PR đó.\n- Có thể đọc theo các lớp: metadata/identity → emoji/reaction/mention → AccountStore/schema → runtime fence → composer/outbox → retention và các producer. Các lớp liên quan dữ liệu cần được review cùng nhau, không coi renderer hoặc utility riêng lẻ là toàn bộ tính năng.\n\nTổng quan nằm tại `docs/KHOI_PHUC_TINH_NANG.md`. Phần kiểm chứng và hoàn tác bên dưới tách kết quả đã chạy khỏi nghiệm thu tài khoản thật.\n\n### 16. Dọn cảnh báo runtime của GitHub Actions\n\n**Thay đổi:** Trong `ci-release.yml` và `docs.yml`, cập nhật `actions/checkout@v4` lên `@v5`, `actions/upload-artifact@v4` lên `@v6`, và action tải artifact của release từ `actions/download-artifact@v4` lên `@v7`.\n\n**Vì sao:** CI trước đã pass nhưng còn warning Node.js 20 bị deprecated. Các phiên bản được chọn có `runs.using: node24` trong metadata chính thức. Chỉ thay phiên bản action; giữ nguyên triggers, permissions, điều kiện bỏ qua package/release trên PR, các input artifact và lệnh build/test. Chưa kích hoạt phát hành hoặc merge PR.\n\n**Kiểm chứng:** CI tại `8f92787` đã pass Resolve version, Build docs và Cargo Test Suite Linux; annotations của cả ba job không còn warning/error. Linux chạy `cargo test --locked`: **555 pass, 0 fail, 2 ignored**. Thông báo migration của nhãn `ubuntu-latest` còn ở mức notice, không phải lỗi job. Job đóng gói/release skip đúng điều kiện PR, không được tính là đã kiểm thử package đa nền tảng.\n\n## Kiểm chứng\n\n- [x] `cargo test --locked`: **556 pass, 0 fail, 4 ignored**, trên commit `d404292`.\n- [x] Baseline integration `8de5b36`: **232 pass, 0 fail, 1 ignored**.\n- [x] Rollback patch trên worktree disposable: **78 paths phục hồi**, sau đó chạy lại baseline **232 pass, 0 fail, 1 ignored**. Source tích hợp vẫn giữ thay đổi.\n- [x] Review độc lập đóng các finding về multi-chunk cancellation, raw phone resume, owner/epoch, GUI admission và thứ tự ACK.\n- [x] Không có diagnostic clippy mới khi đối chiếu baseline theo file/code/function: **40 baseline, 39 modified, 0 mới**.\n- [ ] `cargo clippy --locked --all-targets -- -D warnings` chưa xanh toàn repo: exit **101** do lỗi nền upstream trên toolchain hiện tại. Không tắt warning để đạt pass.\n- [ ] Kiểm thử GUI tương tác/tài khoản thật trước release.\n\n- Helper macOS: build và self-test emoji, media, codec, notifier, viewer đã chạy; test native emoji worker tới inline mesh đã pass.\n- Startup/close process disposable chạy bằng bundle background-only, không giành focus. Chưa coi đó là GUI rendering thông thường.\n- Test dùng fixture, loopback và tài khoản giả; chưa đánh dấu pass cho gửi/seen/phone sync trên tài khoản thật hoặc toast hệ điều hành.\n- Default build không tải artwork/codec assets hoặc chứa session, cookies, DB và capture của tài khoản thật.\n\n## Rủi ro và hoàn tác\n\n- Đây là thay đổi Tier 3 về storage/runtime/protocol, cần human audit và kiểm tra thủ công các flow tài khoản thật trước release.\n- Schema 3 nâng cấp từ schema 2 giữ provenance của tombstone. Tệp có phiên bản mới hơn hoặc chủ khác bị từ chối; không hạ schema tại chỗ.\n- Rollback source bằng revert các commit sau integration base; giữ nguyên dữ liệu người dùng và dùng bản sao khi kiểm migration/rollback.\n- Không tự gửi lại request chưa rõ kết quả. Giới hạn wire seen 4096 identity/epoch được báo rõ; đọc cục bộ vẫn tiếp tục, exclusion chưa bền qua epoch.\n- Standalone API/TUI/scheduler giữ kho legacy; adapter account store trong PR này áp dụng cho GUI và API nhúng.\n",
-      "closedAt": null,
+      "closedAt": "2026-11-15T09:00:45Z",
       "createdAt": "2026-11-02T00:38:31Z",
       "labels": [],
       "number": 62,
-      "state": "OPEN",
+      "state": "CLOSED",
       "title": "feat(chat): khôi phục bộ tính năng chat trên upstream v0.0.4"
     },
     {

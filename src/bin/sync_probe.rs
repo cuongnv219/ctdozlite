@@ -24,40 +24,29 @@ async fn main() -> Result<()> {
     // Chờ WS kết nối.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // Lấy 3 thread 1-1 đầu tiên → znoise → noised ids → partition thật.
+    // Lấy thread cache → resolve globalId thật qua getprofiles/v2 + getmg-v2.
     let threads = zalo_rust::chat::load_threads_cache();
-    let ones: Vec<&zalo_rust::chat::Thread> =
-        threads.iter().filter(|t| !t.is_group).take(3).collect();
-    println!("✓ Threads 1-1: {}", ones.len());
-    for t in &ones {
-        println!("    - {} ({})", t.name, t.id);
+    println!("✓ Cached threads: {}", threads.len());
+    for t in threads.iter().take(10) {
+        println!("    - {} ({}, group={})", t.name, t.id, t.is_group);
     }
-    let fids: Vec<i64> = ones.iter().filter_map(|t| t.id.parse().ok()).collect();
-    let noise_body = serde_json::json!({ "fids": fids, "gids": [] });
-    let enc = s.encoded_params(&noise_body)?;
-    let url = format!("https://zwid.api.zalo.me/api/znoise?{}", s.common_params());
-    let resp = s.post_form(&url, format!("params={enc}")).await?;
-    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
-    println!("✓ znoise: {}", dec.to_string().chars().take(300).collect::<String>());
-    let noised: Vec<String> = dec
-        .get("data").and_then(|d| d.get("fids")).and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    println!("✓ noised ids: {noised:?}");
+    let partitions = zalo_rust::chat::resolve_thread_partitions(&s, &threads).await;
+    println!("✓ globalId partitions ({}): {partitions:?}", partitions.len());
 
     // Mở session V2 + gửi 590 với partition thật.
     let sync_id = zalo_rust::chat::wake_phone_sync_v2(&s).await?;
     println!("✓ syncId: {sync_id}");
-    let sent = zalo_rust::chat::send_sync_v2_request_with_queries(&s, &sync_id, &noised)?;
+    let sent = zalo_rust::chat::send_sync_v2_request_with_queries(&s, &sync_id, &partitions)?;
     println!("✓ 590 đã gửi: {sent}");
 
-    // Nghe 90s: chỉ tính events của syncId HIỆN TẠI (bỏ batch cũ replay).
-    println!("\n--- Nghe phản hồi 90s cho sync {sync_id} (không cần bấm gì) ---");
-    let deadline = Instant::now() + Duration::from_secs(90);
+    // Nghe tối đa 30s (hoặc dừng sớm ngay khi import xong is_last=true).
+    println!("\n--- Nghe phản hồi cho sync {sync_id} ---");
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut saw_status = false;
     let mut saw_batch = false;
+    let mut done_last = false;
     let mut saw_any_sync = 0;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !done_last {
         let timeout = tokio::time::sleep(Duration::from_millis(500));
         tokio::pin!(timeout);
         tokio::select! {
@@ -99,7 +88,12 @@ async fn main() -> Result<()> {
                                     } else if batch_type == 1 {
                                         println!("  → IMPORT MSG is_last={is_last} {url}...");
                                         match zalo_rust::history_sync::import_sync_v2_messages(&s, &url, is_last).await {
-                                            Ok(n) => println!("  ✓ MSG OK: {n} tin"),
+                                            Ok(n) => {
+                                                println!("  ✓ MSG OK: {n} tin");
+                                                if is_last {
+                                                    done_last = true;
+                                                }
+                                            }
                                             Err(e) => println!("  ✗ MSG FAIL: {e}"),
                                         }
                                     }
@@ -113,8 +107,20 @@ async fn main() -> Result<()> {
         let _ = saw_batch;
     }
 
-    // Dọn session.
-    zalo_rust::socket::send_sync_ack_delete(&sync_id, "PROBE_DONE");
+    // Dọn session với mã số nguyên chuẩn (1 = SyncSuccess, 2 = Error).
+    let reason = if done_last {
+        zalo_rust::socket::SYNC_DISPOSE_SUCCESS
+    } else {
+        zalo_rust::socket::SYNC_DISPOSE_ERROR
+    };
+    zalo_rust::socket::send_sync_ack_delete(&sync_id, reason);
+    // Đợi 2s nhận ACK cmd=591 từ server.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    while let Ok(ev) = rx.try_recv() {
+        if ev.cmd == 591 {
+            println!("✓ WS ACK cmd=591: {}", ev.payload);
+        }
+    }
     println!("\n=== KẾT QUẢ ===");
     println!("  Tổng events sync (kể cả cũ): {saw_any_sync}");
     println!("  Phone phản hồi sync MỚI (status/confirm): {}", if saw_status { "CÓ ✓" } else { "KHÔNG ✗" });

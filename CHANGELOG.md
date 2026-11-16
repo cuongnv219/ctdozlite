@@ -5,8 +5,36 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
-### Added (Tính năng mới)
-- **Xem trước tài liệu trong app (preview docx/xlsx/pptx/pdf/txt/csv/md/rtf):** card tệp có nút "Xem trước" (chỉ tải khi bấm, giới hạn 10MB) trích text ngay trong bong bóng (6 dòng đầu) + popup "Xem đầy đủ" có cuộn và nút Sao chép (`src/doc_preview.rs`, `src/gui/worker.rs`, `src/gui/messages.rs`, `src/gui/modals.rs`); định dạng cũ `.doc/.xls/.ppt` báo mở ngoài. Session-only, không cache đĩa.
+## [0.1.2] - 2026-11-16
+
+### Added (Tính năng mới & Cập nhật)
+- **Đồng bộ tin nhắn Sync V2 di động tối ưu (`src/chat.rs`, `src/gui/modals.rs`):** Truyền `tempKey` quét mã QR vào gói `cmd 590` và kích hoạt song song phiên HTTP `cmd 12888`; thanh tiến trình đồng bộ hiển thị trực quan phần trăm `%`, trạng thái giải mã gói tin từ điện thoại và văn bản hướng dẫn rõ ràng.
+- **Thẻ cuộc gọi chuyên nghiệp (Call Cards) (`src/history.rs`, `src/gui/messages.rs`):** Chuẩn hóa toàn bộ tin nhắn cuộc gọi thoại/video thành thẻ cuộc gọi có icon trực quan, phân biệt chiều cuộc gọi (đến, đi, nhỡ, đã hủy), thời lượng hiển thị chi tiết (ví dụ: `0 phút 20 giây`) và nút "Gọi lại".
+- **Căn lề Album ảnh chuẩn xác (`src/gui/messages.rs`):** Khắc phục triệt để lỗi bong bóng lưới album ảnh gửi đi bị lệch giữa, tự động tính toán chính xác bề rộng hiển thị (`album_rendered_width`) và bám sát mép phải (flush right) đồng bộ với giao diện chung.
+- **Gửi nhiều tệp và album ảnh dạng lưới ([PR #127](https://github.com/ctdoteam1110/ctdozlite/pull/127) bởi @gr219):** Hỗ trợ đính kèm nhiều tệp/thư mục, gom ảnh gửi đi thành album `groupLayoutId` và hiển thị lưới 2–3 cột gọn gàng trong bong bóng chat.
+- **Tải Sync V2 WASM trực tiếp từ Zalo PC app.asar ([PR #145](https://github.com/ctdoteam1110/ctdozlite/pull/145) bởi @gr219):** Tự động phát hiện và trích xuất `libzproto_wasm` từ Zalo PC cài sẵn trên máy mà không cần tải thêm bên ngoài.
+- **Console TUI Workspace & LLM Agent Loop ([PR #137](https://github.com/ctdoteam1110/ctdozlite/pull/137), [PR #144](https://github.com/ctdoteam1110/ctdozlite/pull/144) bởi @hoanglong149):** Mở rộng giao diện dòng lệnh TUI, tích hợp nhà cung cấp LLM, vòng lặp Agent tự động, khóa luồng MCP và cổng bảo mật riêng tư.
+- **Cầu nối 2 chiều Telegram ↔ Zalo ([PR #143](https://github.com/ctdoteam1110/ctdozlite/pull/143) bởi @hoanglong149):** Hỗ trợ relay tin nhắn văn bản giữa Telegram bot và Zalo hội thoại kèm bộ đệm hạn ngạch LRU và cơ chế chống dội tin (echo-guard).
+- **Trình chuyển đổi đa tài khoản nhanh (Multi-Account Switcher) ([PR #142](https://github.com/ctdoteam1110/ctdozlite/pull/142) bởi @ducseul):** Cho phép xem danh sách, chuyển đổi tức thì và quản lý phiên của nhiều tài khoản Zalo lưu trên máy.
+- **Thiết kế lại Card tệp đính kèm & Tối ưu phát video ([PR #148](https://github.com/ctdoteam1110/ctdozlite/pull/148) bởi @Fin12n):** Giao diện thẻ tệp hiện đại, xử lý mượt mà luồng phát video và tinh chỉnh trải nghiệm xem trước tệp.
+- **Xem trước tài liệu trong ứng dụng (`src/doc_preview.rs`):** Hỗ trợ đọc nhanh nội dung docx, xlsx, pptx, pdf, txt, csv, md ngay trong bong bóng chat.
+- **Thư mục dữ liệu chuẩn macOS & Hoàn thiện CI/CD Cross-Platform (`tests/data_directory_cli.rs`, `.github/workflows/ci-release.yml`):** Tuân thủ đường dẫn dữ liệu chuẩn `Application Support/ctdozlite` trên macOS, đảm bảo toàn bộ pipeline build và kiểm thử đa nền tảng (Linux, Windows, macOS) chạy hoàn toàn 100% xanh.
+
+### Fixed (Sửa lỗi & Tối ưu hiệu năng)
+- **Sửa lỗi hiển thị chuỗi thời lượng số trần trên tin nhắn cuộc gọi cũ:** Nâng cấp migration cơ sở dữ liệu SQLite cục bộ để chuẩn hóa các tin nhắn lưu dạng chuỗi thô (`0:18`, `0:28`, ...) về định dạng tin nhắn cuộc gọi chuẩn kèm metadata.
+- **Giảm tải CPU 100% khi chạy nền ([PR #136](https://github.com/ctdoteam1110/ctdozlite/pull/136) bởi @hoanglong149):** Khống chế chu kỳ vẽ lại poll-driven layout, lưu bộ đệm lọc/sắp xếp danh sách sidebar giúp ứng dụng hoạt động êm ái, tiết kiệm pin.
+- **Bảo toàn URL khi chuyển tiếp liên kết Rich Link ([PR #134](https://github.com/ctdoteam1110/ctdozlite/pull/134) bởi @cuongdm75):** Đảm bảo giữ nguyên fallback văn bản chứa liên kết gốc khi chuyển tiếp tin nhắn preview sang người nhận khác.
+- **Cải tiến dán nhiều tệp từ clipboard:** Dán cộng dồn tệp vào hàng chờ thay vì ghi đè, hỗ trợ trọn vẹn danh sách tệp từ File Explorer, macOS Finder và Linux file manager.
+
+### Vinh danh đóng góp từ Cộng đồng & Tác giả (Authors & Contributors)
+- **Đồng tác giả (Authors):** TIPC1110 (`tienichpc1110@gmail.com`) & Đỗ Thành ([@thanhdo1110](https://github.com/thanhdo1110)).
+- **Cộng đồng đóng góp PRs xuất sắc cho v0.1.2:**
+  - **@hoanglong149:** [PR #136](https://github.com/ctdoteam1110/ctdozlite/pull/136) (tối ưu CPU idle), [PR #137](https://github.com/ctdoteam1110/ctdozlite/pull/137) & [PR #144](https://github.com/ctdoteam1110/ctdozlite/pull/144) (Console TUI + LLM Agent Workspace), [PR #143](https://github.com/ctdoteam1110/ctdozlite/pull/143) (Telegram ↔ Zalo bridge).
+  - **@gr219:** [PR #127](https://github.com/ctdoteam1110/ctdozlite/pull/127) (Đính kèm nhiều tệp & Album ảnh dạng lưới), [PR #145](https://github.com/ctdoteam1110/ctdozlite/pull/145) (Trích xuất Sync v2 WASM từ Zalo app.asar).
+  - **@Fin12n:** [PR #148](https://github.com/ctdoteam1110/ctdozlite/pull/148) (Redesign file card UI, video playback & sync polish).
+  - **@ducseul:** [PR #142](https://github.com/ctdoteam1110/ctdozlite/pull/142) (Multi-account switcher UI & account management).
+  - **@cuongdm75:** [PR #134](https://github.com/ctdoteam1110/ctdozlite/pull/134) (Preserve URL on rich link forward fallback).
+  - **@nguyenhoclaptrinh, @ziq3, @Leoaxo098:** Nghiên cứu và đề xuất vá lỗi Sync V2 mobile handshake, Windows console flash và reaction banner replay.
 
 ## [0.1.0] - 2026-11-09
 

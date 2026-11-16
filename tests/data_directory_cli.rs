@@ -151,9 +151,20 @@ fn legacy_cli_keeps_cwd_and_version_does_not_prepare_storage() {
         .output()
         .unwrap();
     assert!(result.status.success());
+    let stdout_path = std::path::PathBuf::from(String::from_utf8_lossy(&result.stdout).trim());
+    #[cfg(target_os = "macos")]
+    let expected = {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .expect("HOME environment variable required on macOS");
+        home.join("Library/Application Support/ctdozlite")
+    };
+    #[cfg(not(target_os = "macos"))]
+    let expected = fixture.0.clone();
+
     assert_eq!(
-        String::from_utf8_lossy(&result.stdout).trim(),
-        fixture.0.to_str().unwrap()
+        stdout_path.canonicalize().unwrap_or(stdout_path),
+        expected.canonicalize().unwrap_or_else(|_| expected.clone())
     );
     let data = fixture.0.join("not-created");
     let result = Command::new(env!("CARGO_BIN_EXE_ctdozlite"))

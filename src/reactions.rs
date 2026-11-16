@@ -624,10 +624,20 @@ pub fn apply_reaction_event(summaries: &mut Vec<ReactionSummary>, event: &Reacti
 /// * events seen before their message exists are kept and applied once it loads;
 /// * count per type = `base` + distinct live events, where `base` is whatever part of the first
 ///   snapshot the known events cannot explain (`snapshot - events`, never negative).
+#[derive(Debug, Default, Clone)]
+struct MessageReactionBase {
+    /// Total snapshot counts per `r_type` after subtracting live events known when the snapshot landed.
+    totals: BTreeMap<i32, u64>,
+    /// Per-sender snapshot counts (`sender_id -> r_type -> count`). Unattributed counts live under `""`.
+    by_sender: BTreeMap<String, BTreeMap<i32, u64>>,
+    /// Senders already cleared against this snapshot so subsequent replays stay idempotent.
+    cleared_from_snapshot: std::collections::BTreeSet<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct ReactionInbox {
     events: std::collections::HashMap<String, BTreeMap<String, ReactionEvent>>,
-    bases: std::collections::HashMap<String, BTreeMap<i32, u64>>,
+    bases: std::collections::HashMap<String, MessageReactionBase>,
     matched: std::collections::HashSet<String>,
 }
 
@@ -661,14 +671,19 @@ pub fn event_identity(ev: &ReactionEvent) -> String {
     }
 }
 
-/// Effective per-type counts and per-sender counts after replaying events in order.
-/// A clear (`rType == -1`) removes that sender's earlier reactions.
+/// Effective per-type counts, per-sender counts, and senders whose latest reaction sequence
+/// was a clear (`rType == -1`) after replaying events in order.
 fn effective_counts(
     events: &BTreeMap<String, ReactionEvent>,
-) -> (BTreeMap<i32, u64>, BTreeMap<String, BTreeMap<i32, u64>>) {
+) -> (
+    BTreeMap<i32, u64>,
+    BTreeMap<String, BTreeMap<i32, u64>>,
+    std::collections::BTreeSet<String>,
+) {
     let mut ordered: Vec<&ReactionEvent> = events.values().collect();
     ordered.sort_by(|a, b| event_order(a, b));
     let mut per_sender: BTreeMap<String, BTreeMap<i32, u64>> = BTreeMap::new();
+    let mut cleared_senders: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for ev in ordered {
         if ev.r_type < -1 {
             continue;
@@ -676,6 +691,7 @@ fn effective_counts(
         let mine = per_sender.entry(ev.sender_id.clone()).or_default();
         if ev.r_type == -1 {
             mine.clear();
+            cleared_senders.insert(ev.sender_id.clone());
         } else {
             *mine.entry(ev.r_type).or_default() += 1;
         }
@@ -686,7 +702,91 @@ fn effective_counts(
             *totals.entry(*kind).or_default() += n;
         }
     }
-    (totals, per_sender)
+    (totals, per_sender, cleared_senders)
+}
+
+fn init_message_base(
+    summaries: &[ReactionSummary],
+    initial_live_totals: &BTreeMap<i32, u64>,
+    initial_live_per_sender: &BTreeMap<String, BTreeMap<i32, u64>>,
+) -> MessageReactionBase {
+    let mut by_sender: BTreeMap<String, BTreeMap<i32, u64>> = BTreeMap::new();
+    for s in summaries {
+        let Some(kind) = s.r_type.or_else(|| type_for_icon(&s.emoji)) else {
+            continue;
+        };
+        let mut attributed: u64 = 0;
+        let mut attributed_live_used: u64 = 0;
+        for (sender, cnt) in &s.reactor_counts {
+            let live_for_sender = initial_live_per_sender
+                .get(sender)
+                .and_then(|m| m.get(&kind))
+                .copied()
+                .unwrap_or(0);
+            let rem = cnt.saturating_sub(live_for_sender);
+            attributed = attributed.saturating_add(*cnt);
+            attributed_live_used = attributed_live_used.saturating_add(live_for_sender.min(*cnt));
+            if rem > 0 {
+                *by_sender.entry(sender.clone()).or_default().entry(kind).or_default() += rem;
+            }
+        }
+        let remaining_live = initial_live_totals
+            .get(&kind)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(attributed_live_used);
+        let unattributed = s.count.saturating_sub(attributed).saturating_sub(remaining_live);
+        if unattributed > 0 {
+            *by_sender
+                .entry(String::new())
+                .or_default()
+                .entry(kind)
+                .or_default() += unattributed;
+        }
+    }
+    let mut totals: BTreeMap<i32, u64> = BTreeMap::new();
+    for kinds in by_sender.values() {
+        for (&kind, &cnt) in kinds {
+            if cnt > 0 {
+                *totals.entry(kind).or_default() += cnt;
+            }
+        }
+    }
+    MessageReactionBase {
+        totals,
+        by_sender,
+        cleared_from_snapshot: std::collections::BTreeSet::new(),
+    }
+}
+
+fn apply_cleared_senders_to_base(
+    base: &mut MessageReactionBase,
+    cleared_senders: &std::collections::BTreeSet<String>,
+) {
+    for sender in cleared_senders {
+        if !base.cleared_from_snapshot.insert(sender.clone()) {
+            continue;
+        }
+        if let Some(removed) = base.by_sender.remove(sender) {
+            for (kind, cnt) in removed {
+                if let Some(tot) = base.totals.get_mut(&kind) {
+                    *tot = tot.saturating_sub(cnt);
+                }
+            }
+        }
+        // Snapshot payloads keyed only by `"0"` or without per-sender attribution may store own
+        // reactions under `""` (unattributed). Clear it when `"0"` clears its reactions.
+        if sender == "0" {
+            if let Some(removed) = base.by_sender.remove("") {
+                for (kind, cnt) in removed {
+                    if let Some(tot) = base.totals.get_mut(&kind) {
+                        *tot = tot.saturating_sub(cnt);
+                    }
+                }
+            }
+        }
+        base.totals.retain(|_, v| *v > 0);
+    }
 }
 impl ReactionInbox {
     /// Store events by message and event id. Returns the subset actually
@@ -734,31 +834,18 @@ impl ReactionInbox {
                 continue;
             };
             let before = total_count(&msg.reaction_summaries);
-            let (totals, per_sender) = effective_counts(&self.events[&key]);
-            let base = self.bases.entry(key.clone()).or_insert_with(|| {
-                let mut snapshot: BTreeMap<i32, u64> = BTreeMap::new();
-                for s in &msg.reaction_summaries {
-                    let kind = s.r_type.or_else(|| type_for_icon(&s.emoji));
-                    if let Some(kind) = kind {
-                        *snapshot.entry(kind).or_default() += s.count;
-                    }
-                }
-                snapshot
-                    .into_iter()
-                    .map(|(kind, n)| {
-                        (
-                            kind,
-                            n.saturating_sub(totals.get(&kind).copied().unwrap_or(0)),
-                        )
-                    })
-                    .collect()
-            });
+            let (totals, per_sender, cleared_senders) = effective_counts(&self.events[&key]);
+            let base = self
+                .bases
+                .entry(key.clone())
+                .or_insert_with(|| init_message_base(&msg.reaction_summaries, &totals, &per_sender));
+            apply_cleared_senders_to_base(base, &cleared_senders);
             let mut summaries: Vec<ReactionSummary> = Vec::new();
             let mut kinds: std::collections::BTreeSet<i32> = totals.keys().copied().collect();
-            kinds.extend(base.keys().copied());
+            kinds.extend(base.totals.keys().copied());
             for kind in kinds {
-                let n =
-                    base.get(&kind).copied().unwrap_or(0) + totals.get(&kind).copied().unwrap_or(0);
+                let n = base.totals.get(&kind).copied().unwrap_or(0)
+                    + totals.get(&kind).copied().unwrap_or(0);
                 if n == 0 {
                     continue;
                 }
@@ -768,10 +855,21 @@ impl ReactionInbox {
                     count: n,
                     ..Default::default()
                 };
-                for (sender, mine) in &per_sender {
-                    if let Some(c) = mine.get(&kind) {
+                for (sender, mine) in &base.by_sender {
+                    if sender.is_empty() {
+                        continue;
+                    }
+                    if let Some(c) = mine.get(&kind).filter(|&&c| c > 0) {
                         summary.reactor_ids.push(sender.clone());
-                        summary.reactor_counts.insert(sender.clone(), *c);
+                        *summary.reactor_counts.entry(sender.clone()).or_default() += *c;
+                    }
+                }
+                for (sender, mine) in &per_sender {
+                    if let Some(c) = mine.get(&kind).filter(|&&c| c > 0) {
+                        if !summary.reactor_ids.iter().any(|s| s == sender) {
+                            summary.reactor_ids.push(sender.clone());
+                        }
+                        *summary.reactor_counts.entry(sender.clone()).or_default() += *c;
                     }
                 }
                 summaries.push(summary);
@@ -1082,6 +1180,92 @@ mod tests {
         ] {
             assert!(parse_reaction_events(&v).is_empty());
         }
+    }
+
+    #[test]
+    fn inbox_clear_reaction_removes_snapshot_and_live_counts_for_sender() {
+        // Case 1: Snapshot pre-loaded from SQLite/history: own reactions ("0") + peer reactions ("peer").
+        let mut msg = crate::chat::ChatMessage {
+            id: "msg-clear-1".into(),
+            reaction_summaries: parse_reactions(&json!({
+                "reactions": {
+                    "0": {"0": 1, "3": 1, "5": 1},
+                    "peer": {"5": 1}
+                }
+            })),
+            ..Default::default()
+        };
+        assert_eq!(total_count(&msg.reaction_summaries), 4);
+
+        let mut inbox = ReactionInbox::default();
+        // Peer adds one more live thumbs-up before we clear our own reactions.
+        let peer_ev = ReactionEvent {
+            message_id: "msg-clear-1".into(),
+            sender_id: "peer".into(),
+            event_id: "ev-peer-1".into(),
+            r_type: 3,
+            emoji: "👍".into(),
+            ts: 1000,
+            ..Default::default()
+        };
+        inbox.ingest(&[peer_ev], std::slice::from_mut(&mut msg));
+        assert_eq!(total_count(&msg.reaction_summaries), 5);
+
+        // Now own user ("0") sends clear reaction (rType == -1).
+        let clear_ev = ReactionEvent {
+            message_id: "msg-clear-1".into(),
+            sender_id: "0".into(),
+            event_id: "ev-clear-1".into(),
+            r_type: -1,
+            emoji: String::new(),
+            ts: 2000,
+            ..Default::default()
+        };
+        inbox.ingest(std::slice::from_ref(&clear_ev), std::slice::from_mut(&mut msg));
+        assert_eq!(
+            total_count(&msg.reaction_summaries),
+            2,
+            "own 3 snapshot reactions removed, peer's 1 snapshot + 1 live preserved"
+        );
+        // Replaying the same clear event must stay idempotent and never subtract peer counts.
+        inbox.ingest(&[clear_ev], std::slice::from_mut(&mut msg));
+        assert_eq!(total_count(&msg.reaction_summaries), 2);
+
+        // Case 2: All reactions on message added live in current session then cleared.
+        let mut live_msg = crate::chat::ChatMessage {
+            id: "msg-clear-2".into(),
+            ..Default::default()
+        };
+        let add1 = ReactionEvent {
+            message_id: "msg-clear-2".into(),
+            sender_id: "0".into(),
+            event_id: "ev-add-1".into(),
+            r_type: 0,
+            emoji: "😆".into(),
+            ts: 100,
+            ..Default::default()
+        };
+        let add2 = ReactionEvent {
+            message_id: "msg-clear-2".into(),
+            sender_id: "0".into(),
+            event_id: "ev-add-2".into(),
+            r_type: 5,
+            emoji: "❤️".into(),
+            ts: 200,
+            ..Default::default()
+        };
+        let clear2 = ReactionEvent {
+            message_id: "msg-clear-2".into(),
+            sender_id: "0".into(),
+            event_id: "ev-clear-2".into(),
+            r_type: -1,
+            emoji: String::new(),
+            ts: 300,
+            ..Default::default()
+        };
+        inbox.ingest(&[add1, add2, clear2], std::slice::from_mut(&mut live_msg));
+        assert!(live_msg.reaction_summaries.is_empty());
+        assert!(live_msg.reactions.is_empty());
     }
 }
 

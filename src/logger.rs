@@ -149,27 +149,26 @@ pub fn log_error(context: &str, err: &str) {
 /// chẩn đoán đồng bộ điện thoại. Xoay file khi > 1MB.
 pub fn log_sync(msg: &str) {
     use std::io::Write;
-    // Absolute path: app mở từ Finder có CWD=/ (không ghi được). Thử data dir
-    // trước, fallback /tmp.
-    let path: std::path::PathBuf = std::env::var("HOME")
-        .map(|h| {
-            std::path::PathBuf::from(h).join("Library/Application Support/ctdozlite/sync_debug.log")
-        })
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/sync_debug.log"));
-    let path = path.as_path();
-    if path.metadata().map(|m| m.len()).unwrap_or(0) > 1_000_000 {
-        let _ = std::fs::remove_file(path);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let now = crate::login::unix_now();
-        let _ = writeln!(
-            f,
-            "[{:02}:{:02}:{:02}] {}",
-            (now / 3600) % 24,
-            (now / 60) % 60,
-            now % 60,
-            msg.chars().take(500).collect::<String>()
-        );
+    let candidates: [std::path::PathBuf; 2] = [
+        std::path::PathBuf::from("sync_debug.log"),
+        std::env::temp_dir().join("ctdozlite_sync_debug.log"),
+    ];
+    for path in &candidates {
+        if path.metadata().map(|m| m.len()).unwrap_or(0) > 1_000_000 {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let now = crate::login::unix_now();
+            let _ = writeln!(
+                f,
+                "[{:02}:{:02}:{:02}] {}",
+                (now / 3600) % 24,
+                (now / 60) % 60,
+                now % 60,
+                msg.chars().take(500).collect::<String>()
+            );
+            return;
+        }
     }
 }
 

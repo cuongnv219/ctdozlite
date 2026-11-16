@@ -33,6 +33,7 @@ downloaded_backup.bin
 real_backup.db.crypt
 real_decompressed_db.bin
 sync_rsa_priv.pem
+sync_identity.json
 
 # Phone dumps, private UI screenshots & screen captures
 phone_*.png
@@ -72,6 +73,8 @@ book/
 .opencode/
 .engineered-config.json
 .scratch/
+skills/
+skills-lock.json
 
 # Temporary, log and backup files
 *.tmp
@@ -93,3 +96,4 @@ Thumbs.db
 # Sync v2 private keys (NEVER COMMIT)
 sync_v2_keys.json
 sync_rsa_identity.json
+sync_identity.json

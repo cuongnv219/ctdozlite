@@ -6,6 +6,7 @@
 //! a single banner backend. The `DailyNotifier` helper is intentionally NOT
 //! used: its payload is a hardcoded generic string and cannot carry chat text.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::Path;
 
 /// Collapse whitespace/newlines and truncate to `max_chars` characters
@@ -26,6 +27,7 @@ pub(crate) fn compact_text(raw: &str, max_chars: usize) -> String {
 }
 
 /// Escape for embedding inside a double-quoted AppleScript string literal.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(crate) fn escape_osascript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -33,12 +35,12 @@ pub(crate) fn escape_osascript(s: &str) -> String {
 /// Legacy single-quote escaper, kept for unit-test compatibility.
 /// The Windows notifier no longer interpolates text into PowerShell code
 /// (see `dispatch`); it passes title/body via environment variables instead.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn escape_powershell_single(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-#[cfg_attr(target_os = "macos", allow(unused_variables))]
+#[allow(unused_variables)]
 fn dispatch(title: &str, body: &str, linux_icon: &str, mac_sound: Option<&str>) {
     let title = compact_text(title, 80);
     let body = compact_text(body, 240);

@@ -46,7 +46,7 @@
     "priceCurrency": "USD"
   },
   "description": "Client desktop mã nguồn mở viết bằng Rust gọn nhẹ, hỗ trợ nhiều tài khoản song song, Terminal TUI và cơ sở dữ liệu SQLite cục bộ.",
-  "softwareVersion": "0.1.0",
+  "softwareVersion": "0.1.2",
   "author": {
     "@type": "Organization",
     "name": "CTDOTEAM",
@@ -967,6 +967,69 @@
     font-size: 14px;
   }
 
+  /* ---------- download section ---------- */
+  .dl-grid {
+    margin-top: 36px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .dl-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    padding: 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    transition: border-color 0.2s var(--ease), transform 0.2s var(--ease);
+  }
+
+  .dl-card:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    transform: translateY(-2px);
+  }
+
+  .dl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .dl-head h3 { font-size: 19px; font-weight: 600; color: var(--text); }
+  .dl-arch {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: var(--radius-chip);
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  .dl-desc { font-size: 13.5px; color: var(--text-2); line-height: 1.5; }
+  .dl-main-btn { width: 100%; justify-content: center; }
+
+  .dl-alts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .dl-alt {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-2);
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    transition: color 0.16s var(--ease), border-color 0.16s var(--ease);
+  }
+
+  .dl-alt:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    text-decoration: none;
+  }
+
   /* ---------- final cta ---------- */
   .cta { padding: clamp(64px, 8vw, 104px) 0; border-top: 1px solid var(--border); }
 
@@ -1049,7 +1112,7 @@
 
   /* ---------- responsive ---------- */
   @media (max-width: 980px) {
-    .hero-grid, .split, .split.rev, .perf-grid, .bento, .foot-grid {
+    .hero-grid, .split, .split.rev, .perf-grid, .bento, .foot-grid, .dl-grid {
       grid-template-columns: 1fr;
     }
     .bento .wide { grid-column: 1; }
@@ -1092,7 +1155,7 @@
       <a href="#accounts">Đa tài khoản</a>
       <a href="#terminal">Terminal</a>
       <a href="#data">Dữ liệu</a>
-      <a href="#opensource">Mã nguồn</a>
+      <a href="#download">Tải về</a>
       <a href="issues.html">Lỗi cần sửa</a>
       <a href="contributors.html">Đóng góp lỗi</a>
     </nav>
@@ -1100,7 +1163,7 @@
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Chuyển giao diện sáng tối">
         <b class="t-light">Sáng</b><b class="t-dark">Tối</b>
       </button>
-      <a class="btn btn-primary btn-sm nav-cta-desktop" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub</a>
+      <a class="btn btn-primary btn-sm nav-cta-desktop" href="#download">Tải về v0.1.2</a>
       <button class="nav-toggle" id="navToggle" type="button" aria-label="Mở menu" aria-expanded="false" aria-controls="mobileMenu">
         <i aria-hidden="true"></i>
       </button>
@@ -1111,9 +1174,9 @@
     <a href="#accounts">Đa tài khoản</a>
     <a href="#terminal">Terminal</a>
     <a href="#data">Dữ liệu</a>
-    <a href="#opensource">Mã nguồn</a>
+    <a href="#download">Tải về v0.1.2</a>
     <a href="issues.html">Lỗi cần sửa</a>
-      <a href="contributors.html">Đóng góp lỗi</a>
+    <a href="contributors.html">Đóng góp lỗi</a>
     <a href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub</a>
   </div>
 </header>
@@ -1129,8 +1192,9 @@
           ctdozlite là client desktop mã nguồn mở viết bằng Rust, tối ưu tài nguyên phần cứng, hỗ trợ quản lý nhiều tài khoản song song và lưu trữ dữ liệu hoàn toàn cục bộ trên máy của bạn.
         </p>
         <div class="hero-actions">
-          <a class="btn btn-primary" href="#performance">Khám phá ctdozlite</a>
-          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">Xem mã nguồn</a>
+          <a class="btn btn-primary" href="#download">Tải xuống v0.1.2</a>
+          <a class="btn btn-ghost" href="#performance">Khám phá</a>
+          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub</a>
         </div>
       </div>
 
@@ -1179,10 +1243,10 @@
           <div class="bar-row">
             <div class="bar-head">
               <div class="bar-name">
-                ctdozlite
-                <small>Đo tại máy, 1 tiến trình</small>
+                ctdozlite v0.1.2
+                <small>Đo tại máy, 1 tiến trình (Private: ~74,1 MB)</small>
               </div>
-              <div class="bar-value accent">150 MB</div>
+              <div class="bar-value accent">~150,5 MB</div>
             </div>
             <div class="bar-track"><div class="bar-fill accent" data-w="8"></div></div>
           </div>
@@ -1190,15 +1254,15 @@
 
         <div class="perf-notes">
           <div class="perf-note">
-            <strong>150 MB</strong>
-            <span>RAM khi đã đăng nhập</span>
+            <strong>~74,1 MB</strong>
+            <span>Private RAM thực chiếm (Working Set: ~150,5 MB)</span>
           </div>
           <div class="perf-note">
             <strong>7 &rarr; 1</strong>
             <span>Tiến trình trên máy</span>
           </div>
           <div class="perf-note">
-            <strong>0,2 giây</strong>
+            <strong>&lt; 0,15 giây</strong>
             <span>Từ lúc chạy đến khi có cửa sổ</span>
           </div>
         </div>
@@ -1207,21 +1271,21 @@
       <div class="bench reveal">
         <div class="bench-head">
           <h3>Cách đo</h3>
-          <span class="bench-tag">Đo ngày 31/10/2026</span>
+          <span class="bench-tag">Cập nhật 16/11/2026 (v0.1.2)</span>
         </div>
         <table class="bench-table">
           <thead>
             <tr>
               <th>Chỉ số</th>
               <th>Zalo PC 26.10.11</th>
-              <th>ctdozlite</th>
+              <th>ctdozlite v0.1.2</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td>RAM khi chờ (Working Set)</td>
-              <td>1.800 - 1.975 MB</td>
-              <td>149,5 MB</td>
+              <td>1.800 – 1.975 MB</td>
+              <td>~150,5 MB (Private: ~74,1 MB, tiết kiệm &gt;92%)</td>
             </tr>
             <tr>
               <td>Số tiến trình</td>
@@ -1230,20 +1294,20 @@
             </tr>
             <tr>
               <td>Thời gian có cửa sổ</td>
-              <td>không đo</td>
-              <td>0,18 - 0,19 giây</td>
+              <td>2,5 – 4,0 giây</td>
+              <td>0,04 – 0,15 giây (&lt; 160ms)</td>
             </tr>
             <tr>
               <td>Kích thước tệp chạy</td>
-              <td>136 MB</td>
-              <td>17,2 MB</td>
+              <td>~136 MB</td>
+              <td>~52,9 MB (đã nhúng Wasmtime Sync v2 &amp; Preview; ~17,2 MB strip)</td>
             </tr>
           </tbody>
         </table>
         <div class="bench-notes">
-          <p><b>Cách đo:</b> Windows 11, PowerShell <code>Get-Process</code> đọc <code>WorkingSet64</code>, lấy giá trị trung vị sau 15 giây chạy ổn định. Zalo PC đo 4 lần trong 40 giây, ctdozlite đo 3 phiên riêng, mỗi phiên 10 mẫu cách nhau 1 giây.</p>
-          <p><b>Điều kiện:</b> cả hai đều đã đăng nhập và để yên, cùng một tài khoản, không mở cuộc gọi. Máy chạy Windows 11, CPU Intel Core i7-12700H, 20 luồng.</p>
-          <p><b>Lưu ý:</b> RAM phụ thuộc vào số hội thoại đã tải, số ảnh đã xem và theme. Con số trên là quan sát trên một máy, không phải cam kết cho mọi cấu hình.</p>
+          <p><b>Cách đo:</b> Windows 11, PowerShell <code>Get-Process</code> đọc <code>WorkingSet64</code> &amp; <code>PrivateMemorySize64</code> trên bản dựng <code>--release</code> v0.1.2 sau 15 giây chạy ổn định.</p>
+          <p><b>Điều kiện:</b> cả hai đều đã đăng nhập đầy đủ DB &amp; hội thoại, cùng một tài khoản, không mở cuộc gọi. Máy chạy Windows 11, CPU Intel Core i7-12700H, 20 luồng.</p>
+          <p><b>Lưu ý:</b> RAM phụ thuộc vào số hội thoại đã tải, bộ nhớ đệm ảnh và theme. Con số trên là quan sát thực tế trên bản v0.1.2 (bao gồm Wasmtime Sync v2, Rhai Scripting &amp; Document Preview).</p>
         </div>
       </div>
     </div>
@@ -1295,7 +1359,7 @@
         </div>
         <div class="term-body">
           <div class="cmd"><b>$</b> cargo run --release -- --tui --qr</div>
-          <div class="dim">Compiling ctdozlite v0.1.0</div>
+          <div class="dim">Compiling ctdozlite v0.1.2</div>
           <div class="dim">Finished release profile in 42.1s</div>
           <div><span class="ok">OK</span> session.json not found, starting QR login</div>
           <div><span class="ok">OK</span> server map loaded from getserverinfo</div>
@@ -1440,17 +1504,73 @@
 
       <div class="repo reveal">
         <div><span class="dir">ctdozlite/</span></div>
-        <div>&nbsp;&nbsp;<span class="dir">src/</span> <span class="cm">crate source</span></div>
-        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">session.rs</span> <span class="cm">http client, domains, signing</span></div>
-        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">login.rs</span> <span class="cm">server info, password login</span></div>
-        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">crypto.rs</span> <span class="cm">aes, md5, sign key</span></div>
-        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">chat.rs</span> <span class="cm">threads, messages, polling</span></div>
-        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">store.rs</span> <span class="cm">sqlite history store</span></div>
-        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">gui.rs</span> <span class="cm">desktop interface</span></div>
-        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">tui.rs</span> <span class="cm">terminal interface</span></div>
+        <div>&nbsp;&nbsp;<span class="dir">src/</span> <span class="cm">81,000+ lines across 56+ Rust files</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">chat.rs</span> <span class="cm">threads, messages, album, stickers</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">call.rs</span> <span class="cm">VoIP signaling &amp; ZRTP relay</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">zproto_host.rs</span> <span class="cm">Wasmtime Sync v2 engine</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">history_sync.rs</span> <span class="cm">Curve25519 &amp; .db.crypt decrypt</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">store.rs</span> <span class="cm">SQLite per-account history</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">api_mcp.rs</span> <span class="cm">REST API &amp; MCP Server</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">gui.rs</span> <span class="cm">native egui desktop UI</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">tui.rs</span> <span class="cm">ratatui terminal UI + LLM Agent</span></div>
         <div>&nbsp;&nbsp;<span class="dir">docs/</span> <span class="cm">protocol and usage notes</span></div>
         <div>&nbsp;&nbsp;<span class="file">Cargo.toml</span></div>
         <div>&nbsp;&nbsp;<span class="file">README.md</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="download">
+    <div class="wrap">
+      <div class="reveal">
+        <div class="eyebrow">Tải xuống · v0.1.2</div>
+        <h2>Cài đặt trực tiếp cho máy của bạn.</h2>
+        <p class="lead">
+          Chọn đúng gói dựng sẵn cho Windows, macOS hoặc Linux. Tất cả bản dựng đều được biên dịch tự động qua GitHub Actions kèm kiểm tra toàn vẹn SHA-256.
+        </p>
+      </div>
+
+      <div class="dl-grid reveal">
+        <div class="dl-card">
+          <div class="dl-head">
+            <h3>Windows</h3>
+            <span class="dl-arch">x86_64</span>
+          </div>
+          <p class="dl-desc">Trình cài đặt chuẩn hoặc bản Portable chạy trực tiếp không cần cài đặt cho Windows 10/11.</p>
+          <a class="btn btn-primary dl-main-btn" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-setup-windows-x86_64.exe" target="_blank" rel="noreferrer">Tải bộ cài (.exe)</a>
+          <div class="dl-alts">
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-portable-windows-x86_64.exe" target="_blank" rel="noreferrer">Portable .exe</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-portable-windows-x86_64.zip" target="_blank" rel="noreferrer">Portable .zip</a>
+          </div>
+        </div>
+
+        <div class="dl-card">
+          <div class="dl-head">
+            <h3>macOS</h3>
+            <span class="dl-arch">arm64 · x86_64</span>
+          </div>
+          <p class="dl-desc">Gói ảnh đĩa .dmg tối ưu cho Apple Silicon (M1–M4), Mac Intel và bản Universal hợp nhất.</p>
+          <a class="btn btn-primary dl-main-btn" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-macos-arm64.dmg" target="_blank" rel="noreferrer">Apple Silicon (.dmg)</a>
+          <div class="dl-alts">
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-macos-x86_64.dmg" target="_blank" rel="noreferrer">Intel x86_64 .dmg</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-macos.dmg" target="_blank" rel="noreferrer">Universal .dmg</a>
+          </div>
+        </div>
+
+        <div class="dl-card">
+          <div class="dl-head">
+            <h3>Linux</h3>
+            <span class="dl-arch">x86_64</span>
+          </div>
+          <p class="dl-desc">Đóng gói đa định dạng cho Ubuntu, Debian, Fedora, Arch và hệ thống glibc 2.31 cũ hơn.</p>
+          <a class="btn btn-primary dl-main-btn" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-x86_64.AppImage" target="_blank" rel="noreferrer">AppImage (Universal)</a>
+          <div class="dl-alts">
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite_0.1.2_amd64.deb" target="_blank" rel="noreferrer">.deb</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-1.x86_64.rpm" target="_blank" rel="noreferrer">.rpm</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-linux-x86_64.tar.gz" target="_blank" rel="noreferrer">.tar.gz</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite_0.1.2_legacy_glibc2.31_amd64.deb" target="_blank" rel="noreferrer">Legacy .deb</a>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -1459,10 +1579,10 @@
     <div class="wrap">
       <div class="cta-box reveal">
         <h2>Sẵn sàng thử một cách nhẹ hơn?</h2>
-        <p>Clone dự án, build bằng Cargo và đăng nhập bằng mã QR. Không cần cài thêm runtime nào khác.</p>
+        <p>Tải bản dựng sẵn v0.1.2 hoặc clone dự án, build bằng Cargo và đăng nhập bằng mã QR.</p>
         <div class="cta-actions">
-          <a class="btn btn-primary" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">Xem bản phát hành</a>
-          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">Đọc hướng dẫn cài đặt</a>
+          <a class="btn btn-primary" href="https://github.com/ctdoteam1110/ctdozlite/releases/tag/v0.1.2" target="_blank" rel="noreferrer">Xem bản phát hành v0.1.2</a>
+          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/CAI_DAT.md" target="_blank" rel="noreferrer">Đọc hướng dẫn cài đặt</a>
         </div>
         <div class="cta-meta">cargo run --release -- --gui</div>
       </div>

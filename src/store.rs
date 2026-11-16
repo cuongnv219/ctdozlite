@@ -208,7 +208,20 @@ impl MessageStore {
         } else {
             Connection::open(path)?
         };
+        Self::configure_connection(&conn);
         Ok(Self { conn })
+    }
+
+    /// Apply the per-connection settings from `docs/standards/database-and-migrations.md`.
+    ///
+    /// WAL lets the UI read while the worker commits a large history batch; in
+    /// rollback-journal mode those reads waited out the full busy timeout and froze
+    /// the window for seconds at a time during a first sync.
+    fn configure_connection(conn: &Connection) {
+        // Best effort: switching the journal needs a lock another writer may hold, and
+        // the mode is persistent, so a later open applies it. `:memory:` stays "memory".
+        let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
     }
 
      /// Open SQLite database at `path` and initialize table schemas and indices if absent.
@@ -218,6 +231,7 @@ impl MessageStore {
         } else {
             Connection::open(path)?
         };
+        Self::configure_connection(&conn);
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -260,7 +274,8 @@ impl MessageStore {
         Self::ensure_edit_history_schema(&conn)?;
         // Per-thread mini script workspace: bảng thread_scripts + thread_data + logs.
         Self::ensure_script_schema(&conn)?;
-        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1 {
+        let user_ver = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
+        if user_ver < 1 {
             conn.execute_batch(
                 "BEGIN;
                  DELETE FROM messages WHERE text = 'sendBubbleMessage';
@@ -268,8 +283,166 @@ impl MessageStore {
                  COMMIT;",
             )?;
         }
+        if user_ver < 2 {
+            Self::heal_sync_v2_misdecoded_rows(&conn)?;
+            conn.execute_batch("PRAGMA user_version = 2;")?;
+        }
 
         Ok(Self { conn })
+    }
+
+    /// One-time migration (`user_version = 2`): repairs Sync V2 messages that were previously
+    /// imported with bare call durations (`"0:18"`, `""` + `sendBubbleMessage`), photos mislabeled
+    /// as `[Tin nhắn thoại]`, empty-text link/photo rows, or `ChatInfo` pin notices marked `chat.undo`.
+    fn heal_sync_v2_misdecoded_rows(conn: &Connection) -> Result<()> {
+        let mut updates: Vec<(String, String, String, String)> = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT msg_id, text, msg_type, is_outgoing, raw_json
+                 FROM messages
+                 WHERE raw_json LIKE '%sendBubbleMessage%'
+                    OR (text = '[Tin nhắn thoại]' AND raw_json LIKE '%link_url%')
+                    OR (TRIM(text) = '' AND raw_json LIKE '%link_url%')
+                    OR (msg_type = 'chat.undo' AND text LIKE '[Đã thu hồi] %' AND raw_json LIKE '%link_title%')",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let msg_id: String = row.get(0)?;
+                let text: String = row.get::<_, String>(1).unwrap_or_default();
+                let msg_type: String = row.get::<_, String>(2).unwrap_or_default();
+                let is_out: i64 = row.get::<_, i64>(3).unwrap_or(0);
+                let raw_json: String = row.get::<_, String>(4).unwrap_or_default();
+                let is_outgoing = is_out != 0;
+
+                let Ok(serde_json::Value::Object(mut map)) =
+                    serde_json::from_str::<serde_json::Value>(&raw_json)
+                else {
+                    continue;
+                };
+
+                let link_title = map
+                    .get("link_title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let link_desc = map
+                    .get("link_desc")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let link_url = map
+                    .get("link_url")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+
+                if link_title.as_deref() == Some("sendBubbleMessage") {
+                    let (call_txt, is_video, dur_opt) =
+                        crate::history_sync::format_sync_v2_call_text(
+                            &text,
+                            None,
+                            None,
+                            link_desc.as_deref(),
+                            is_outgoing,
+                        );
+                    map.remove("link_title");
+                    map.remove("link_desc");
+                    map.insert("call_bubble".into(), serde_json::json!(true));
+                    map.insert("is_video".into(), serde_json::json!(is_video));
+                    if let Some(dur) = dur_opt {
+                        map.insert("duration".into(), serde_json::json!(dur));
+                    }
+                    updates.push((
+                        msg_id,
+                        call_txt,
+                        "chat.ecall".to_string(),
+                        serde_json::Value::Object(map).to_string(),
+                    ));
+                    continue;
+                }
+
+                if let Some(url) = link_url.as_deref().filter(|u| !u.is_empty()) {
+                    let lower_u = url.to_ascii_lowercase();
+                    let is_photo_url = crate::chat::is_zalo_photo_cdn_url(url)
+                        || ((lower_u.contains("photo-stal")
+                            || lower_u.contains("photo-zmp")
+                            || lower_u.contains("zpc.zdn.vn"))
+                            && (lower_u.ends_with(".jpg")
+                                || lower_u.ends_with(".jpeg")
+                                || lower_u.ends_with(".png")
+                                || lower_u.ends_with(".webp")
+                                || lower_u.ends_with(".gif")));
+                    if text == "[Tin nhắn thoại]" && is_photo_url {
+                        map.insert("link_src".into(), serde_json::json!("Hình ảnh Zalo"));
+                        updates.push((
+                            msg_id,
+                            "[Hình ảnh]".to_string(),
+                            "chat.photo".to_string(),
+                            serde_json::Value::Object(map).to_string(),
+                        ));
+                        continue;
+                    }
+                    if text.trim().is_empty() {
+                        if is_photo_url {
+                            map.insert("link_src".into(), serde_json::json!("Hình ảnh Zalo"));
+                            updates.push((
+                                msg_id,
+                                "[Hình ảnh]".to_string(),
+                                "chat.photo".to_string(),
+                                serde_json::Value::Object(map).to_string(),
+                            ));
+                        } else if lower_u.starts_with("http://") || lower_u.starts_with("https://")
+                        {
+                            updates.push((
+                                msg_id,
+                                url.to_string(),
+                                "chat.recommended".to_string(),
+                                serde_json::Value::Object(map).to_string(),
+                            ));
+                        }
+                        continue;
+                    }
+                }
+
+                if msg_type == "chat.undo" {
+                    if let (Some(stripped), Some(lt)) =
+                        (text.strip_prefix("[Đã thu hồi] "), link_title.as_deref())
+                    {
+                        if stripped.trim() == lt.trim()
+                            && (lt.contains("đã ghim tin nhắn")
+                                || lt.contains("đã bỏ ghim")
+                                || lt.contains("đã tham gia nhóm")
+                                || lt.contains("đã thêm ")
+                                || lt.contains("đã đổi tên nhóm"))
+                        {
+                            map.remove("link_title");
+                            let new_raw = if map.is_empty() {
+                                String::new()
+                            } else {
+                                serde_json::Value::Object(map).to_string()
+                            };
+                            updates.push((
+                                msg_id,
+                                lt.trim().to_string(),
+                                "chat.system".to_string(),
+                                new_raw,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !updates.is_empty() {
+            let tx = conn.unchecked_transaction()?;
+            {
+                let mut upd_stmt = tx.prepare(
+                    "UPDATE messages SET text = ?2, msg_type = ?3, raw_json = ?4 WHERE msg_id = ?1",
+                )?;
+                for (mid, new_text, new_type, new_raw) in updates {
+                    let _ = upd_stmt.execute(params![mid, new_text, new_type, new_raw]);
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(())
     }
 
     /// Thêm cột vanish / bảng `thread_vanish` cho DB cũ (pre-vanish slice).
@@ -422,7 +595,23 @@ impl MessageStore {
                 msg TEXT NOT NULL DEFAULT '',
                 ts INTEGER NOT NULL DEFAULT 0
             );
-            CREATE INDEX IF NOT EXISTS idx_thread_script_logs_thread ON thread_script_logs(thread_id, id);",
+            CREATE TABLE IF NOT EXISTS bridge_files (
+                msg_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL DEFAULT '',
+                path TEXT NOT NULL DEFAULT '',
+                tg_file_id TEXT NOT NULL DEFAULT '',
+                zalo_url TEXT NOT NULL DEFAULT '',
+                bytes INTEGER NOT NULL DEFAULT 0,
+                offset INTEGER NOT NULL DEFAULT 0,
+                done INTEGER NOT NULL DEFAULT 0,
+                last_access INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_bridge_files_thread ON bridge_files(thread_id);
+            CREATE TABLE IF NOT EXISTS bridge_sent (
+                tg_key TEXT PRIMARY KEY,
+                zalo_msg_id TEXT NOT NULL DEFAULT '',
+                ts INTEGER NOT NULL DEFAULT 0
+            );",
         )?;
         Ok(())
     }
@@ -680,6 +869,70 @@ impl MessageStore {
     }
 
     /// Liệt kê key KV của 1 thread (A–Z).
+    /// Bridge file mapping upsert.
+    pub fn bridge_file_put(&mut self, f: &crate::tg_bridge::BridgeFile) -> Result<()> {
+        let _ = Self::ensure_script_schema(&self.conn);
+        self.conn.execute(
+            "INSERT INTO bridge_files (msg_id, thread_id, path, tg_file_id, zalo_url, bytes, offset, done, last_access)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(msg_id) DO UPDATE SET path = excluded.path, tg_file_id = excluded.tg_file_id,
+                 zalo_url = excluded.zalo_url, bytes = excluded.bytes, offset = excluded.offset,
+                 done = excluded.done, last_access = excluded.last_access",
+            rusqlite::params![f.msg_id, f.thread_id, f.path, f.tg_file_id, f.zalo_url, f.bytes as i64, f.offset as i64, if f.done {1} else {0}, f.last_access],
+        )?;
+        Ok(())
+    }
+
+    /// All bridge files (for quota LRU).
+    pub fn bridge_files_all(&self) -> Result<Vec<crate::tg_bridge::BridgeFile>> {
+        let _ = Self::ensure_script_schema(&self.conn);
+        let mut stmt = self.conn.prepare(
+            "SELECT msg_id, thread_id, path, tg_file_id, zalo_url, bytes, offset, done, last_access FROM bridge_files",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::tg_bridge::BridgeFile {
+                msg_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                path: row.get(2)?,
+                tg_file_id: row.get(3)?,
+                zalo_url: row.get(4)?,
+                bytes: row.get::<_, i64>(5).unwrap_or(0) as u64,
+                offset: row.get::<_, i64>(6).unwrap_or(0) as u64,
+                done: row.get::<_, i64>(7).unwrap_or(0) != 0,
+                last_access: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::from)
+    }
+
+    /// Mark a TG message as bridge-originated (echo-guard).
+    pub fn bridge_sent_put(&mut self, tg_key: &str, zalo_msg_id: &str) -> Result<()> {
+        let _ = Self::ensure_script_schema(&self.conn);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO bridge_sent (tg_key, zalo_msg_id, ts) VALUES (?1, ?2, ?3)",
+            rusqlite::params![tg_key, zalo_msg_id, crate::login::unix_now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn bridge_sent_has(&self, tg_key: &str) -> bool {
+        let _ = Self::ensure_script_schema(&self.conn);
+        self.conn
+            .query_row(
+                "SELECT 1 FROM bridge_sent WHERE tg_key = ?1",
+                rusqlite::params![tg_key],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    /// Delete one bridge mapping (file itself removed by caller).
+    pub fn bridge_file_delete(&mut self, msg_id: &str) -> Result<()> {
+        let _ = Self::ensure_script_schema(&self.conn);
+        self.conn.execute("DELETE FROM bridge_files WHERE msg_id = ?1", rusqlite::params![msg_id])?;
+        Ok(())
+    }
+
     pub fn thread_kv_list(&self, thread_id: &str) -> Vec<String> {
         if thread_id.is_empty() { return Vec::new(); }
         let mut stmt = match self.conn.prepare(
@@ -1164,20 +1417,77 @@ impl MessageStore {
                 msg.raw_json,
             ],
         )?;
-        let is_tombstone = msg.raw_json.is_empty()
-            && msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
-        if rows == 0 && (!msg.raw_json.is_empty() || is_tombstone) {
-            let raw = if is_tombstone {
-                // Non-empty tombstone marker so the row is never skipped or
-                // re-hydrated as original content; hydrate ignores `vanished`.
-                VANISH_TOMBSTONE_JSON
-            } else {
-                msg.raw_json.as_str()
-            };
-            let _ = self.conn.execute(
-                "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
-                params![raw, msg.msg_type, msg.msg_id, msg.text],
-            );
+        let trimmed = msg.text.trim();
+        let is_tombstone =
+            msg.raw_json.is_empty() && trimmed == crate::chat::VANISH_EXPIRED_TEXT;
+        let is_incoming_undo = !is_tombstone
+            && (trimmed == "[Tin nhắn đã thu hồi]"
+                || msg.msg_type == "chat.undo"
+                || msg.msg_type == "undo");
+        if rows == 0 {
+            if is_tombstone {
+                let _ = self.conn.execute(
+                    "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
+                    params![
+                        VANISH_TOMBSTONE_JSON,
+                        msg.msg_type,
+                        msg.msg_id,
+                        msg.text
+                    ],
+                );
+            } else if is_incoming_undo {
+                // Anti-recall: never overwrite saved original text, raw_json, or msg_type
+                // with a `[Tin nhắn đã thu hồi]` / `chat.undo` payload; mark existing content.
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET text = '[Đã thu hồi] ' || text
+                     WHERE msg_id = ?1
+                       AND TRIM(text) != ''
+                       AND TRIM(text) != '[Tin nhắn đã thu hồi]'
+                       AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.msg_id],
+                );
+            } else if !msg.raw_json.is_empty() {
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET raw_json = ?1,
+                         msg_type = ?2,
+                         text = CASE
+                             WHEN TRIM(?4) LIKE '[Đã thu hồi]%' THEN
+                                 CASE
+                                     WHEN LENGTH(TRIM(?4)) > 14 THEN ?4
+                                     WHEN TRIM(text) != '' AND TRIM(text) != '[Tin nhắn đã thu hồi]' AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                                         THEN '[Đã thu hồi] ' || text
+                                     ELSE text
+                                 END
+                             WHEN TRIM(text) = '[Tin nhắn đã thu hồi]' AND TRIM(?4) != ''
+                                 THEN '[Đã thu hồi] ' || ?4
+                             WHEN TRIM(text) LIKE '[Đã thu hồi]%' AND LENGTH(TRIM(text)) > 14
+                                 THEN text
+                             WHEN TRIM(text) LIKE '[Đã thu hồi]%' AND TRIM(?4) != ''
+                                 THEN '[Đã thu hồi] ' || ?4
+                             WHEN TRIM(?4) != '' THEN ?4
+                             ELSE text
+                         END
+                     WHERE msg_id = ?3
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.raw_json, msg.msg_type, msg.msg_id, msg.text],
+                );
+            } else if trimmed.starts_with("[Đã thu hồi]") {
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET text = CASE
+                         WHEN LENGTH(TRIM(?2)) > 14 THEN ?2
+                         WHEN TRIM(text) != '' AND TRIM(text) != '[Tin nhắn đã thu hồi]' AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                             THEN '[Đã thu hồi] ' || text
+                         ELSE text
+                     END
+                     WHERE msg_id = ?1
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.msg_id, msg.text],
+                );
+            }
         }
         Ok(rows > 0)
     }
@@ -1720,6 +2030,7 @@ impl MessageStore {
                 let mut link_desc = None;
                 let mut link_thumb = None;
                 let mut link_src = None;
+                let mut media_group: Option<crate::chat::MediaGroupLayout> = None;
                 if !sm.raw_json.is_empty() {
                     // Expiry tombstone (`{"vanished":true}`): authoritative —
                     // keep the tombstone text, restore NO metadata, and never
@@ -1850,6 +2161,53 @@ impl MessageStore {
                             .get("link_src")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
+                        media_group = val
+                            .get("media_group")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok());
+                    }
+                }
+                let is_video_url = link_url.as_deref().is_some_and(|u| {
+                    let l = u.to_ascii_lowercase();
+                    l.contains("video-")
+                        || l.contains(".dlmd.me")
+                        || l.contains("/video/")
+                        || l.ends_with(".mp4")
+                });
+                let mut final_text = sm.text;
+                let parsed_kind = crate::message_model::MessageKind::from_wire_name(&sm.msg_type);
+                let mut final_kind = if parsed_kind == crate::message_model::MessageKind::Unknown {
+                    crate::message_model::MessageKind::Text
+                } else {
+                    parsed_kind
+                };
+                if sm.msg_type == "chat.ecall"
+                    || link_title.as_deref() == Some("sendBubbleMessage")
+                {
+                    if !final_text.trim_start().starts_with("📞")
+                        && !final_text.trim_start().starts_with("📹")
+                        && !final_text.trim_start().starts_with("Cuộc gọi")
+                    {
+                        let (call_txt, _, _) = crate::history_sync::format_sync_v2_call_text(
+                            &final_text,
+                            None,
+                            None,
+                            link_desc.as_deref(),
+                            sm.is_outgoing,
+                        );
+                        final_text = call_txt;
+                    }
+                    if link_title.as_deref() == Some("sendBubbleMessage") {
+                        link_title = None;
+                        link_desc = None;
+                    }
+                } else if is_video_url || link_src.as_deref() == Some("Video Zalo") {
+                    link_src = Some("Video Zalo".to_string());
+                    link_title = Some("Video".to_string());
+                    final_kind = crate::message_model::MessageKind::Video;
+                    if final_text.starts_with("[Tập tin]")
+                        || (final_text.len() > 20 && !final_text.contains(' '))
+                    {
+                        final_text = "[Video]".to_string();
                     }
                 }
                 let cm = ChatMessage {
@@ -1859,7 +2217,7 @@ impl MessageStore {
                     } else {
                         sm.sender_id
                     },
-                    text: sm.text,
+                    text: final_text,
                     time,
                     is_outgoing: sm.is_outgoing,
                     ts: sm.ts,
@@ -1868,6 +2226,7 @@ impl MessageStore {
                     } else {
                         crate::message_model::DeliveryState::Unknown
                     },
+                    kind: final_kind,
                     sticker_id,
                     sticker_cate_id,
                     sticker_type,
@@ -1884,6 +2243,7 @@ impl MessageStore {
                     link_desc,
                     link_thumb,
                     link_src,
+                    media_group,
 
                     ..Default::default()
                 };
@@ -1896,6 +2256,32 @@ impl MessageStore {
                                     && cm.ts != 0
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
+                    if existing.link_title.as_deref() == Some("sendBubbleMessage") {
+                        existing.link_title = None;
+                        existing.link_desc = None;
+                    }
+                    let stale_sync_v2_cache = !cm.text.is_empty()
+                        && (existing.text.trim().is_empty()
+                            || (crate::history_sync::is_raw_call_duration_text(&existing.text)
+                                && (cm.text.starts_with("📞") || cm.text.starts_with("📹")))
+                            || (existing.text == "[Tin nhắn thoại]" && cm.text == "[Hình ảnh]")
+                            || (existing.text.starts_with("[Đã thu hồi] ")
+                                && cm.kind == crate::message_model::MessageKind::System));
+                    if stale_sync_v2_cache {
+                        existing.text = cm.text.clone();
+                        existing.kind = cm.kind;
+                        existing.link_src = cm.link_src.clone();
+                        existing.link_title = cm.link_title.clone();
+                        existing.link_desc = cm.link_desc.clone();
+                    } else {
+                        crate::chat::apply_recall_merge(existing, &cm.text);
+                    }
+                    if existing.kind == crate::message_model::MessageKind::Text
+                        && cm.kind != crate::message_model::MessageKind::Text
+                        && cm.kind != crate::message_model::MessageKind::Recall
+                    {
+                        existing.kind = cm.kind;
+                    }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
                         existing.sticker_cate_id = cm.sticker_cate_id;
@@ -1912,7 +2298,10 @@ impl MessageStore {
                         existing.link_desc = cm.link_desc;
                         existing.link_thumb = cm.link_thumb;
                         existing.link_src = cm.link_src;
-                        if !cm.text.is_empty() {
+                        if !cm.text.is_empty()
+                            && !existing.text.starts_with("[Đã thu hồi]")
+                            && existing.text.trim() != "[Tin nhắn đã thu hồi]"
+                        {
                             existing.text = cm.text;
                         }
                     }
@@ -2008,6 +2397,9 @@ impl From<&ChatMessage> for StoredMessage {
         if let Some(lsrc) = &m.link_src {
             meta.insert("link_src".into(), serde_json::json!(lsrc));
         }
+        if let Some(group) = &m.media_group {
+            meta.insert("media_group".into(), serde_json::json!(group));
+        }
         let raw_json = if meta.is_empty() {
             String::new()
         } else {
@@ -2090,15 +2482,39 @@ pub fn merge_stored_read_point(unread: &mut crate::unread::UnreadState, stored: 
 
 /// Persist threads and their messages to SQLite store, returning the count of newly inserted messages.
 pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+    persist_threads_in_transaction(store, threads, true)
+}
+
+/// Persist received messages without touching per-thread user state.
+///
+/// Used by listeners of inactive accounts, whose thread list is a stale snapshot: the
+/// stored vanish settings and read-point are kept, only names, `last_ts` and messages
+/// are merged. Returns the count of newly inserted messages.
+///
+/// # Errors
+/// Returns an error when the transaction or any row write fails.
+pub fn persist_received_messages(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+    persist_threads_in_transaction(store, threads, false)
+}
+
+fn persist_threads_in_transaction(
+    store: &mut MessageStore,
+    threads: &[Thread],
+    with_user_state: bool,
+) -> Result<usize> {
     // One transaction for the whole snapshot: in autocommit every row was its own fsync.
     store.conn.execute_batch("BEGIN")?;
-    let res = persist_threads_inner(store, threads);
+    let res = persist_threads_inner(store, threads, with_user_state);
     store
         .conn
         .execute_batch(if res.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
     res
 }
-fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+fn persist_threads_inner(
+    store: &mut MessageStore,
+    threads: &[Thread],
+    with_user_state: bool,
+) -> Result<usize> {
     let mut new_count = 0;
     for t in threads {
         let last_ts = t.messages.iter().map(|m| m.ts).max().unwrap_or(0);
@@ -2109,11 +2525,16 @@ fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result
             last_ts,
             vanish_duration_sec: t.vanish.as_ref().map(|v| v.duration_sec).unwrap_or(0),
             vanish_started_at_sec: t.vanish.as_ref().map(|v| v.started_at_sec).unwrap_or(0),
-            last_read_msg_id: t.unread.last_seen_id.clone().unwrap_or_default(),
+            // An empty read-point keeps the stored one (see the upsert's CASE).
+            last_read_msg_id: if with_user_state {
+                t.unread.last_seen_id.clone().unwrap_or_default()
+            } else {
+                String::new()
+            },
         };
         // RAM snapshot carries the user's vanish intent (incl. explicit disable),
         // unlike history-sync pages which must preserve stored vanish (#376).
-        store.upsert_thread_inner(&st, true, t.presentation.contact_name)?;
+        store.upsert_thread_inner(&st, with_user_state, t.presentation.contact_name)?;
         for m in t.messages.iter().filter(|m| m.text != "sendBubbleMessage") {
             let mut sm = StoredMessage::from(m);
             sm.thread_id = t.id.clone();
@@ -3449,6 +3870,123 @@ mod tests {
                 || expired.raw_json.trim() == crate::store::VANISH_TOMBSTONE_JSON
         );
     }
+
+    #[test]
+    fn anti_recall_preserves_original_text_and_media_on_undo_and_hydrate() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let photo_meta = serde_json::json!({
+            "link_url": "https://f60-zpg-r.zdn.vn/photo.jpg",
+            "link_thumb": "https://f60-zpg-r.zdn.vn/thumb.jpg",
+            "link_src": "Hình ảnh Zalo"
+        })
+        .to_string();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_photo".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Hình ảnh] Ảnh hợp đồng".into(),
+                msg_type: "chat.photo".into(),
+                ts: 1000,
+                is_outgoing: false,
+                raw_json: photo_meta.clone(),
+            })
+            .unwrap();
+        // Server sync / undo payload with non-empty metadata must not erase text or link_url.
+        assert!(!store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_photo".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Tin nhắn đã thu hồi]".into(),
+                msg_type: "chat.undo".into(),
+                ts: 2000,
+                is_outgoing: false,
+                raw_json: "{\"undo\":true}".into(),
+            })
+            .unwrap());
+        // Reverse order: recall stub saved first, then original sticker sync arrives later.
+        let sticker_meta = serde_json::json!({
+            "stickerId": 18009,
+            "cateId": 10130,
+            "type": 7
+        })
+        .to_string();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_stk".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Tin nhắn đã thu hồi]".into(),
+                msg_type: "chat.undo".into(),
+                ts: 3000,
+                is_outgoing: false,
+                raw_json: String::new(),
+            })
+            .unwrap();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_stk".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Nhãn dán]".into(),
+                msg_type: "chat.sticker".into(),
+                ts: 3000,
+                is_outgoing: false,
+                raw_json: sticker_meta,
+            })
+            .unwrap();
+
+        let rows = store.messages_for("t1", 10).unwrap();
+        let p = rows.iter().find(|r| r.msg_id == "m_photo").unwrap();
+        assert_eq!(p.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
+        assert_eq!(p.raw_json, photo_meta);
+        let s = rows.iter().find(|r| r.msg_id == "m_stk").unwrap();
+        assert_eq!(s.text, "[Đã thu hồi] [Nhãn dán]");
+
+        // Server snapshot in RAM has bare "[Tin nhắn đã thu hồi]" stub; hydrate must restore content + media.
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "Alice".into(),
+                is_group: false,
+                last_ts: 3000,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        let mut threads = vec![Thread {
+            id: "t1".into(),
+            name: "Alice".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "m_photo".into(),
+                    text: "[Tin nhắn đã thu hồi]".into(),
+                    ts: 1000,
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "m_stk".into(),
+                    text: "[Tin nhắn đã thu hồi]".into(),
+                    ts: 3000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        store.hydrate_threads(&mut threads, 10).unwrap();
+        let hp = threads[0].messages.iter().find(|m| m.id == "m_photo").unwrap();
+        assert_eq!(hp.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
+        assert_eq!(hp.link_url.as_deref(), Some("https://f60-zpg-r.zdn.vn/photo.jpg"));
+        let hs = threads[0].messages.iter().find(|m| m.id == "m_stk").unwrap();
+        assert_eq!(hs.text, "[Đã thu hồi] [Nhãn dán]");
+        assert_eq!(hs.sticker_id, Some(18009));
+    }
     #[test]
     fn test_persist_threads_and_upsert_thread() {
         let mut store = MessageStore::open(":memory:").unwrap();
@@ -3781,5 +4319,134 @@ mod tests {
         assert_eq!(map.get("u1").map(|x| x.0.as_str()), Some("Biệt danh 1"));
         assert_eq!(map.get("u2").map(|x| x.0.as_str()), Some("123"));
         assert_eq!(map.get("u3").map(|x| x.0.as_str()), Some("Tên Gốc 3"));
+    }
+
+    #[test]
+    fn reader_is_not_blocked_while_another_connection_holds_a_write_transaction() {
+        // A file is required: the lock under test only exists between connections.
+        let dir = std::env::temp_dir().join(format!(
+            "ctdozlite-wal-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        let path = path.to_str().unwrap();
+
+        let writer = MessageStore::open(path).unwrap();
+        writer.conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        writer
+            .conn
+            .execute(
+                "INSERT INTO threads (thread_id, name, is_group, last_ts) VALUES ('thread-1', 'T', 0, 1)",
+                [],
+            )
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let reader = MessageStore::open(path).unwrap();
+        assert_eq!(reader.count_messages("thread-1").unwrap(), 0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "reader waited {:?} behind the writer",
+            started.elapsed()
+        );
+
+        writer.conn.execute_batch("COMMIT").unwrap();
+        drop(reader);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_v2_heals_sync_v2_call_and_photo_rows_and_refreshes_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "ctdozlite-mig2-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path_buf = dir.join("history.db");
+        let path = path_buf.to_str().unwrap();
+
+        {
+            let mut st = MessageStore::open(path).unwrap();
+            st.upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "Đỗ Thành".into(),
+                is_group: false,
+                last_ts: 1000,
+                ..Default::default()
+            })
+            .unwrap();
+            st.upsert_message(&StoredMessage {
+                msg_id: "call_1".into(),
+                thread_id: "t1".into(),
+                sender_id: "t1".into(),
+                sender_name: "Đỗ Thành".into(),
+                text: "0:18".into(),
+                msg_type: "chat.text".into(),
+                ts: 1000,
+                is_outgoing: false,
+                raw_json: r#"{"link_desc":"Cuộc gọi","link_title":"sendBubbleMessage"}"#.into(),
+            })
+            .unwrap();
+            st.upsert_message(&StoredMessage {
+                msg_id: "photo_1".into(),
+                thread_id: "t1".into(),
+                sender_id: "t1".into(),
+                sender_name: "Đỗ Thành".into(),
+                text: "[Tin nhắn thoại]".into(),
+                msg_type: "chat.voice".into(),
+                ts: 2000,
+                is_outgoing: false,
+                raw_json: r#"{"link_src":"Thoại Zalo","link_url":"https://photo-stal-27.zdn.vn/no/abc.jpg"}"#.into(),
+            })
+            .unwrap();
+            // Simulate pre-v2 database
+            st.conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+        }
+
+        // Reopen triggers v2 self-heal migration
+        let st = MessageStore::open(path).unwrap();
+        let mut threads = vec![Thread {
+            id: "t1".into(),
+            name: "Đỗ Thành".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "call_1".into(),
+                    text: "0:18".into(),
+                    is_outgoing: false,
+                    ts: 1000,
+                    link_title: Some("sendBubbleMessage".into()),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "photo_1".into(),
+                    text: "[Tin nhắn thoại]".into(),
+                    is_outgoing: false,
+                    ts: 2000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        st.hydrate_threads(&mut threads, 50).unwrap();
+        assert_eq!(threads[0].messages[0].text, "📞 Cuộc gọi thoại đến (18s)");
+        assert!(threads[0].messages[0].link_title.is_none());
+        assert_eq!(threads[0].messages[1].text, "[Hình ảnh]");
+        assert_eq!(
+            threads[0].messages[1].link_src.as_deref(),
+            Some("Hình ảnh Zalo")
+        );
+
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

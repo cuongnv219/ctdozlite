@@ -10,6 +10,306 @@ pub(super) static KNOWN_THREADS: std::sync::Mutex<Vec<(String, String, bool)>> =
 pub(super) static VANISH_THREADS: std::sync::Mutex<Vec<String>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Xử lý tuần tự các control event đồng bộ điện thoại (từ WebSocket hoặc `lp_ctl`).
+/// Sắp xếp `SyncV2Batch { batch_type: 2 }` trước `batch_type: 1`, khoá bằng
+/// `sync_v2_batch_lock()`, chống trùng URL giữa WS & `lp_ctl`, và chờ tối đa 8s
+/// nếu `batch_type: 1` tới trước frame metadata một nhịp.
+pub(super) async fn handle_mobile_sync_controls(
+    mut events: Vec<crate::chat::MobileSyncControlEvent>,
+    s: Session,
+    gui_tx: GuiTx,
+    ctx: egui::Context,
+    trigger_sync_on_login: bool,
+) {
+    if events.is_empty() {
+        return;
+    }
+    // Meta (batch_type == 2) luôn chạy trước message batch (batch_type == 1)
+    // nếu cùng nằm trong 1 payload.
+    events.sort_by_key(|ev| match ev {
+        crate::chat::MobileSyncControlEvent::SyncV2Batch { batch_type: 2, .. } => 0u8,
+        crate::chat::MobileSyncControlEvent::SyncV2Batch { batch_type: 1, .. } => 2u8,
+        _ => 1u8,
+    });
+
+    for sync_ev in events {
+        match sync_ev {
+            crate::chat::MobileSyncControlEvent::TransferAfterLogin { temp_key } => {
+                crate::history_sync::set_latest_mobile_temp_key(&temp_key);
+                if trigger_sync_on_login {
+                    let known = crate::chat::load_threads_cache();
+                    if let Some(wtx) = WORKER_TX.get() {
+                        let _ = wtx.send(WorkerCmd::SyncPhoneMessages {
+                            threads: known,
+                            send_phone_prompt: false,
+                        });
+                    }
+                }
+            }
+            crate::chat::MobileSyncControlEvent::WaitingConfirmOnPhone { sync_id } => {
+                if !sync_id.is_empty()
+                    && crate::history_sync::active_v2_sync_id().as_deref()
+                        != Some(sync_id.as_str())
+                {
+                    crate::logger::log_sync(&format!(
+                        "bỏ qua WaitingConfirmOnPhone session cũ: sync={sync_id}"
+                    ));
+                    continue;
+                }
+                let note = "📲 Đang chờ bạn bấm 'Đồng bộ' trên màn hình Zalo điện thoại…".to_string();
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::MobileBusyRestoring => {
+                let note = if trigger_sync_on_login {
+                    "⚠️ Điện thoại đang bận sao lưu/khôi phục phiên trước — hãy mở Zalo trên điện thoại xác nhận hoặc thử lại sau ít phút".to_string()
+                } else {
+                    "⏳ Điện thoại đang nén và chuẩn bị dữ liệu tin nhắn…".to_string()
+                };
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::UserConfirmed => {
+                let note = "📲 Điện thoại đã xác nhận đồng bộ — đang nén và đóng gói tin nhắn…".to_string();
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::UserRejected => {
+                let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::BackupReady {
+                url,
+                file_name,
+                encrypted_key,
+                ..
+            } => {
+                let status_dl = format!("📥 Đang tải và giải mã gói đồng bộ tin nhắn ({file_name})…");
+                crate::history_sync::set_last_mobile_sync_status(Some(status_dl.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(status_dl));
+                ctx.request_repaint();
+
+                match crate::history_sync::import_mobile_backup_container(&s, &url, &encrypted_key).await {
+                    Ok(count) => {
+                        let note = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
+                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                        let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                        let updated = crate::chat::load_threads_cache();
+                        let _ = gui_tx.send(GuiEvent::ThreadsUpdated(updated));
+                    }
+                    Err(e) => {
+                        let err_note = format!("⚠️ Không thể giải mã gói đồng bộ ({file_name}): {e}");
+                        crate::history_sync::set_last_mobile_sync_status(Some(err_note.clone()));
+                        let _ = gui_tx.send(GuiEvent::StatusUpdate(err_note));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::SyncV2Batch {
+                url,
+                sync_id,
+                batch_type,
+                is_last,
+            } => {
+                if crate::history_sync::active_v2_sync_id().as_deref() != Some(sync_id.as_str()) {
+                    crate::logger::log_sync(&format!(
+                        "bỏ qua + dọn 591 batch cũ: sync={} type={}",
+                        sync_id, batch_type
+                    ));
+                    crate::socket::send_sync_ack_delete(
+                        &sync_id,
+                        crate::socket::SYNC_DISPOSE_OUTDATED,
+                    );
+                    continue;
+                }
+
+                if !crate::history_sync::mark_sync_v2_batch_seen(&sync_id, batch_type, &url) {
+                    crate::logger::log_sync(&format!(
+                        "bỏ qua batch trùng: sync={} type={}",
+                        sync_id, batch_type
+                    ));
+                    continue;
+                }
+
+                if batch_type == 1 && !crate::history_sync::has_sync_v2_session(&sync_id) {
+                    crate::logger::log_sync(&format!(
+                        "batch msg tới sớm: sync={}, chờ metadata tối đa 8s…",
+                        sync_id
+                    ));
+                    for _ in 0..32 {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        if crate::history_sync::has_sync_v2_session(&sync_id) {
+                            break;
+                        }
+                    }
+                }
+
+                let _guard = crate::history_sync::sync_v2_batch_lock().lock().await;
+                if batch_type == 2 {
+                    let note = "📥 Đang giải mã thông tin phiên đồng bộ từ iPhone…".to_string();
+                    crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                    let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                    ctx.request_repaint();
+                    crate::logger::log_sync(&format!("batch meta về: sync={}", sync_id));
+                    match crate::history_sync::import_sync_v2_meta(&s, &url).await {
+                        Ok(meta) => {
+                            crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
+                            crate::logger::log_sync(&format!(
+                                "meta OK: sync={} session={}",
+                                sync_id, meta.session_id
+                            ));
+                            let ok_note = "📲 Đã giải mã thông tin phiên từ iPhone — đang chờ gói tin nhắn…".to_string();
+                            crate::history_sync::set_last_mobile_sync_status(Some(ok_note.clone()));
+                            let _ = gui_tx.send(GuiEvent::StatusUpdate(ok_note));
+                        }
+                        Err(e) => {
+                            let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
+                            crate::logger::log_sync(&format!("meta FAIL: sync={} err={}", sync_id, e));
+                            crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                            let _ = gui_tx.send(GuiEvent::StatusUpdate(err));
+                        }
+                    }
+                    ctx.request_repaint();
+                } else if batch_type == 1 {
+                    if !crate::history_sync::has_sync_v2_session(&sync_id) {
+                        let err = format!(
+                            "⚠️ Gói Sync v2 ({sync_id}) tới trước metadata — bỏ qua, chờ batch meta"
+                        );
+                        crate::logger::log_sync(&format!(
+                            "batch msg FAIL (no meta): sync={}",
+                            sync_id
+                        ));
+                        crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                        let _ = gui_tx.send(GuiEvent::StatusUpdate(err));
+                        ctx.request_repaint();
+                        continue;
+                    }
+                    let note = "📥 Đang tải và giải mã gói tin nhắn từ iPhone…".to_string();
+                    crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                    let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                    ctx.request_repaint();
+
+                    crate::logger::log_sync(&format!("batch msg về: sync={} last={}", sync_id, is_last));
+                    match crate::history_sync::import_sync_v2_messages_inner(
+                        &s,
+                        &url,
+                        Some(&sync_id),
+                        is_last,
+                    )
+                    .await
+                    {
+                        Ok(count) => {
+                            let total = crate::history_sync::add_sync_v2_imported_count(count);
+                            crate::logger::log_sync(&format!(
+                                "msg OK: sync={} count={} total={} last={}",
+                                sync_id, count, total, is_last
+                            ));
+                            let fin = if is_last {
+                                format!(
+                                    "🎉 Đã giải mã & đồng bộ thành công {total} tin nhắn từ điện thoại vào ứng dụng!"
+                                )
+                            } else {
+                                format!(
+                                    "📥 Đã giải mã {total} tin nhắn (+{count} tin) — đang chờ gói tin tiếp theo từ iPhone…"
+                                )
+                            };
+                            crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
+                            let _ = gui_tx.send(GuiEvent::StatusUpdate(fin));
+                            let updated = crate::chat::load_threads_cache();
+                            let _ = gui_tx.send(GuiEvent::ThreadsUpdated(updated));
+                        }
+                        Err(e) => {
+                            crate::logger::log_sync(&format!("msg FAIL: sync={} err={}", sync_id, e));
+                            let err = format!("⚠️ Lỗi giải mã tin nhắn Sync v2 ({sync_id}): {e}");
+                            crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                            let _ = gui_tx.send(GuiEvent::StatusUpdate(err));
+                        }
+                    }
+                    ctx.request_repaint();
+                } else {
+                    crate::logger::log_sync(&format!(
+                        "batch unknown type: sync={} type={} last={}",
+                        sync_id, batch_type, is_last
+                    ));
+                }
+            }
+            crate::chat::MobileSyncControlEvent::SyncV2EmptyDone { sync_id } => {
+                if !sync_id.is_empty()
+                    && crate::history_sync::active_v2_sync_id().as_deref() != Some(sync_id.as_str())
+                {
+                    continue;
+                }
+                crate::logger::log_sync(&format!(
+                    "sync v2 empty done (isLast=1, no url): sync={sync_id}"
+                ));
+                let fin = "🎉 Đã đồng bộ thành công (không có tin nhắn mới cần tải thêm từ điện thoại)!".to_string();
+                crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(fin));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::SyncV2MobileIdle { sync_id } => {
+                if !sync_id.is_empty()
+                    && crate::history_sync::active_v2_sync_id().as_deref() != Some(sync_id.as_str())
+                {
+                    continue;
+                }
+                let woke = if !sync_id.is_empty() {
+                    crate::socket::send_mobile_wakeup(&sync_id)
+                } else {
+                    false
+                };
+                crate::logger::log_sync(&format!(
+                    "phone idle (status=2): sync={sync_id} wakeup_592={woke}"
+                ));
+                let note = "📱 Zalo trên iPhone đang tạm nghỉ (nền) — hãy giữ màn hình Zalo trên iPhone mở để tiếp tục gửi tin nhắn…".to_string();
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::SyncV2Error {
+                sync_id,
+                err,
+                message,
+                is_last,
+            } => {
+                if !sync_id.is_empty()
+                    && crate::history_sync::active_v2_sync_id().as_deref() != Some(sync_id.as_str())
+                {
+                    crate::logger::log_sync(&format!(
+                        "bỏ qua SyncV2Error session cũ: sync={sync_id} err={err} last={is_last}"
+                    ));
+                    continue;
+                }
+                crate::logger::log_sync(&format!(
+                    "sync v2 error: sync={sync_id} err={err} last={is_last} msg={message}"
+                ));
+                let total = crate::history_sync::sync_v2_imported_count();
+                let note = if !is_last {
+                    // Cảnh báo cục bộ 1 phân vùng (vd OA `errorCode: 502`, `isLast: 0`):
+                    // không đặt chữ "Lỗi" để tiến trình đồng bộ tiếp tục chờ các batch thật phía sau.
+                    format!(
+                        "⏳ Điện thoại bỏ qua 1 phân vùng (mã {err}) — đang tiếp tục nhận các gói tin còn lại…"
+                    )
+                } else if total > 0 {
+                    format!(
+                        "🎉 Đã giải mã & đồng bộ thành công {total} tin nhắn từ điện thoại vào ứng dụng!"
+                    )
+                } else {
+                    format!("⚠️ Lỗi đồng bộ từ điện thoại (mã {err}): {message}")
+                };
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
+            }
+        }
+    }
+}
+
 pub enum WorkerCmd {
     /// Read OS authorization without prompting.
     ReadNotificationAuthorization {
@@ -88,12 +388,23 @@ pub enum WorkerCmd {
         sticker_type: u32,
         is_group: bool,
     },
-    PickAndSendAttachment {
+    /// Open a native picker and queue the chosen files in the composer.
+    PickAttachments {
+        mode: super::attachments::PickMode,
+    },
+    /// Decode previews for already-known paths (clipboard file list, drag-and-drop).
+    PrepareAttachments {
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// Upload and send queued files one after another. Still photos are moved together to
+    /// the first photo's position (see `attachments::album_send_order`) so they form one
+    /// album; everything else keeps its order. `caption` goes on the first photo, or, when
+    /// the queue has no photo, is sent as a text message after the files.
+    SendAttachments {
         to_id: String,
         is_group: bool,
-        images_only: bool,
+        paths: Vec<std::path::PathBuf>,
         caption: String,
-        preset_path: Option<std::path::PathBuf>,
         original_hd: bool,
     },
     TriggerScreenshot,
@@ -237,6 +548,11 @@ pub enum WorkerCmd {
         is_group: bool,
         last_cli_msg_id: String,
     },
+    /// Rời nhóm Zalo (endpoint `/api/group/leave`, cmd 11189)
+    LeaveGroup {
+        group_id: String,
+        silent: bool,
+    },
     FetchSocialProfile {
         target_uid: String,
     },
@@ -303,7 +619,7 @@ pub(super) fn resp_error_code(resp: &serde_json::Value) -> Option<i64> {
         .filter(|c| *c != 0)
 }
 
-/// Immediately decode any disk-cached sticker thumbnails (`stickers_cache/stk_{cid}_{sid}.png`)
+/// Immediately decode any disk-cached sticker thumbnails (`<media cache>/stk_{cid}_{sid}.png`)
 /// and push `GuiEvent::StickerImageReady` *before* sending sticker list metadata, returning any
 /// missing `(key, url, cache_path)` entries for concurrent network prefetching.
 pub(super) fn preload_disk_sticker_thumbnails(
@@ -311,8 +627,7 @@ pub(super) fn preload_disk_sticker_thumbnails(
     gui_tx: &GuiTx,
     limit: usize,
 ) -> Vec<(String, String, std::path::PathBuf)> {
-    let cache_dir = std::path::Path::new("stickers_cache");
-    let _ = std::fs::create_dir_all(cache_dir);
+    let cache_dir = crate::account_manager::ensure_media_cache_dir();
 
     let mut missing = Vec::new();
     for item in items.iter().take(limit) {
@@ -896,143 +1211,22 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 ctx_ws.request_repaint();
                                             }
 
-                                            for sync_ev in
-                                                crate::chat::extract_mobile_sync_controls(data_node)
-                                            {
-                                                match sync_ev {
-                                                    crate::chat::MobileSyncControlEvent::TransferAfterLogin {
-                                                        temp_key,
-                                                    } => {
-                                                        crate::history_sync::set_latest_mobile_temp_key(&temp_key);
-                                                        let known = crate::chat::load_threads_cache();
-                                                        if let Some(wtx) = WORKER_TX.get() {
-                                                            let _ = wtx.send(
-                                                                WorkerCmd::SyncPhoneMessages {
-                                                                    threads: known,
-                                                                    send_phone_prompt: false,
-                                                                },
-                                                            );
-                                                        }
-                                                    }
-                                                    crate::chat::MobileSyncControlEvent::WaitingConfirmOnPhone { .. } => {
-                                                        let note = "📲 Đang chờ bạn bấm 'Đồng bộ' trên màn hình Zalo điện thoại…".to_string();
-                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                        let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
-                                                        ctx_ws.request_repaint();
-                                                    }
-                                                    crate::chat::MobileSyncControlEvent::MobileBusyRestoring => {
-                                                        let note = "⚠️ Điện thoại đang bận sao lưu/khôi phục phiên trước — hãy mở Zalo trên điện thoại xác nhận hoặc thử lại sau ít phút".to_string();
-                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                        let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
-                                                        ctx_ws.request_repaint();
-                                                    }
-                                                    crate::chat::MobileSyncControlEvent::UserConfirmed => {
-                                                        let note = "📲 Điện thoại đã xác nhận đồng bộ — đang nén và đóng gói tin nhắn…".to_string();
-                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                        let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
-                                                        ctx_ws.request_repaint();
-                                                    }
-                                                    crate::chat::MobileSyncControlEvent::UserRejected => {
-                                                        let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
-                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                        let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
-                                                        ctx_ws.request_repaint();
-                                                    }
-                                                    crate::chat::MobileSyncControlEvent::BackupReady {
-                                                        url,
-                                                        file_name,
-                                                        encrypted_key,
-                                                        ..
-                                                    } => {
-                                                        let s_sync = s_snap.clone();
-                                                        let gui_tx_sync = gui_tx_ws.clone();
-                                                        let ctx_sync = ctx_ws.clone();
-                                                        tokio::spawn(async move {
-                                                            let status_dl = format!("📥 Đang tải và giải mã gói đồng bộ tin nhắn ({file_name})…");
-                                                            let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(status_dl));
-                                                            ctx_sync.request_repaint();
-
-                                                            match crate::history_sync::import_mobile_backup_container(&s_sync, &url, &encrypted_key).await {
-                                                                Ok(count) => {
-                                                                    let note = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
-                                                                    crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                                    let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
-                                                                    let updated = crate::chat::load_threads_cache();
-                                                                    let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
-                                                                }
-                                                                Err(e) => {
-                                                                    let err_note = format!("⚠️ Không thể giải mã gói đồng bộ ({file_name}): {e}");
-                                                                    let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err_note));
-                                                                }
-                                                            }
-                                                            ctx_sync.request_repaint();
-                                                        });
-                                                    }
-                                                    crate::chat::MobileSyncControlEvent::SyncV2Batch {
-                                                        url,
-                                                        sync_id,
-                                                        batch_type,
-                                                        is_last,
-                                                    } => {
-                                                        let s_sync = s_snap.clone();
-                                                        let gui_tx_sync = gui_tx_ws.clone();
-                                                        let ctx_sync = ctx_ws.clone();
-                                                        tokio::spawn(async move {
-                                                            if batch_type == 2 {
-                                                                let note = "📥 Đang giải mã thông tin phiên đồng bộ từ iPhone…".to_string();
-                                                                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                                let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
-                                                                ctx_sync.request_repaint();
-                                                                crate::logger::log_sync(&format!("batch meta về: sync={}", sync_id));
-                                                                match crate::history_sync::import_sync_v2_meta(&s_sync, &url).await {
-                                                                    Ok(meta) => {
-                                                                        crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
-                                                                        crate::logger::log_sync(&format!("meta OK: sync={} session={}", sync_id, meta.session_id));
-                                                                    }
-                                                                    Err(e) => {
-                                                                        let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
-                                                                        crate::logger::log_sync(&format!("meta FAIL: sync={} err={}", sync_id, e));
-                                                                        crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
-                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
-                                                                    }
-                                                                }
-                                                            } else if batch_type == 1 {
-                                                                // Chỉ giải mã khi sync_id này đã có metadata — tránh
-                                                                // dùng nhầm session của phiên cũ (#116).
-                                                                if !crate::history_sync::has_sync_v2_session(&sync_id) {
-                                                                    let err = format!("⚠️ Gói Sync v2 ({sync_id}) tới trước metadata — bỏ qua, chờ batch meta");
-                                                                    crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
-                                                                    let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
-                                                                    ctx_sync.request_repaint();
-                                                                    return;
-                                                                }
-                                                                let note = "📥 Đang tải và giải mã gói tin nhắn từ iPhone…".to_string();
-                                                                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                                let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
-                                                                ctx_sync.request_repaint();
-
-                                                                crate::logger::log_sync(&format!("batch msg về: sync={} last={}", sync_id, is_last));
-                                                                match crate::history_sync::import_sync_v2_messages_inner(&s_sync, &url, Some(&sync_id), is_last).await {
-                                                                    Ok(count) => {
-                                                                        crate::logger::log_sync(&format!("msg OK: sync={} count={}", sync_id, count));
-                                                                        let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
-                                                                        crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
-                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
-                                                                        let updated = crate::chat::load_threads_cache();
-                                                                        let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
-                                                                    }
-                                                                    Err(e) => {
-                                                                        crate::logger::log_sync(&format!("msg FAIL: sync={} err={}", sync_id, e));
-                                                                        let err = format!("⚠️ Lỗi giải mã tin nhắn Sync v2 ({sync_id}): {e}");
-                                                                        crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
-                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
-                                                                    }
-                                                                }
-                                                                ctx_sync.request_repaint();
-                                                            }
-                                                        });
-                                                    }
-                                                }
+                                            let sync_evs =
+                                                crate::chat::extract_mobile_sync_controls(data_node);
+                                            if !sync_evs.is_empty() {
+                                                let s_sync = s_snap.clone();
+                                                let gui_tx_sync = gui_tx_ws.clone();
+                                                let ctx_sync = ctx_ws.clone();
+                                                tokio::spawn(async move {
+                                                    handle_mobile_sync_controls(
+                                                        sync_evs,
+                                                        s_sync,
+                                                        gui_tx_sync,
+                                                        ctx_sync,
+                                                        true,
+                                                    )
+                                                    .await;
+                                                });
                                             }
                                             if ev.is_chat_ish() {
                                                 let mut ws_threads = Vec::new();
@@ -1191,7 +1385,21 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                     });
                 }
 
+                // Inactive accounts keep a passive socket so they still notify (multi-account).
+                {
+                    let gui_tx_bg = gui_tx.clone();
+                    let ctx_bg = egui_ctx.clone();
+                    let sink: crate::background_accounts::ActivitySink =
+                        std::sync::Arc::new(move |activity| {
+                            // A closed UI channel means the app is shutting down.
+                            let _ = gui_tx_bg.send(GuiEvent::BackgroundAccountActivity(activity));
+                            ctx_bg.request_repaint();
+                        });
+                    tokio::spawn(crate::background_accounts::supervise(session.clone(), sink));
+                }
+
                 let mut current_qr_task: Option<tokio::task::JoinHandle<()>> = None;
+                let mut current_password_task: Option<tokio::task::JoinHandle<()>> = None;
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
@@ -1243,6 +1451,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             if let Some(task) = current_qr_task.take() {
                                 task.abort();
                             }
+                            if let Some(task) = current_password_task.take() {
+                                task.abort();
+                            }
                             let _ = std::fs::remove_file("session.json");
                             let _ = std::fs::remove_file("threads_cache.json");
                             // KHÔNG xóa zalo_history.db ở đây (#21, #103): history đã
@@ -1255,10 +1466,19 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 let mut ps = poll_state.lock().await;
                                 *ps = crate::chat::PollState::default();
                             }
+                            crate::account_manager::set_active_uin("");
                             let _ = gui_tx.send(GuiEvent::LoggedOut);
                             egui_ctx.request_repaint();
                         }
                         WorkerCmd::SwitchAccount { target_uin } => {
+                            // A login left pending by "add account" must not sign in
+                            // after the user went back to an existing account.
+                            if let Some(task) = current_qr_task.take() {
+                                task.abort();
+                            }
+                            if let Some(task) = current_password_task.take() {
+                                task.abort();
+                            }
                             let cur_uin = {
                                 let s = session.lock().await;
                                 s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default()
@@ -1277,6 +1497,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     if let Ok(store) = crate::store::MessageStore::open(&db_path) {
                                         let _ = store.hydrate_threads(&mut threads, 50);
                                     }
+                                    crate::account_manager::set_active_uin(&uin);
+                                    // An in-flight poll holds `poll_state` across a request;
+                                    // release the session first so it cannot stall behind us.
+                                    drop(s);
+                                    // Long-poll cursors belong to the previous account.
+                                    *poll_state.lock().await = crate::chat::PollState::default();
+                                    crate::background_accounts::request_reconcile();
                                     let _ = gui_tx.send(GuiEvent::AccountSwitched {
                                         uin,
                                         name,
@@ -1530,6 +1757,33 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 .await;
                             });
                         }
+                        WorkerCmd::LeaveGroup { group_id, silent } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let egui_ctx_clone = egui_ctx.clone();
+                            let gid = group_id.clone();
+                            tokio::spawn(async move {
+                                let s = session_clone.lock().await.clone();
+                                match crate::chat::leave_group(&s, &gid, silent).await {
+                                    Ok(_) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::GroupLeft {
+                                            group_id: gid.clone(),
+                                            success: true,
+                                            error: None,
+                                        });
+                                        egui_ctx_clone.request_repaint();
+                                    }
+                                    Err(e) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::GroupLeft {
+                                            group_id: gid.clone(),
+                                            success: false,
+                                            error: Some(e.to_string()),
+                                        });
+                                        egui_ctx_clone.request_repaint();
+                                    }
+                                }
+                            });
+                        }
                         WorkerCmd::RequestQr => {
                             if let Some(task) = current_qr_task.take() {
                                 task.abort();
@@ -1598,10 +1852,24 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     crate::qr::wait_for_scan(&s_snap, &q).await;
 
                                                 if let Ok(scanned) = scan_res {
-                                                    let name = scanned
+                                                    let scanned_name = scanned
                                                         .get("display_name")
+                                                        .or_else(|| scanned.get("displayName"))
                                                         .and_then(|v| v.as_str())
-                                                        .unwrap_or("Zalo User");
+                                                        .map(str::trim)
+                                                        .unwrap_or_default()
+                                                        .to_string();
+                                                    let scanned_avatar = scanned
+                                                        .get("avatar")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(str::trim)
+                                                        .unwrap_or_default()
+                                                        .to_string();
+                                                    let name = if scanned_name.is_empty() {
+                                                        "Zalo User"
+                                                    } else {
+                                                        scanned_name.as_str()
+                                                    };
                                                     let _ =
                                                         gui_tx_clone.send(GuiEvent::QrScanned {
                                                             name: name.to_string(),
@@ -1636,6 +1904,18 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             }
                                                         }
                                                         let _ = s.sync_profile_me().await;
+                                                        // The profile call can fail or omit the
+                                                        // name; the scan result already named the
+                                                        // account, so keep it rather than leaving
+                                                        // the account labelled by its id.
+                                                        if let Some(ref mut li) = s.login {
+                                                            if li.display_name.trim().is_empty() {
+                                                                li.display_name = scanned_name.clone();
+                                                            }
+                                                            if li.avatar.trim().is_empty() {
+                                                                li.avatar = scanned_avatar.clone();
+                                                            }
+                                                        }
                                                         let _ = s.save_to_file("session.json");
 
                                                         let uin = s
@@ -1643,6 +1923,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             .as_ref()
                                                             .map(|l| l.uin.clone())
                                                             .unwrap_or_default();
+                                                        // Best effort: list the account in the
+                                                        // account menu before its first switch.
+                                                        let _ = crate::account_manager::save_current_account_snapshot(&uin);
+                                                        crate::background_accounts::request_reconcile();
                                                         let dname = s
                                                             .login
                                                             .as_ref()
@@ -1836,6 +2120,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         }
                                     }
                                     if let Some((uid, name)) = s.sync_profile_me().await {
+                                        // `s` is a snapshot: copy every synced profile field
+                                        // back, or the avatar and phone never reach the
+                                        // saved session and the account stays unlabelled.
+                                        let synced = s.login.clone().unwrap_or_default();
                                         {
                                             let mut sl = session_clone.lock().await;
                                             if let Some(ref mut li) = sl.login {
@@ -1843,9 +2131,21 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 if !name.is_empty() {
                                                     li.display_name = name.clone();
                                                 }
+                                                if !synced.avatar.is_empty() {
+                                                    li.avatar = synced.avatar.clone();
+                                                }
+                                                if !synced.phone.is_empty() {
+                                                    li.phone = synced.phone.clone();
+                                                }
                                             }
                                             let _ = sl.save_to_file("session.json");
                                         }
+                                        // An empty name must not blank the one already shown.
+                                        let name = if name.is_empty() {
+                                            synced.display_name.clone()
+                                        } else {
+                                            name
+                                        };
                                         let u_ava = s
                                             .login
                                             .as_ref()
@@ -2016,130 +2316,24 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 );
                                                 let data_node =
                                                     lp_resp.get("data").unwrap_or(&lp_resp);
-                                                for sync_ev in crate::chat::extract_mobile_sync_controls(data_node) {
-                                                    match sync_ev {
-                                                        crate::chat::MobileSyncControlEvent::TransferAfterLogin { temp_key } => {
-                                                            crate::history_sync::set_latest_mobile_temp_key(&temp_key);
-                                                        }
-                                                        crate::chat::MobileSyncControlEvent::WaitingConfirmOnPhone { .. } => {
-                                                            let note = "📲 Đang chờ bạn bấm 'Đồng bộ' trên màn hình Zalo điện thoại…".to_string();
-                                                            crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
-                                                            ctx_clone.request_repaint();
-                                                        }
-                                                        crate::chat::MobileSyncControlEvent::MobileBusyRestoring => {
-                                                            let note = "⏳ Điện thoại đang nén và chuẩn bị dữ liệu tin nhắn…".to_string();
-                                                            crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
-                                                            ctx_clone.request_repaint();
-                                                        }
-                                                        crate::chat::MobileSyncControlEvent::UserConfirmed => {
-                                                            let note = "📲 Điện thoại đã xác nhận đồng bộ — đang nén và đóng gói tin nhắn…".to_string();
-                                                            crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
-                                                            ctx_clone.request_repaint();
-                                                        }
-                                                        crate::chat::MobileSyncControlEvent::UserRejected => {
-                                                            let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
-                                                            crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
-                                                            ctx_clone.request_repaint();
-                                                        }
-                                                        crate::chat::MobileSyncControlEvent::BackupReady {
-                                                            url,
-                                                            file_name,
-                                                            encrypted_key,
-                                                            ..
-                                                        } => {
-                                                            let s_sync = s.clone();
-                                                            let gui_tx_sync = gui_tx_clone.clone();
-                                                            let ctx_sync = ctx_clone.clone();
-                                                            tokio::spawn(async move {
-                                                                let status_dl = format!("📥 Đang tải và giải mã gói đồng bộ tin nhắn ({file_name})…");
-                                                                crate::history_sync::set_last_mobile_sync_status(Some(status_dl.clone()));
-                                                                let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(status_dl));
-                                                                ctx_sync.request_repaint();
-
-                                                                match crate::history_sync::import_mobile_backup_container(&s_sync, &url, &encrypted_key).await {
-                                                                    Ok(count) => {
-                                                                        let note = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
-                                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
-                                                                        let updated = crate::chat::load_threads_cache();
-                                                                        let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
-                                                                    }
-                                                                    Err(e) => {
-                                                                        let err_note = format!("⚠️ Không thể giải mã gói đồng bộ ({file_name}): {e}");
-                                                                        crate::history_sync::set_last_mobile_sync_status(Some(err_note.clone()));
-                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err_note));
-                                                                    }
-                                                                }
-                                                                ctx_sync.request_repaint();
-                                                            });
-                                                        }
-                                                        crate::chat::MobileSyncControlEvent::SyncV2Batch {
-                                                            url,
-                                                            sync_id,
-                                                            batch_type,
-                                                            is_last,
-                                                        } => {
-                                                            let s_sync = s.clone();
-                                                            let gui_tx_sync = gui_tx_clone.clone();
-                                                            let ctx_sync = ctx_clone.clone();
-                                                            tokio::spawn(async move {
-                                                                if batch_type == 2 {
-                                                                    let note = "📥 Đang giải mã thông tin phiên đồng bộ từ iPhone…".to_string();
-                                                                    crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                                    let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
-                                                                    ctx_sync.request_repaint();
-                                                                    crate::logger::log_sync(&format!("batch meta về: sync={}", sync_id));
-                                                                    match crate::history_sync::import_sync_v2_meta(&s_sync, &url).await {
-                                                                        Ok(meta) => {
-                                                                            crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
-                                                                            crate::logger::log_sync(&format!("meta OK: sync={} session={}", sync_id, meta.session_id));
-                                                                        }
-                                                                        Err(e) => {
-                                                                            let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
-                                                                            crate::logger::log_sync(&format!("meta FAIL: sync={} err={}", sync_id, e));
-                                                                            crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
-                                                                            let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
-                                                                        }
-                                                                    }
-                                                                } else if batch_type == 1 {
-                                                                    if !crate::history_sync::has_sync_v2_session(&sync_id) {
-                                                                        let err = format!("⚠️ Gói Sync v2 ({sync_id}) tới trước metadata — bỏ qua, chờ batch meta");
-                                                                        crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
-                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
-                                                                        ctx_sync.request_repaint();
-                                                                        return;
-                                                                    }
-                                                                    let note = "📥 Đang tải và giải mã gói tin nhắn từ iPhone…".to_string();
-                                                                    crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
-                                                                    let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
-                                                                    ctx_sync.request_repaint();
-
-                                                                    crate::logger::log_sync(&format!("batch msg về: sync={} last={}", sync_id, is_last));
-                                                                    match crate::history_sync::import_sync_v2_messages_inner(&s_sync, &url, Some(&sync_id), is_last).await {
-                                                                        Ok(count) => {
-                                                                            crate::logger::log_sync(&format!("msg OK: sync={} count={}", sync_id, count));
-                                                                            let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
-                                                                            crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
-                                                                            let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
-                                                                            let updated = crate::chat::load_threads_cache();
-                                                                            let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
-                                                                        }
-                                                                        Err(e) => {
-                                                                            crate::logger::log_sync(&format!("msg FAIL: sync={} err={}", sync_id, e));
-                                                                            let err = format!("⚠️ Lỗi giải mã tin nhắn Sync v2 ({sync_id}): {e}");
-                                                                            crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
-                                                                            let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
-                                                                        }
-                                                                    }
-                                                                    ctx_sync.request_repaint();
-                                                                }
-                                                            });
-                                                        }
-                                                    }
+                                                let sync_evs =
+                                                    crate::chat::extract_mobile_sync_controls(
+                                                        data_node,
+                                                    );
+                                                if !sync_evs.is_empty() {
+                                                    let s_sync = s.clone();
+                                                    let gui_tx_sync = gui_tx_clone.clone();
+                                                    let ctx_sync = ctx_clone.clone();
+                                                    tokio::spawn(async move {
+                                                        handle_mobile_sync_controls(
+                                                            sync_evs,
+                                                            s_sync,
+                                                            gui_tx_sync,
+                                                            ctx_sync,
+                                                            false,
+                                                        )
+                                                        .await;
+                                                    });
                                                 }
                                                 let more = data_node
                                                     .get("more")
@@ -2195,11 +2389,47 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         None => {
                                             temp_threads.retain(|t| !t.messages.is_empty());
                                             if !temp_threads.is_empty() {
-                                                // Deliver polled messages to UI immediately without blocking on profile HTTP
-                                                let _ = gui_tx_clone
-                                                    .send(GuiEvent::ThreadsUpdated(temp_threads.clone()));
-                                                ctx_clone.request_repaint();
-
+                                                // Skip UI churn when nothing actually changed (#135:
+                                                // 1.2s poll used to relayout the whole message list
+                                                // every tick even with zero new messages).
+                                                let fingerprint = |ts: &[Thread]| -> u64 {
+                                                    use std::hash::{Hash, Hasher};
+                                                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                                                    for th in ts {
+                                                        th.id.hash(&mut h);
+                                                        th.preview.hash(&mut h);
+                                                        th.messages.len().hash(&mut h);
+                                                        th.messages
+                                                            .last()
+                                                            .map(|m| m.id.clone())
+                                                            .unwrap_or_default()
+                                                            .hash(&mut h);
+                                                        th.unread.last_seen_id.hash(&mut h);
+                                                        th.unread.unread_ids.len().hash(&mut h);
+                                                        th.unread.marked_unread.hash(&mut h);
+                                                    }
+                                                    h.finish()
+                                                };
+                                                static LAST_SENT: std::sync::Mutex<u64> =
+                                                    std::sync::Mutex::new(0);
+                                                let fp = fingerprint(&temp_threads);
+                                                let is_fresh = match LAST_SENT.lock() {
+                                                    Ok(mut g) => {
+                                                        if *g == fp {
+                                                            false
+                                                        } else {
+                                                            *g = fp;
+                                                            true
+                                                        }
+                                                    }
+                                                    Err(_) => true,
+                                                };
+                                                if is_fresh {
+                                                    // Deliver polled messages to UI immediately without blocking on profile HTTP
+                                                    let _ = gui_tx_clone
+                                                        .send(GuiEvent::ThreadsUpdated(temp_threads.clone()));
+                                                    ctx_clone.request_repaint();
+                                                }
                                                 let needs_resolve = temp_threads.iter().any(|t| {
                                                     !t.presentation.contact_name
                                                         && (t.name.is_empty()
@@ -2263,9 +2493,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
+                                let uin = s
+                                    .login
+                                    .as_ref()
+                                    .map(|l| l.uin.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
                                 let total = threads.len();
                                 let mut added = 0;
                                 let mut errors = Vec::new();
+                                let mut synced_threads = Vec::with_capacity(total);
                                 for (i, (id, name, is_group)) in threads.into_iter().enumerate() {
                                     if crate::history_sync::CANCEL.load(Ordering::Relaxed) {
                                         break;
@@ -2286,9 +2523,38 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         ..Default::default()
                                     };
                                     match crate::history_sync::sync_thread(&s, &mut t).await {
-                                        Ok(n) => added += n,
+                                        Ok(n) => {
+                                            added += n;
+                                            if !t.messages.is_empty() {
+                                                synced_threads.push(t);
+                                            }
+                                        }
                                         Err(e) => errors.push(format!("{}: {e}", t.name)),
                                     }
+                                }
+                                let db_path = crate::store::db_path_for_account(&uin);
+                                if let Ok(updated_threads) = tokio::task::spawn_blocking(move || {
+                                    let mut updated_threads = crate::chat::load_threads_cache();
+                                    crate::store::load_history_into_threads(
+                                        &db_path,
+                                        &mut updated_threads,
+                                        crate::store::MessageStore::PRELOAD_MSGS,
+                                    );
+                                    for synced in synced_threads {
+                                        if let Some(existing) =
+                                            updated_threads.iter_mut().find(|x| x.id == synced.id)
+                                        {
+                                            crate::chat::merge_thread_into(existing, synced, false);
+                                        } else {
+                                            updated_threads.push(synced);
+                                        }
+                                    }
+                                    crate::chat::save_threads_cache(&updated_threads);
+                                    updated_threads
+                                })
+                                .await
+                                {
+                                    let _ = gui_tx_clone.send(GuiEvent::ThreadsUpdated(updated_threads));
                                 }
                                 let _ = gui_tx_clone.send(GuiEvent::SyncFinished {
                                     added,
@@ -2362,6 +2628,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         }
                                     }
                                     if is_group || is_send2me {
+                                        let (mut has_more, mut is_old, mut server_cursor) =
+                                            (false, false, None);
                                         if let Ok(cm_resp) = crate::chat::get_cloud_messages(
                                             &s,
                                             &group_id,
@@ -2372,60 +2640,54 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         .await
                                         {
                                             crate::chat::merge_group_history(&mut t, &cm_resp);
+                                            (has_more, is_old, server_cursor) =
+                                                crate::chat::parse_cloud_page_meta(&cm_resp);
                                         }
-                                        // Backfill up to 5 pages (250 messages) of older cloud history
-                                        let mut cursor_id = t
-                                            .messages
-                                            .first()
-                                            .map(|m| m.id.as_str())
-                                            .filter(|id| {
-                                                !id.is_empty()
-                                                    && id.chars().all(|c| c.is_ascii_digit())
-                                            })
-                                            .unwrap_or("9223372036854775808")
-                                            .to_string();
-                                        for page in 1..=5 {
-                                            let prev_len = t.messages.len();
-                                            let Ok(cm_old) = crate::chat::get_cloud_messages(
-                                                &s,
-                                                &group_id,
-                                                &cursor_id,
-                                                true,
-                                                50,
-                                            )
-                                            .await
-                                            else {
-                                                break;
-                                            };
-                                            crate::chat::merge_group_history(&mut t, &cm_old);
-                                            let new_len = t.messages.len();
-                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
-                                                format!(
-                                                    "⏳ Đang đồng bộ lịch sử cũ (trang {page}/5 — {new_len} tin nhắn)…"
-                                                ),
-                                            ));
-                                            ctx_clone.request_repaint();
-                                            let data_node = cm_old
-                                                .pointer("/data/data")
-                                                .or_else(|| cm_old.get("data"))
-                                                .unwrap_or(&cm_old);
-                                            let has_more = data_node
-                                                .get("hasMore")
-                                                .and_then(|v| v.as_i64())
-                                                .unwrap_or(0);
-                                            let next_cursor = data_node
-                                                .get("lastMsgId")
-                                                .and_then(|v| {
-                                                    v.as_str().map(str::to_string).or_else(|| {
-                                                        v.as_u64().map(|n| n.to_string())
-                                                    })
+                                        if has_more {
+                                            // Backfill up to 5 pages (250 messages) of older cloud history
+                                            let mut cursor_id = t
+                                                .messages
+                                                .first()
+                                                .map(|m| m.id.clone())
+                                                .filter(|id| {
+                                                    !id.is_empty()
+                                                        && id.chars().all(|c| c.is_ascii_digit())
                                                 })
-                                                .filter(|s| {
-                                                    !s.is_empty()
-                                                        && s != "0"
-                                                        && s.chars().all(|c| c.is_ascii_digit())
-                                                })
-                                                .or_else(|| {
+                                                .or(server_cursor)
+                                                .unwrap_or_else(|| "9223372036854775808".to_string());
+                                            for page in 1..=5 {
+                                                let prev_len = t.messages.len();
+                                                let Ok(cm_old) = crate::chat::get_cloud_messages(
+                                                    &s,
+                                                    &group_id,
+                                                    &cursor_id,
+                                                    is_old,
+                                                    50,
+                                                )
+                                                .await
+                                                else {
+                                                    break;
+                                                };
+                                                crate::chat::merge_group_history(&mut t, &cm_old);
+                                                let new_len = t.messages.len();
+                                                let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                                    format!(
+                                                        "⏳ Đang đồng bộ lịch sử cũ (trang {page}/5 — {new_len} tin nhắn)…"
+                                                    ),
+                                                ));
+                                                ctx_clone.request_repaint();
+                                                let (more_after, next_is_old, resp_cursor) =
+                                                    crate::chat::parse_cloud_page_meta(&cm_old);
+                                                if new_len == prev_len
+                                                    && !is_old
+                                                    && next_is_old
+                                                    && more_after
+                                                {
+                                                    is_old = true;
+                                                    continue;
+                                                }
+                                                is_old = next_is_old;
+                                                let next_cursor = resp_cursor.or_else(|| {
                                                     t.messages
                                                         .first()
                                                         .map(|m| m.id.clone())
@@ -2436,13 +2698,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     .all(|c| c.is_ascii_digit())
                                                         })
                                                 });
-                                            let Some(nc) = next_cursor else {
-                                                break;
-                                            };
-                                            if has_more == 0 || nc == cursor_id || new_len == prev_len {
-                                                break;
+                                                let Some(nc) = next_cursor else {
+                                                    break;
+                                                };
+                                                if !more_after
+                                                    || nc == cursor_id
+                                                    || new_len == prev_len
+                                                {
+                                                    break;
+                                                }
+                                                cursor_id = nc;
                                             }
-                                            cursor_id = nc;
                                         }
                                     }
                                     if is_group
@@ -2983,10 +3249,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 {
                                     tokio::spawn(async move {
                                         let idx = sticker_id.saturating_sub(999000);
-                                        let _ = std::fs::create_dir_all("stickers_cache");
-                                        let gif_path = std::path::PathBuf::from(format!(
-                                            "stickers_cache/ami_fat_cat_{idx:02}.gif"
-                                        ));
+                                        let gif_path =
+                                            crate::account_manager::ensure_media_cache_dir()
+                                                .join(format!("ami_fat_cat_{idx:02}.gif"));
                                         if !gif_path.exists() {
                                             let _ = std::fs::write(&gif_path, gif_bytes);
                                         }
@@ -3140,8 +3405,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 }
                             }
                             tokio::spawn(async move {
-                                let cache_dir = std::path::Path::new("stickers_cache");
-                                let _ = std::fs::create_dir_all(cache_dir);
+                                let cache_dir =
+                                    crate::account_manager::ensure_media_cache_dir();
                                 let cache_path = cache_dir.join(format!("{key}.png"));
 
                                 // Bytes come from the disk cache, a local file or the network. They
@@ -3193,7 +3458,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         ctx_clone.request_repaint();
                                         return;
                                     }
-                                    let Ok(mut dyn_img) = image::load_from_memory(&bytes) else {
+                                    let decoded = decode_image_with_fallback(&bytes, &url);
+                                    let Some((mut dyn_img, transcoded_png)) = decoded else {
                                         if !from_network {
                                             // Corrupt cache entry: drop it so the next request refetches.
                                             let _ = std::fs::remove_file(&cache_path);
@@ -3203,7 +3469,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         return;
                                     };
                                     if from_network {
-                                        let _ = std::fs::write(&cache_path, &bytes);
+                                        let to_cache = transcoded_png.as_deref().unwrap_or(&bytes);
+                                        let _ = std::fs::write(&cache_path, to_cache);
                                     }
                                     // Bubbles draw images up to 360 pt wide; resize large photos to 720px max
                                     // so inline thumbnails stay crisp on Retina/HiDPI displays (#72).
@@ -3473,65 +3740,141 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 ctx_clone.request_repaint();
                             });
                         }
-                        WorkerCmd::PickAndSendAttachment {
+                        WorkerCmd::PickAttachments { mode } => {
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let Some(paths) = super::attachments::pick_attachments(mode) else {
+                                    return;
+                                };
+                                let batch = super::attachments::prepare_batch(paths);
+                                let _ = gui_tx_clone.send(GuiEvent::AttachmentsPrepared(batch));
+                                ctx_clone.request_repaint();
+                            });
+                        }
+                        WorkerCmd::PrepareAttachments { paths } => {
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let batch = super::attachments::prepare_batch(paths);
+                                let _ = gui_tx_clone.send(GuiEvent::AttachmentsPrepared(batch));
+                                ctx_clone.request_repaint();
+                            });
+                        }
+                        WorkerCmd::SendAttachments {
                             to_id,
                             is_group,
-                            images_only,
+                            paths,
                             caption,
-                            preset_path,
                             original_hd,
                         } => {
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
-                                let picked_path = if let Some(p) = preset_path {
-                                    Some(p)
-                                } else {
-                                    tokio::task::spawn_blocking(move || {
-                                        pick_native_file_dialog(images_only)
-                                    })
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                };
-
-                                let Some(path) = picked_path else {
-                                    return;
-                                };
-                                let fname = path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("tập tin")
+                                let paths = super::attachments::album_send_order(paths);
+                                let total = paths.len();
+                                // Two or more still photos go out as one album; GIFs, videos
+                                // and files are sent standalone (same split as Zalo Web).
+                                let album_slots = super::attachments::plan_album_slots(&paths);
+                                // Only photo sends carry a description; for a queue without
+                                // photos the caption goes out as its own text message.
+                                let caption_idx = paths
+                                    .iter()
+                                    .position(|p| super::attachments::is_image_path(p));
+                                let album_id = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0)
                                     .to_string();
-                                let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
-                                    "⏳ Đang tải lên và gửi '{fname}'…"
-                                )));
-                                ctx_clone.request_repaint();
+                                // Sequential on purpose: concurrent uploads reorder the
+                                // resulting messages in the conversation.
+                                for (idx, path) in paths.into_iter().enumerate() {
+                                    let fname = path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("tập tin")
+                                        .to_string();
+                                    let progress = if total > 1 {
+                                        format!(" ({}/{total})", idx + 1)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
+                                        "⏳ Đang tải lên và gửi '{fname}'{progress}…"
+                                    )));
+                                    ctx_clone.request_repaint();
 
-                                let s = session_clone.lock().await.clone();
-                                match crate::chat::send_attachment_ext(
-                                    &s, &to_id, is_group, &path, &caption, original_hd,
-                                )
-                                .await
-                                {
-                                    Ok((_resp, cm)) => {
-                                        let _ = gui_tx_clone.send(GuiEvent::AttachmentSent {
-                                            thread_id: to_id,
-                                            msg: cm,
-                                        });
+                                    let item_caption =
+                                        if Some(idx) == caption_idx { caption.as_str() } else { "" };
+                                    let s = session_clone.lock().await.clone();
+                                    let layout = album_slots[idx].map(|(slot, of)| {
+                                        crate::chat::MediaGroupLayout::new(album_id.clone(), slot, of)
+                                    });
+                                    match crate::chat::send_attachment_in_layout(
+                                        &s,
+                                        &to_id,
+                                        is_group,
+                                        &path,
+                                        item_caption,
+                                        original_hd,
+                                        layout.as_ref(),
+                                    )
+                                    .await
+                                    {
+                                        Ok((_resp, cm)) => {
+                                            let _ = gui_tx_clone.send(GuiEvent::AttachmentSent {
+                                                thread_id: to_id.clone(),
+                                                msg: cm,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let err_s = e.to_string();
+                                            crate::logger::log_error("gui::send_attachment", &err_s);
+                                            let _ = gui_tx_clone.send(GuiEvent::SendFailed {
+                                                thread_id: to_id.clone(),
+                                                text: item_caption.to_string(),
+                                                error: format!("Lỗi gửi '{fname}': {err_s}"),
+                                            });
+                                        }
                                     }
-                                    Err(e) => {
-                                        let err_s = e.to_string();
-                                        crate::logger::log_error("gui::send_attachment", &err_s);
-                                        let _ = gui_tx_clone.send(GuiEvent::SendFailed {
-                                            thread_id: to_id,
-                                            text: caption,
-                                            error: format!("Lỗi gửi '{fname}': {err_s}"),
-                                        });
-                                    }
+                                    ctx_clone.request_repaint();
                                 }
-                                ctx_clone.request_repaint();
+                                if caption_idx.is_none() && !caption.trim().is_empty() {
+                                    let s = session_clone.lock().await.clone();
+                                    let client_id = crate::chat::next_client_message_id();
+                                    let res = if is_group {
+                                        crate::chat::send_group_message_with_client_id(
+                                            &s, &to_id, &caption, client_id,
+                                        )
+                                        .await
+                                    } else {
+                                        crate::chat::send_message_with_client_id(
+                                            &s, &to_id, &caption, client_id,
+                                        )
+                                        .await
+                                    };
+                                    match res {
+                                        Ok(resp) => {
+                                            let _ = gui_tx_clone.send(GuiEvent::MessageSent {
+                                                client_message_id: client_id.to_string(),
+                                                thread_id: to_id,
+                                                text: caption,
+                                                msg_id: extract_msg_id(&resp),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let err_s = e.to_string();
+                                            crate::logger::log_error("gui::send_caption", &err_s);
+                                            let _ = gui_tx_clone.send(GuiEvent::SendFailed {
+                                                thread_id: to_id,
+                                                text: caption,
+                                                error: err_s,
+                                            });
+                                        }
+                                    }
+                                    ctx_clone.request_repaint();
+                                }
                             });
                         }
                         WorkerCmd::TriggerScreenshot => {
@@ -3806,7 +4149,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let poll_clone = poll_state.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
-                            tokio::spawn(async move {
+                            if let Some(task) = current_password_task.take() {
+                                task.abort();
+                            }
+                            current_password_task = Some(tokio::spawn(async move {
                                 let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
                                     "Đang xác thực tài khoản…".into(),
                                 ));
@@ -3820,6 +4166,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             if let Some(cfg) = info.get("data") {
                                                 crate::login::apply_login_config(&mut s, cfg);
                                                 s.apply_server_info(cfg);
+                                                // Labels the account when no profile name is known.
+                                                if let Some(ref mut li) = s.login {
+                                                    li.phone = crate::session::display_phone(&phone);
+                                                }
                                                 let _ = s.save_to_file("session.json");
 
                                                 let uin = s
@@ -3948,7 +4298,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         ctx_clone.request_repaint();
                                     }
                                 }
-                            });
+                            }));
                         }
                         WorkerCmd::CheckForUpdates { silent } => {
                             let gui_tx_clone = gui_tx.clone();
@@ -4187,6 +4537,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 .await;
                                 let cancelled = crate::history_sync::PHONE_SYNC_CANCEL
                                     .load(Ordering::Relaxed);
+                                // Read while PHONE_SYNC_RUNNING is still set: a new run clears
+                                // this global as soon as it starts.
+                                let phone_error = crate::history_sync::last_phone_sync_error();
                                 match res {
                                     Ok((added, active_threads)) => {
                                         let _ = gui_tx_clone.send(GuiEvent::PhoneSyncFinished {
@@ -4195,6 +4548,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             active_threads,
                                             cancelled,
                                             error: None,
+                                            phone_error,
                                         });
                                     }
                                     Err(e) => {
@@ -4204,6 +4558,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             active_threads: 0,
                                             cancelled,
                                             error: Some(e.to_string()),
+                                            phone_error,
                                         });
                                     }
                                 }
@@ -4240,12 +4595,19 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
-                                let client = { session_clone.lock().await.clone().http };
+                                let (client, uin) = {
+                                    let s = session_clone.lock().await;
+                                    (
+                                        s.http.clone(),
+                                        s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default(),
+                                    )
+                                };
                                 let res = download_attachment_with_original_name(
                                     &client,
                                     &url,
                                     &file_name,
                                     &download_dir,
+                                    &uin,
                                 )
                                 .await;
                                 let _ = gui_tx_clone.send(GuiEvent::FileDownloaded(res));
@@ -4617,12 +4979,14 @@ async fn apply_github_release_update(
 }
 
 /// Download a Zalo file attachment (`share.file` / `chat.file` / `/renewMedia`) and save it
-/// inside `download_dir` using the sender's original filename instead of `renewMedia.doc` (#74).
+/// inside `download_dir/<account_uin>` using the sender's original filename instead of
+/// `renewMedia.doc` (#74).
 async fn download_attachment_with_original_name(
     client: &reqwest::Client,
     url: &str,
     file_name: &str,
     download_dir: &str,
+    account_uin: &str,
 ) -> Result<(String, String), String> {
     let clean_name = crate::chat::resolve_attachment_file_name(Some(file_name), file_name, url);
     let resp = client
@@ -4657,6 +5021,8 @@ async fn download_attachment_with_original_name(
             })
             .unwrap_or_else(|| std::path::PathBuf::from("Downloads"))
     };
+    // Each account saves into its own subfolder so received files never mix.
+    let target_dir = crate::account_manager::account_download_dir(&target_dir, account_uin);
 
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&target_dir)
@@ -4719,31 +5085,55 @@ async fn download_preview_bytes(
 /// Extract the first video frame via the system `ffmpeg` into a downscaled RGBA thumbnail.
 /// Called on a blocking thread; returns `None` on any failure (no ffmpeg, bad bytes,
 /// decode error) so the caller can keep the fallback card.
-fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
-    // Lấy kích thước frame đã scale trực tiếp từ header PNG của ffmpeg
-    // (image2pipe + png): không còn lệch 480x360 vs 320x240 (#4226).
-    let mut child = std::process::Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            "pipe:0",
-            "-vframes",
-            "1",
-            "-vf",
-            "scale=480:-1",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "png",
-            "pipe:1",
-        ])
+/// Decode an image in memory using `image::load_from_memory` (PNG/JPEG/GIF/WebP/BMP/ICO/TIFF/QOI/PNM),
+/// then extension-hinted `load_from_memory_with_format` (e.g. TGA), falling back to `ffmpeg` pipe
+/// transcoding (e.g. AVIF/HEIC/JXL) when available.
+fn decode_image_with_fallback(
+    bytes: &[u8],
+    hint_url_or_path: &str,
+) -> Option<(image::DynamicImage, Option<Vec<u8>>)> {
+    if let Ok(img) = image::load_from_memory(bytes) {
+        return Some((img, None));
+    }
+    let clean_hint = hint_url_or_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(hint_url_or_path);
+    if let Some(ext) = std::path::Path::new(clean_hint)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        if let Some(fmt) = image::ImageFormat::from_extension(ext) {
+            if let Ok(img) = image::load_from_memory_with_format(bytes, fmt) {
+                return Some((img, None));
+            }
+        }
+    }
+    if !crate::media::is_ffmpeg_available() {
+        return None;
+    }
+    let png_bytes = transcode_pipe_to_png_with_ffmpeg(bytes, None)?;
+    let img = image::load_from_memory(&png_bytes).ok()?;
+    Some((img, Some(png_bytes)))
+}
+
+/// Transcode stdin media bytes to PNG via `ffmpeg` without flashing a console window on Windows.
+fn transcode_pipe_to_png_with_ffmpeg(bytes: &[u8], vf: Option<&str>) -> Option<Vec<u8>> {
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vframes", "1"]);
+    if let Some(filter) = vf {
+        cmd.args(["-vf", filter]);
+    }
+    cmd.args(["-f", "image2pipe", "-vcodec", "png", "pipe:1"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = cmd.spawn().ok()?;
     use std::io::Write;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(bytes);
@@ -4752,15 +5142,24 @@ fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
     if !out.status.success() || out.stdout.is_empty() {
         return None;
     }
-    image::load_from_memory(&out.stdout).ok().map(|d| d.to_rgba8())
+    Some(out.stdout)
+}
+
+fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
+    // Lấy kích thước frame đã scale trực tiếp từ header PNG của ffmpeg
+    // (image2pipe + png): không còn lệch 480x360 vs 320x240 (#4226).
+    let png_bytes = transcode_pipe_to_png_with_ffmpeg(bytes, Some("scale=480:-1"))?;
+    image::load_from_memory(&png_bytes).ok().map(|d| d.to_rgba8())
 }
 
 
 pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::Context) {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", "Start-Process ms-screenclip:"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .status();
         let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate(
             "Đã mở công cụ chụp ảnh màn hình — sau khi chụp hãy nhấn Ctrl+V để dán".into(),
