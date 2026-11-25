@@ -22,6 +22,7 @@ const FRAME_SAMPLES: usize = 320; // 20 ms @ 16 kHz
 static SELECTED_MIC_DEVICE: Mutex<String> = Mutex::new(String::new());
 static SELECTED_CAMERA_DEVICE: Mutex<String> = Mutex::new(String::new());
 static CACHED_DEVICES: Mutex<Option<(Vec<String>, Vec<String>)>> = Mutex::new(None);
+static DEVICES_SCANNING: AtomicBool = AtomicBool::new(false);
 static SHARED_CAM_H264: Mutex<(u64, Vec<u8>, Vec<u8>)> = Mutex::new((0, Vec::new(), Vec::new()));
 static MIC_GAIN_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 static MIC_LEVEL_PERMILLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -105,15 +106,7 @@ pub fn is_ffmpeg_available() -> bool {
     });
     *FFMPEG_OK
 }
-/// Return cached `(mic_devices, camera_devices)` or enumerate once (with `refresh=true` to rescan).
-pub fn list_media_devices(refresh: bool) -> (Vec<String>, Vec<String>) {
-    if !refresh {
-        if let Ok(g) = CACHED_DEVICES.lock() {
-            if let Some(ref cached) = *g {
-                return cached.clone();
-            }
-        }
-    }
+fn probe_media_devices_sync() -> (Vec<String>, Vec<String>) {
     let mut mics = Vec::new();
     let host = cpal::default_host();
     if let Ok(devs) = host.input_devices() {
@@ -130,11 +123,61 @@ pub fn list_media_devices(refresh: bool) -> (Vec<String>, Vec<String>) {
         }
     }
     let cams = enumerate_ffmpeg_cameras();
-    let pair = (mics, cams);
+    (mics, cams)
+}
+/// Return cached `(mic_devices, camera_devices)` or enumerate once (with `refresh=true` to rescan).
+pub fn list_media_devices(refresh: bool) -> (Vec<String>, Vec<String>) {
+    if !refresh {
+        if let Ok(g) = CACHED_DEVICES.lock() {
+            if let Some(ref cached) = *g {
+                return cached.clone();
+            }
+        }
+    }
+    let pair = probe_media_devices_sync();
     if let Ok(mut g) = CACHED_DEVICES.lock() {
         *g = Some(pair.clone());
     }
     pair
+}
+
+/// Return cached `(mics, cams, is_scanning)` immediately without blocking the UI thread.
+/// Spawns a background scan on cold cache or when `refresh` is true.
+pub fn list_media_devices_nonblocking(refresh: bool) -> (Vec<String>, Vec<String>, bool) {
+    let cached = CACHED_DEVICES
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    if !refresh {
+        if let Some(pair) = cached {
+            return (pair.0, pair.1, DEVICES_SCANNING.load(Ordering::Acquire));
+        }
+    }
+    let (mics, cams) = cached.unwrap_or_default();
+    if DEVICES_SCANNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let spawned = std::thread::Builder::new()
+            .name("media-device-scan".into())
+            .spawn(|| {
+                struct ScanResetGuard;
+                impl Drop for ScanResetGuard {
+                    fn drop(&mut self) {
+                        DEVICES_SCANNING.store(false, Ordering::SeqCst);
+                    }
+                }
+                let _guard = ScanResetGuard;
+                let pair = probe_media_devices_sync();
+                if let Ok(mut g) = CACHED_DEVICES.lock() {
+                    *g = Some(pair);
+                }
+            });
+        if spawned.is_err() {
+            DEVICES_SCANNING.store(false, Ordering::SeqCst);
+        }
+    }
+    (mics, cams, DEVICES_SCANNING.load(Ordering::Acquire))
 }
 
 fn enumerate_ffmpeg_cameras() -> Vec<String> {
@@ -3383,6 +3426,17 @@ mod tests {
         assert_eq!(
             normalize_annexb_au_4byte(&raw_au),
             vec![0, 0, 0, 1, 0x41, 0x9A, 0x24]
+        );
+    }
+
+    #[test]
+    fn list_media_devices_nonblocking_returns_without_blocking() {
+        let t0 = std::time::Instant::now();
+        let _ = list_media_devices_nonblocking(false);
+        assert!(
+            t0.elapsed() < Duration::from_millis(100),
+            "list_media_devices_nonblocking blocked UI thread for {:?}",
+            t0.elapsed()
         );
     }
 }

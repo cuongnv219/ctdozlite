@@ -7,6 +7,70 @@ use serde_json::{json, Value};
 
 use crate::session::{obj, Session};
 
+/// Single sub-article or list item inside an OA or MiniApp rich card.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OaCardItem {
+    #[serde(default)]
+    pub is_header: bool,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Action chip or CTA button on an OA, MiniApp, ZInstant, or ECard message.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OaCardButton {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}
+
+/// Structured rich card payload for OA (`chat.list.action`), ZInstant/MiniApp
+/// (`chat.webcontent`, `chat.webcontent.v2`), ECard (`chat.ecard`), and banner OA notices.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OaRichCard {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub card_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner_thumb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<OaCardItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buttons: Vec<OaCardButton>,
+}
+
+impl OaRichCard {
+    /// Returns true when the card has no renderable banner, text, list items, or action buttons.
+    pub fn is_empty(&self) -> bool {
+        let has_banner = self
+            .banner_thumb
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_title = self.title.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let has_desc = self
+            .description
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        !has_banner && !has_title && !has_desc && self.items.is_empty() && self.buttons.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     #[serde(default)]
@@ -68,6 +132,9 @@ pub struct ChatMessage {
     pub link_thumb: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_src: Option<String>,
+    /// Rich card payload for OA (`chat.list.action`), ZInstant/MiniApp (`chat.webcontent`), ECard, or banner notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oa_card: Option<OaRichCard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_source: Option<Value>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -99,6 +166,14 @@ impl ChatMessage {
         if incoming.kind != crate::message_model::MessageKind::Unknown {
             self.kind = incoming.kind;
         }
+        // A system notice's text is built by the parser (e.g. poll votes); a stale label
+        // such as "[Hình ảnh]" saved by an older build must not survive the merge.
+        let notice_text_changed = incoming.kind == crate::message_model::MessageKind::System
+            && !incoming.text.is_empty()
+            && self.text != incoming.text;
+        if notice_text_changed {
+            self.text = incoming.text.clone();
+        }
         if !incoming.wire_ref.fields.is_empty() {
             let mut fields = self.wire_ref.fields.clone();
             fields.extend(incoming.wire_ref.fields.clone());
@@ -116,8 +191,14 @@ impl ChatMessage {
         if gained_media_group {
             self.media_group = incoming.media_group.clone();
         }
+        let gained_oa_card = self.oa_card.is_none() && incoming.oa_card.is_some();
+        if gained_oa_card {
+            self.oa_card = incoming.oa_card.clone();
+        }
         self.delivery = self.delivery.merge(incoming.delivery);
         gained_media_group
+            || notice_text_changed
+            || gained_oa_card
             || previous_mentions != self.resolved_mention_uids
             || before
                 != (
@@ -127,6 +208,72 @@ impl ChatMessage {
                     self.delivery,
                     self.history_source.clone(),
                 )
+    }
+
+    /// Returns a renderable `OaRichCard`: either the explicit `oa_card`, or a synthesized
+    /// `"banner"` card for cached OA notifications that carry `link_thumb` + `link_title`/`link_desc`
+    /// without a `link_url`. Returns `None` for empty cards or legacy call bubbles.
+    pub fn effective_oa_card(&self) -> Option<OaRichCard> {
+        if let Some(card) = &self.oa_card {
+            if !card.is_empty() {
+                return Some(card.clone());
+            }
+        }
+        if matches!(
+            self.kind,
+            crate::message_model::MessageKind::Sticker
+                | crate::message_model::MessageKind::Photo
+                | crate::message_model::MessageKind::Video
+                | crate::message_model::MessageKind::Voice
+                | crate::message_model::MessageKind::File
+                | crate::message_model::MessageKind::Recall
+                | crate::message_model::MessageKind::Delete
+                | crate::message_model::MessageKind::System
+        ) {
+            return None;
+        }
+        if self.link_title.as_deref() == Some("sendBubbleMessage") {
+            return None;
+        }
+        if self.link_url.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+            return None;
+        }
+        let banner_thumb = self
+            .link_thumb
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+            .map(str::to_string)?;
+        let title = self
+            .link_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let description = self
+            .link_desc
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if title.is_none() && description.is_none() {
+            return None;
+        }
+        Some(OaRichCard {
+            card_type: "banner".to_string(),
+            banner_thumb: Some(banner_thumb),
+            title,
+            description,
+            url: None,
+            source_label: self
+                .link_src
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            items: Vec::new(),
+            buttons: Vec::new(),
+        })
     }
 
     /// Keep aggregate counts and event replay cursors across cache/network merges.
@@ -1275,6 +1422,26 @@ fn merge_delivery_state(
 pub(crate) fn apply_recall_merge(existing: &mut ChatMessage, incoming_text: &str) {
     let inc_trim = incoming_text.trim();
     let ex_trim = existing.text.trim();
+    if existing.is_outgoing
+        && (inc_trim == "[Tin nhắn đã thu hồi]"
+            || inc_trim.starts_with("[Đã thu hồi]")
+            || ex_trim == "[Tin nhắn đã thu hồi]"
+            || ex_trim.starts_with("[Đã thu hồi]"))
+    {
+        existing.text = "[Tin nhắn đã thu hồi]".to_string();
+        existing.kind = crate::message_model::MessageKind::Text;
+        existing.link_url = None;
+        existing.link_thumb = None;
+        existing.link_title = None;
+        existing.link_desc = None;
+        existing.link_src = None;
+        existing.sticker_id = None;
+        existing.sticker_cate_id = None;
+        existing.sticker_type = None;
+        existing.oa_card = None;
+        existing.media_group = None;
+        return;
+    }
     if inc_trim == "[Tin nhắn đã thu hồi]" {
         if ex_trim.is_empty() || ex_trim == "[Tin nhắn đã thu hồi]" {
             existing.text = "[Tin nhắn đã thu hồi]".to_string();
@@ -1592,21 +1759,33 @@ fn active_uin_from_session() -> Option<String> {
     None
 }
 
-/// Load locally cached conversations and message history scoped to active account.
-pub fn load_threads_cache() -> Vec<Thread> {
-    if let Some(uin) = active_uin_from_session() {
-        let acc_path = format!("accounts/{uin}_threads.json");
+fn active_uin_resolved() -> Option<String> {
+    let mem_uin = crate::account_manager::active_uin();
+    if crate::account_manager::is_safe_uin(&mem_uin) {
+        return Some(mem_uin);
+    }
+    active_uin_from_session().filter(|u| crate::account_manager::is_safe_uin(u))
+}
+
+/// Load locally cached conversations scoped strictly to `uin` (`accounts/<uin>_threads.json`),
+/// falling back to legacy `threads_cache.json` ONLY when `uin` is empty/unassigned.
+pub fn load_threads_cache_for(uin: &str) -> Vec<Thread> {
+    if crate::account_manager::is_safe_uin(uin) {
+        let acc_path = crate::account_manager::threads_snapshot_path(uin);
         if let Ok(text) = std::fs::read_to_string(&acc_path) {
             if let Ok(mut threads) = serde_json::from_str::<Vec<Thread>>(&text) {
                 deduplicate_threads(&mut threads, None);
+                repair_poll_notices(&mut threads);
                 return threads;
             }
         }
+        return Vec::new();
     }
     if std::path::Path::new("session.json").exists() {
         if let Ok(text) = std::fs::read_to_string("threads_cache.json") {
             if let Ok(mut threads) = serde_json::from_str::<Vec<Thread>>(&text) {
                 deduplicate_threads(&mut threads, None);
+                repair_poll_notices(&mut threads);
                 return threads;
             }
         }
@@ -1614,10 +1793,88 @@ pub fn load_threads_cache() -> Vec<Thread> {
     Vec::new()
 }
 
-/// Snapshot of the thread list for an instant first paint. Only the newest
-/// `PRELOAD_MSGS` messages per thread are kept: full history lives in SQLite, and
-/// rewriting every message as pretty JSON on each change cost more than the SQLite write.
-pub fn save_threads_cache(threads: &[Thread]) {
+/// Notice text for a `group.poll` event, from the localized template Zalo sends in
+/// `content.params.msg.vi` (`%1$s` = member name, `%2$s` = poll question). Without a
+/// template it falls back to a generic Vietnamese line. `None` if params are unreadable.
+pub(crate) fn poll_notice_text(content: &Value, actor: &str) -> Option<String> {
+    let parse_json = |v: &Value| -> Option<Value> {
+        match v {
+            Value::String(s) if s.trim_start().starts_with('{') => serde_json::from_str(s).ok(),
+            Value::Object(_) => Some(v.clone()),
+            _ => None,
+        }
+    };
+    let params = parse_json(content)?.get("params").and_then(parse_json)?;
+    let name = params
+        .get("dName")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(actor)
+        .trim();
+    let name = if name.is_empty() {
+        "Thành viên"
+    } else {
+        name
+    };
+    let question = params
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let template = params
+        .get("msg")
+        .and_then(|m| m.get("vi"))
+        .and_then(Value::as_str)
+        .filter(|t| t.contains("%1$s"));
+    Some(match template {
+        Some(t) => t.replace("%1$s", name).replace("%2$s", question),
+        None if question.is_empty() => format!("{name} đã cập nhật một cuộc bình chọn"),
+        None => format!("{name} đã cập nhật cuộc bình chọn: {question}"),
+    })
+}
+
+/// Cached threads saved before poll events were parsed hold them as "[Hình ảnh]" text.
+/// Rebuild the notice from the raw wire content kept in `wire_ref`.
+fn repair_poll_notices(threads: &mut [Thread]) {
+    for msg in threads.iter_mut().flat_map(|t| t.messages.iter_mut()) {
+        let is_poll =
+            msg.wire_ref.original_type.as_ref().and_then(Value::as_str) == Some("group.poll");
+        if !is_poll {
+            continue;
+        }
+        let actor = msg
+            .wire_ref
+            .fields
+            .get("dName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(notice) = msg
+            .wire_ref
+            .fields
+            .get("content")
+            .and_then(|c| poll_notice_text(c, &actor))
+        {
+            msg.text = notice;
+            msg.kind = crate::message_model::MessageKind::System;
+        }
+    }
+}
+
+/// Load locally cached conversations and message history scoped to active account.
+pub fn load_threads_cache() -> Vec<Thread> {
+    if let Some(uin) = active_uin_resolved() {
+        return load_threads_cache_for(&uin);
+    }
+    if std::path::Path::new("session.json").exists() {
+        return load_threads_cache_for("");
+    }
+    Vec::new()
+}
+
+/// Persist thread-list snapshot strictly to `accounts/<uin>_threads.json` when `uin` is known
+/// (never touching a shared `threads_cache.json` across accounts).
+pub fn save_threads_cache_for(uin: &str, threads: &[Thread]) {
     let keep = crate::store::MessageStore::PRELOAD_MSGS;
     let slim: Vec<Thread> = threads
         .iter()
@@ -1635,12 +1892,23 @@ pub fn save_threads_cache(threads: &[Thread]) {
         })
         .collect();
     if let Ok(text) = serde_json::to_string(&slim) {
-        let _ = std::fs::write("threads_cache.json", &text);
-        if let Some(uin) = active_uin_from_session() {
+        if crate::account_manager::is_safe_uin(uin) {
             let _ = std::fs::create_dir_all("accounts");
-            let _ = std::fs::write(format!("accounts/{uin}_threads.json"), text);
+            let path = crate::account_manager::threads_snapshot_path(uin);
+            let _ = crate::data_dir::write_private_atomic(&path, text.as_bytes());
+            let _ = std::fs::remove_file("threads_cache.json");
+        } else {
+            let _ = std::fs::write("threads_cache.json", &text);
         }
     }
+}
+
+/// Snapshot of the thread list for an instant first paint. Only the newest
+/// `PRELOAD_MSGS` messages per thread are kept: full history lives in SQLite, and
+/// rewriting every message as pretty JSON on each change cost more than the SQLite write.
+pub fn save_threads_cache(threads: &[Thread]) {
+    let uin = active_uin_resolved().unwrap_or_default();
+    save_threads_cache_for(&uin, threads);
 }
 
 /// `/api/social/friend/getfriends` — the friend list.
@@ -2320,6 +2588,296 @@ impl MediaGroupLayout {
     }
 }
 
+pub(crate) fn probe_mp4_metadata(bytes: &[u8]) -> Option<(u64, u32, u32)> {
+    fn read_be_u32(b: &[u8], off: usize) -> Option<u32> {
+        let s = b.get(off..off + 4)?;
+        Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    }
+    fn read_be_u64(b: &[u8], off: usize) -> Option<u64> {
+        let s = b.get(off..off + 8)?;
+        Some(u64::from_be_bytes([
+            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+        ]))
+    }
+    fn iter_boxes(buf: &[u8], mut f: impl FnMut([u8; 4], &[u8])) {
+        let mut pos = 0usize;
+        while pos + 8 <= buf.len() {
+            let Some(size32) = read_be_u32(buf, pos) else {
+                break;
+            };
+            let fourcc = [buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]];
+            let (hdr, total) = if size32 == 1 {
+                let Some(ext) = read_be_u64(buf, pos + 8) else {
+                    break;
+                };
+                (16usize, usize::try_from(ext).unwrap_or(buf.len() - pos))
+            } else if size32 == 0 {
+                (8usize, buf.len() - pos)
+            } else {
+                (8usize, size32 as usize)
+            };
+            if total < hdr {
+                break;
+            }
+            let end = pos.saturating_add(total).min(buf.len());
+            if let Some(payload) = buf.get(pos + hdr..end) {
+                f(fourcc, payload);
+            }
+            if end <= pos {
+                break;
+            }
+            pos = end;
+        }
+    }
+
+    let mut duration_ms = 0u64;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    iter_boxes(bytes, |fourcc, payload| {
+        if &fourcc == b"moov" {
+            iter_boxes(payload, |sub_id, sub_payload| {
+                if &sub_id == b"mvhd" && !sub_payload.is_empty() {
+                    let ver = sub_payload[0];
+                    if ver == 0 {
+                        if let (Some(ts), Some(dur)) =
+                            (read_be_u32(sub_payload, 12), read_be_u32(sub_payload, 16))
+                        {
+                            if ts > 0 {
+                                duration_ms = (dur as u64).saturating_mul(1000) / ts as u64;
+                            }
+                        }
+                    } else if ver == 1 {
+                        if let (Some(ts), Some(dur)) =
+                            (read_be_u32(sub_payload, 20), read_be_u64(sub_payload, 24))
+                        {
+                            if ts > 0 {
+                                duration_ms = dur.saturating_mul(1000) / ts as u64;
+                            }
+                        }
+                    }
+                } else if &sub_id == b"trak" && width == 0 && height == 0 {
+                    iter_boxes(sub_payload, |trak_id, trak_payload| {
+                        if &trak_id == b"tkhd" && !trak_payload.is_empty() && width == 0 {
+                            let ver = trak_payload[0];
+                            let off = if ver == 0 { 76 } else { 88 };
+                            if let (Some(w_fx), Some(h_fx)) = (
+                                read_be_u32(trak_payload, off),
+                                read_be_u32(trak_payload, off + 4),
+                            ) {
+                                let w = w_fx >> 16;
+                                let h = h_fx >> 16;
+                                if w > 0 && h > 0 {
+                                    width = w;
+                                    height = h;
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+    });
+
+    if width > 0 && height > 0 || duration_ms > 0 {
+        Some((duration_ms, width, height))
+    } else {
+        None
+    }
+}
+
+fn probe_video_metadata(path: &std::path::Path, bytes: &[u8]) -> (u64, u32, u32) {
+    if let Some((dur, w, h)) = probe_mp4_metadata(bytes) {
+        return (
+            dur,
+            if w > 0 { w } else { 1280 },
+            if h > 0 { h } else { 720 },
+        );
+    }
+    let mut cmd = std::process::Command::new("ffprobe");
+    cmd.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+    ])
+    .arg(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let txt = String::from_utf8_lossy(&out.stdout);
+            let mut nums = txt.lines().filter_map(|l| l.trim().parse::<f64>().ok());
+            let w = nums.next().map(|v| v as u32).unwrap_or(0);
+            let h = nums.next().map(|v| v as u32).unwrap_or(0);
+            let dur = nums.next().map(|v| (v * 1000.0).max(0.0) as u64).unwrap_or(0);
+            if w > 0 || h > 0 || dur > 0 {
+                return (
+                    dur,
+                    if w > 0 { w } else { 1280 },
+                    if h > 0 { h } else { 720 },
+                );
+            }
+        }
+    }
+    (0, 1280, 720)
+}
+
+fn generate_video_thumbnail_jpeg(
+    video_path: &std::path::Path,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    for ss in ["00:00:00.5", "0"] {
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-y", "-ss", ss, "-i"])
+            .arg(video_path)
+            .args([
+                "-vframes",
+                "1",
+                "-vf",
+                "scale=640:-2",
+                "-f",
+                "image2",
+                "-vcodec",
+                "mjpeg",
+                "-q:v",
+                "4",
+                "pipe:1",
+            ]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        if let Ok(out) = cmd.output() {
+            if out.status.success() && !out.stdout.is_empty() {
+                return Some(out.stdout);
+            }
+        }
+    }
+
+    let (tw, th) = if height > width { (270u32, 480u32) } else { (480u32, 270u32) };
+    let mut img = image::RgbImage::from_pixel(tw, th, image::Rgb([24, 30, 42]));
+    let cx = (tw / 2) as i32;
+    let cy = (th / 2) as i32;
+    let half_h = 26i32;
+    for dy in -half_h..=half_h {
+        let span = ((half_h - dy.abs()) * 42) / half_h.max(1);
+        for dx in -12..=(-12 + span) {
+            let px = cx + dx;
+            let py = cy + dy;
+            if px >= 0 && px < tw as i32 && py >= 0 && py < th as i32 {
+                img.put_pixel(px as u32, py as u32, image::Rgb([238, 242, 248]));
+            }
+        }
+    }
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+        .ok()?;
+    Some(buf)
+}
+
+async fn upload_video_thumbnail(
+    s: &Session,
+    file_host: &str,
+    clean_target: &str,
+    is_group: bool,
+    target_type: u8,
+    client_id: u64,
+    jpeg_bytes: &[u8],
+) -> Option<String> {
+    let upload_ep = if is_group {
+        "/api/group/photo_original/upload"
+    } else {
+        "/api/message/photo_original/upload"
+    };
+    let mut m = serde_json::Map::new();
+    m.insert("totalChunk".into(), json!(1));
+    m.insert("fileName".into(), json!("video_thumb.jpg"));
+    m.insert("clientId".into(), json!(client_id.saturating_add(1)));
+    m.insert("totalSize".into(), json!(jpeg_bytes.len() as u64));
+    m.insert("imei".into(), json!(s.imei));
+    m.insert("isE2EE".into(), json!(0));
+    m.insert("jxl".into(), json!(0));
+    m.insert("chunkId".into(), json!(1));
+    if is_group {
+        m.insert("grid".into(), json!(clean_target));
+    } else {
+        m.insert("toid".into(), json!(clean_target));
+    }
+    let params = s.encoded_params(&Value::Object(m)).ok()?;
+    let url = format!(
+        "{file_host}{upload_ep}?{}&params={params}&type={target_type}",
+        s.common_params()
+    );
+    let up_raw = s
+        .post_multipart(&url, "chunkContent", "video_thumb.jpg", "image/jpeg", jpeg_bytes)
+        .await
+        .ok()?;
+    let dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+    let data_node = dec.get("data").unwrap_or(&dec);
+    pick_str(data_node, &["normalUrl", "thumbUrl", "hdUrl", "oriUrl", "url"])
+}
+
+pub(crate) fn build_native_video_forward_params(
+    clean_target: &str,
+    is_group: bool,
+    client_id: u64,
+    imei: &str,
+    video_url: &str,
+    thumb_url: &str,
+    duration_ms: u64,
+    width: u32,
+    height: u32,
+    file_size: u64,
+    caption: &str,
+) -> Value {
+    let msg_info = json!({
+        "videoUrl": video_url,
+        "thumbUrl": thumb_url,
+        "duration": duration_ms,
+        "width": width,
+        "height": height,
+        "fileSize": file_size,
+        "properties": {
+            "color": -1,
+            "size": -1,
+            "type": 1003,
+            "subType": 0,
+            "ext": {
+                "sSrcType": -1,
+                "sSrcStr": "",
+                "msg_warning_type": 0
+            }
+        },
+        "title": caption.trim(),
+    });
+    let mut params = serde_json::Map::new();
+    if is_group {
+        params.insert("grid".into(), json!(clean_target));
+        params.insert("visibility".into(), json!(0));
+    } else {
+        params.insert("toId".into(), json!(clean_target));
+    }
+    params.insert("clientId".into(), json!(client_id.to_string()));
+    params.insert("ttl".into(), json!(0));
+    params.insert("zsource".into(), json!(704));
+    params.insert("msgType".into(), json!(5));
+    params.insert("msgInfo".into(), json!(msg_info.to_string()));
+    params.insert("imei".into(), json!(imei));
+    Value::Object(params)
+}
+
 /// [`send_attachment`] with an explicit HD flag and no album membership.
 pub async fn send_attachment_ext(
     s: &Session,
@@ -2370,7 +2928,7 @@ pub async fn send_attachment_in_layout(
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
     );
-    let is_video = matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "webm" | "avi");
+    let is_video = matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v");
 
     let file_host = if s.domains.file.is_empty() {
         "https://tt-files-wpa.zaloapp.com"
@@ -2620,10 +3178,11 @@ pub async fn send_attachment_in_layout(
     // (`cmd = 601`, `subCmd = 0`, `act_type = "file_done"`) containing the CDN fileUrl.
     // That fileUrl is mandatory for `/api/message/asyncfile/msg` (or `/api/group/asyncfile/msg`).
     let mime = match ext.as_str() {
-        "mp4" => "video/mp4",
+        "mp4" | "m4v" => "video/mp4",
         "mov" => "video/quicktime",
         "mkv" => "video/x-matroska",
         "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         "pdf" => "application/pdf",
@@ -2690,6 +3249,97 @@ pub async fn send_attachment_in_layout(
                     "chat::send_attachment",
                     &format!("no file_done event for fileId {fid} within {FILE_DONE_TIMEOUT:?}"),
                 ),
+            }
+        }
+    }
+
+    if is_video && !file_url.is_empty() {
+        let (duration_ms, vid_w, vid_h) = probe_video_metadata(file_path, &file_bytes);
+        let thumb_url = match generate_video_thumbnail_jpeg(file_path, vid_w, vid_h) {
+            Some(jpeg) => upload_video_thumbnail(
+                s,
+                file_host,
+                clean_target,
+                is_group,
+                target_type,
+                client_id,
+                &jpeg,
+            )
+            .await
+            .unwrap_or_default(),
+            None => String::new(),
+        };
+        let fwd_ep = if is_group {
+            "/api/group/forward"
+        } else {
+            "/api/message/forward"
+        };
+        let fwd_params = build_native_video_forward_params(
+            clean_target,
+            is_group,
+            client_id,
+            &s.imei,
+            &file_url,
+            &thumb_url,
+            duration_ms,
+            vid_w,
+            vid_h,
+            total_size,
+            caption,
+        );
+        if let Ok(enc) = s.encoded_params(&fwd_params) {
+            let fwd_url = format!("{file_host}{fwd_ep}?{}", s.common_params());
+            match s.post_form(&fwd_url, format!("params={enc}")).await {
+                Ok(raw) => {
+                    let fwd_resp = s.maybe_decrypt(raw, s.session_key_bytes()).await;
+                    let code = fwd_resp
+                        .get("error_code")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(-1);
+                    if code == 0 {
+                        let msg_id = fwd_resp
+                            .get("data")
+                            .and_then(|d| pick_str(d, &["msgId"]))
+                            .unwrap_or_else(|| format!("out_{client_id}"));
+                        let display_text = if !caption.trim().is_empty() {
+                            caption.trim().to_string()
+                        } else {
+                            format!("[Video] {file_name}")
+                        };
+                        let cm = ChatMessage {
+                            id: msg_id,
+                            client_message_id: client_id.to_string(),
+                            sender: "Tôi".into(),
+                            text: display_text,
+                            time: crate::ui::clock(),
+                            is_outgoing: true,
+                            ts: client_id as i64,
+                            delivery: crate::message_model::DeliveryState::ServerAccepted,
+                            kind: crate::message_model::MessageKind::Video,
+                            link_url: Some(file_url),
+                            link_thumb: (!thumb_url.is_empty()).then_some(thumb_url),
+                            link_title: Some(format!(
+                                "{file_name} ({})",
+                                format_file_size(total_size)
+                            )),
+                            link_desc: (!caption.trim().is_empty())
+                                .then(|| caption.trim().to_string()),
+                            link_src: Some("Video Zalo".into()),
+                            ..Default::default()
+                        };
+                        return Ok((fwd_resp, cm));
+                    }
+                    crate::logger::log_error(
+                        "chat::send_video_forward",
+                        &format!("forward returned error_code={code}: {fwd_resp:?}"),
+                    );
+                }
+                Err(e) => {
+                    crate::logger::log_error(
+                        "chat::send_video_forward",
+                        &format!("forward request failed: {e}"),
+                    );
+                }
             }
         }
     }
@@ -4321,6 +4971,45 @@ pub async fn send_quote_message(
         .await
 }
 
+/// Wire identity of a quoted message, as the quote endpoints expect it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuoteTarget {
+    /// `qmsgOwner`: uid of the quoted message's sender.
+    pub owner: String,
+    /// `qmsgId`: server `msgId`.
+    pub msg_id: Option<String>,
+    /// `qmsgCliId`: sender's `cliMsgId`.
+    pub cli_msg_id: Option<String>,
+}
+
+/// Resolve `qmsgOwner` / `qmsgId` / `qmsgCliId` from wire identity.
+///
+/// `ChatMessage::sender` is a display name for many group rows, and `ChatMessage::id`
+/// may hold the `cliMsgId` (`35_exact_message_identity.md`), so neither is used directly.
+pub(crate) fn quote_target(
+    quoted: &ChatMessage,
+    my_uid: &str,
+    to_id: &str,
+    is_group: bool,
+) -> QuoteTarget {
+    let owner = if quoted.is_outgoing {
+        my_uid.to_string()
+    } else if let Some(uid) = sidebar_sender_id(quoted) {
+        uid
+    } else if !quoted.sender.is_empty() && quoted.sender.bytes().all(|b| b.is_ascii_digit()) {
+        quoted.sender.clone()
+    } else if !is_group {
+        to_id.to_string()
+    } else {
+        "0".to_string()
+    };
+    QuoteTarget {
+        owner,
+        msg_id: server_message_id(quoted),
+        cli_msg_id: client_message_id(quoted),
+    }
+}
+
 /// Preserve the request client ID for reconciliation with a later server echo.
 pub(crate) async fn send_quote_message_with_client_id(
     s: &Session,
@@ -4340,28 +5029,27 @@ pub(crate) async fn send_quote_message_with_client_id(
         .map(|l| l.uin.clone())
         .unwrap_or_else(|| "0".into());
 
-    let qmsg_owner = if quoted.is_outgoing {
-        my_uid.as_str()
-    } else if !quoted.sender.is_empty() && quoted.sender.chars().all(|c| c.is_ascii_digit()) {
-        quoted.sender.as_str()
-    } else if !is_group {
-        to_id
-    } else {
-        "0"
-    };
-
-    let qmsg_id_num = quoted.id.parse::<u64>().unwrap_or(now.saturating_sub(1000));
+    let target = quote_target(quoted, &my_uid, to_id, is_group);
+    let qmsg_owner = target.owner.as_str();
+    let qmsg_id_num = target
+        .msg_id
+        .as_deref()
+        .and_then(|id| id.parse::<u64>().ok())
+        .unwrap_or(0);
+    let qmsg_cli_id = target
+        .cli_msg_id
+        .as_deref()
+        .and_then(|id| id.parse::<u64>().ok())
+        .unwrap_or(qmsg_id_num);
     let qmsg_ts = if quoted.ts > 0 {
         quoted.ts as u64
     } else {
         now.saturating_sub(1000)
     };
-    let qmsg_cli_id = qmsg_ts;
 
     let quote_res: Result<Value> = async {
-        if quoted.id.starts_with("out_") || quoted.id.starts_with("local_") || quoted.id.is_empty()
-        {
-            anyhow::bail!("local quote id");
+        if quoted.id.starts_with("local_") || qmsg_id_num == 0 {
+            anyhow::bail!("quoted message has no server id");
         }
         if is_group {
             let clean_grid = to_id
@@ -4394,7 +5082,12 @@ pub(crate) async fn send_quote_message_with_client_id(
             let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
             if let Some(code) = resp.get("error_code").and_then(Value::as_i64) {
                 if code != 0 {
-                    anyhow::bail!("quote error {code}");
+                    anyhow::bail!(
+                        "quote error {code}: {}",
+                        resp.get("error_message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                    );
                 }
             }
             Ok(resp)
@@ -4431,7 +5124,12 @@ pub(crate) async fn send_quote_message_with_client_id(
             let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
             if let Some(code) = resp.get("error_code").and_then(Value::as_i64) {
                 if code != 0 {
-                    anyhow::bail!("quote error {code}");
+                    anyhow::bail!(
+                        "quote error {code}: {}",
+                        resp.get("error_message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                    );
                 }
             }
             Ok(resp)
@@ -4441,7 +5139,12 @@ pub(crate) async fn send_quote_message_with_client_id(
 
     match quote_res {
         Ok(r) => Ok(r),
-        Err(_) => {
+        Err(err) => {
+            // The plain message still goes out, but the reply link is lost; leave a trace.
+            crate::logger::log_error(
+                "chat::send_quote",
+                &format!("quote failed, sending without reply link: {err}"),
+            );
             if is_group {
                 send_group_message_with_client_id(s, to_id, text, now).await
             } else {
@@ -4646,6 +5349,103 @@ pub fn icon_to_emoji(icon: &str) -> &'static str {
     }
 }
 
+/// Replace Zalo `/-code` emoticon tokens in message text with emoji for display
+/// (e.g. the quick "like" button sends the text `/-strong`). Only whole whitespace-separated
+/// tokens with a known code are replaced; unknown codes and all other text stay as typed.
+pub fn text_emoticons_to_emoji(text: &str) -> std::borrow::Cow<'_, str> {
+    fn emoji_for(token: &str) -> Option<&'static str> {
+        Some(match token {
+            "/-strong" => "👍",
+            "/-weak" => "👎",
+            "/-heart" => "❤️",
+            "/-break" => "💔",
+            "/-ok" => "👌",
+            "/-v" => "✌️",
+            "/-rose" => "🌹",
+            _ => return None,
+        })
+    }
+    if !text.contains("/-") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    let mut convert_words = |segment: &str, out: &mut String| {
+        // `split_inclusive` keeps each separator so spacing and line breaks are preserved.
+        for piece in segment.split_inclusive(char::is_whitespace) {
+            let token = piece.trim_end_matches(char::is_whitespace);
+            match emoji_for(token) {
+                Some(emoji) => {
+                    out.push_str(emoji);
+                    out.push_str(&piece[token.len()..]);
+                    changed = true;
+                }
+                None => out.push_str(piece),
+            }
+        }
+    };
+    // Code is left verbatim so a code block's Copy button returns the original text:
+    // skip fenced ``` blocks and `inline code` spans.
+    let mut in_fence = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            continue;
+        }
+        for (i, segment) in line.split('`').enumerate() {
+            if i > 0 {
+                out.push('`');
+            }
+            if i % 2 == 1 {
+                out.push_str(segment);
+            } else {
+                convert_words(segment, &mut out);
+            }
+        }
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+#[cfg(test)]
+mod text_emoticon_tests {
+    use super::text_emoticons_to_emoji;
+
+    #[test]
+    fn known_codes_become_emoji_and_spacing_is_kept() {
+        assert_eq!(text_emoticons_to_emoji("/-strong"), "👍");
+        assert_eq!(text_emoticons_to_emoji("ok /-heart\n/-strong "), "ok ❤️\n👍 ");
+    }
+
+    #[test]
+    fn unknown_codes_and_embedded_text_are_untouched() {
+        assert_eq!(text_emoticons_to_emoji("/-xyz"), "/-xyz");
+        assert_eq!(text_emoticons_to_emoji("a/-strong"), "a/-strong");
+        assert_eq!(text_emoticons_to_emoji("path /-strong/x"), "path /-strong/x");
+        // Code stays verbatim (fenced blocks and inline spans), text around it converts.
+        assert_eq!(
+            text_emoticons_to_emoji("/-ok\n```\necho /-strong\n```\n/-heart"),
+            "👌\n```\necho /-strong\n```\n❤️"
+        );
+        assert_eq!(
+            text_emoticons_to_emoji("run `echo /-strong` /-strong"),
+            "run `echo /-strong` 👍"
+        );
+        assert!(matches!(
+            text_emoticons_to_emoji("plain text"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+}
+
 /// Special reaction code sent to clear all of our own reactions on a message (`rType = -1`, `rIcon = ""`).
 pub const CLEAR_REACTION_CODE: &str = "/-remove";
 
@@ -4668,6 +5468,37 @@ pub fn is_clear_reaction(emoji_or_code: &str) -> bool {
     reaction_code_and_type(emoji_or_code).1 == -1
 }
 
+/// `rMsg` identity of the reacted message: (`gMsgID` = server msgId, `cMsgID` = the
+/// sender's cliMsgId), taken from the wire identity. `ChatMessage::id` may hold either
+/// id (re-notes/35) and `ts` is not an id; using them made the server accept the
+/// reaction while other devices could not match it to a message (re-notes/39).
+/// Without wire identity the fallbacks are best effort.
+fn reaction_target_ids(msg: &ChatMessage, now: u64) -> (Value, u64) {
+    let is_local_id =
+        msg.id.is_empty() || msg.id.starts_with("out_") || msg.id.starts_with("local_");
+    // When `id` is the client id (a merged row that kept its bare cliMsgId), use the wire
+    // server id even if the wire client id is missing; `server_message_id` would return `id`.
+    let wire_server = wire_identity(msg.wire_ref.server_id.as_ref());
+    let id_is_client = !msg.client_message_id.is_empty() && msg.id == msg.client_message_id;
+    let server = if id_is_client {
+        wire_server.or_else(|| server_message_id(msg))
+    } else {
+        server_message_id(msg)
+    }
+    .filter(|id| !is_local_id || id != &msg.id);
+    let g_msg_id = match server {
+        Some(id) => json!(id),
+        None if is_local_id => json!(""),
+        None => json!(msg.id),
+    };
+    let c_msg_id = client_message_id(msg)
+        .and_then(|id| id.parse::<u64>().ok())
+        .or_else(|| (!is_local_id).then(|| msg.id.parse::<u64>().ok()).flatten())
+        .or_else(|| (msg.ts > 0).then_some(msg.ts as u64))
+        .unwrap_or(now);
+    (g_msg_id, c_msg_id)
+}
+
 /// Send a message reaction (`sendReactionMessage` in `compact-app-pc.b7bec208c4c8f73e09f8.js:14317097`, cmd `12410` / `12411`).
 pub async fn send_reaction(
     s: &Session,
@@ -4685,18 +5516,7 @@ pub async fn send_reaction(
         .unwrap_or(0);
 
     let (r_icon, r_type) = reaction_code_and_type(reaction);
-    let is_local_id =
-        msg.id.is_empty() || msg.id.starts_with("out_") || msg.id.starts_with("local_");
-    let g_msg_id_val = if is_local_id {
-        json!("")
-    } else {
-        json!(msg.id)
-    };
-    let c_msg_id = if msg.ts > 0 {
-        msg.ts as u64
-    } else {
-        msg.id.parse::<u64>().unwrap_or(now)
-    };
+    let (g_msg_id_val, c_msg_id) = reaction_target_ids(msg, now);
 
     let inner_msg = json!({
         "rMsg": [{
@@ -4827,6 +5647,57 @@ pub async fn delete_message_for_me(
     }
 }
 
+pub(crate) fn build_recall_payload(
+    to_id: &str,
+    is_group: bool,
+    msg: &ChatMessage,
+    client_id: u64,
+    imei: &str,
+) -> Result<Value> {
+    let msg_id = msg.id.trim();
+    if msg_id.is_empty() || msg_id.starts_with("out_") || msg_id.starts_with("local_") {
+        anyhow::bail!("tin nhắn chưa có mã máy chủ");
+    }
+    let cli_id = if !msg.client_message_id.trim().is_empty() && msg.client_message_id.trim() != "0"
+    {
+        msg.client_message_id.trim().to_string()
+    } else if let Some(h_cli) = msg
+        .history_source
+        .as_ref()
+        .and_then(|v| pick_str(v, &["cliMsgId", "clientId", "client_message_id"]))
+        .filter(|s| !s.trim().is_empty() && s.trim() != "0")
+    {
+        h_cli
+    } else if msg.ts > 0 {
+        msg.ts.to_string()
+    } else {
+        client_id.to_string()
+    };
+
+    if is_group {
+        let clean_grid = to_id
+            .trim_start_matches("group_")
+            .trim_start_matches('g')
+            .trim_start_matches('G');
+        Ok(obj(&[
+            ("msgId", json!(msg_id)),
+            ("grid", json!(clean_grid)),
+            ("clientId", json!(client_id)),
+            ("visibility", json!(0)),
+            ("cliMsgIdUndo", json!(cli_id)),
+            ("imei", json!(imei)),
+        ]))
+    } else {
+        Ok(obj(&[
+            ("msgId", json!(msg_id)),
+            ("toid", json!(to_id)),
+            ("clientId", json!(client_id)),
+            ("cliMsgIdUndo", json!(cli_id)),
+            ("imei", json!(imei)),
+        ]))
+    }
+}
+
 /// Recall / undo an outgoing message for everyone (`undoMessage` @ `compact-app-pc.js:14376599`, cmd `11281` / `11192`).
 pub async fn recall_message(
     s: &Session,
@@ -4841,53 +5712,56 @@ pub async fn recall_message(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let cli_id = if msg.ts > 0 {
-        msg.ts.to_string()
-    } else {
-        now.to_string()
-    };
+    let body = build_recall_payload(to_id, is_group, msg, now, &s.imei)?;
+    let params = s.encoded_params(&body)?;
 
-    if is_group {
-        let clean_grid = to_id
-            .trim_start_matches("group_")
-            .trim_start_matches('g')
-            .trim_start_matches('G');
-        let body = obj(&[
-            ("msgId", json!(msg.id)),
-            ("grid", json!(clean_grid)),
-            ("clientId", json!(now)),
-            ("visibility", json!(0)),
-            ("cliMsgIdUndo", json!(cli_id)),
-            ("imei", json!(s.imei)),
-        ]);
-        let params = s.encoded_params(&body)?;
-        let url = format!(
-            "{}/api/group/undomsg?{}",
-            s.domains.group,
-            s.common_params()
-        );
-        let resp = s.post_form(&url, format!("params={params}")).await?;
-        Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    let url = if is_group {
+        let group_host = if s.domains.group.is_empty() {
+            "https://tt-group-wpa.chat.zalo.me"
+        } else {
+            s.domains.group.trim_end_matches('/')
+        };
+        format!("{group_host}/api/group/undomsg?{}", s.common_params())
     } else {
         let host = if s.domains.chat.contains("-msg-chat.")
             || s.domains.chat.contains("tt-chat2-wpa")
             || s.domains.chat.is_empty()
         {
-            "https://tt-chat3-wpa.api.zaloapp.com"
+            "https://tt-chat3-wpa.chat.zalo.me"
         } else {
-            &s.domains.chat
+            s.domains.chat.trim_end_matches('/')
         };
-        let body = obj(&[
-            ("msgId", json!(msg.id)),
-            ("toid", json!(to_id)),
-            ("clientId", json!(now)),
-            ("cliMsgIdUndo", json!(cli_id)),
-        ]);
-        let params = s.encoded_params(&body)?;
-        let url = format!("{host}/api/message/undo?{}", s.common_params());
-        let resp = s.post_form(&url, format!("params={params}")).await?;
-        Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+        format!("{host}/api/message/undo?{}", s.common_params())
+    };
+    let resp = s.post_form(&url, format!("params={params}")).await?;
+    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    if let Some(code) = dec.get("error_code").and_then(Value::as_i64) {
+        if code != 0 {
+            let emsg = dec
+                .get("error_message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            crate::logger::log_error(
+                "chat::recall_message",
+                &format!("msgId={} group={is_group} code={code} resp={dec}", msg.id),
+            );
+            return Err(crate::session::SessionError::new(code, emsg).into());
+        }
     }
+    if let Some(st) = dec
+        .get("data")
+        .and_then(|d| d.get("status"))
+        .and_then(Value::as_i64)
+    {
+        if st < 0 {
+            crate::logger::log_error(
+                "chat::recall_message",
+                &format!("rejected msgId={} group={is_group} status={st} resp={dec}", msg.id),
+            );
+            anyhow::bail!("máy chủ từ chối thu hồi (status={st})");
+        }
+    }
+    Ok(dec)
 }
 
 /// `GET /api/preloadconvers/get-last-msgs` (cmd 10053).
@@ -6048,12 +6922,7 @@ pub async fn poll_new_messages(
     if let Ok(mut store) = crate::store::MessageStore::open(&acc_db) {
         let _ = crate::store::persist_threads(&mut store, threads);
     }
-    if acc_db != "zalo_history.db" {
-        if let Ok(mut store) = crate::store::MessageStore::open("zalo_history.db") {
-            let _ = crate::store::persist_threads(&mut store, threads);
-        }
-    }
-    save_threads_cache(threads);
+    save_threads_cache_for(uin, threads);
     Ok(())
 }
 
@@ -6064,20 +6933,45 @@ fn extract_content_text(v: &Value) -> Option<String> {
             if trimmed == "sendBubbleMessage" {
                 return None;
             }
-            if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            {
                 if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
                     if let Some(inner) = extract_content_text(&parsed) {
                         if !inner.is_empty() {
                             return Some(inner);
                         }
                     }
-                    // It is a JSON object with no text/caption fields (like sticker {catId, id} or photo {href}).
-                    // Return None so parse_chat_message can assign a clean descriptive label like [Nhãn dán] or [Hình ảnh]
-                    // instead of displaying the raw JSON string in chat.
                     return None;
                 }
             }
             Some(s.clone())
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                let is_header = item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t.starts_with("l.a.header."));
+                if is_header {
+                    if let Some(title) = item
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        return Some(title.to_string());
+                    }
+                }
+            }
+            for item in arr {
+                if let Some(inner) = extract_content_text(item) {
+                    if !inner.trim().is_empty() {
+                        return Some(inner);
+                    }
+                }
+            }
+            None
         }
         Value::Object(o) => {
             let href = o
@@ -6132,7 +7026,7 @@ fn extract_content_text(v: &Value) -> Option<String> {
                     }
                 }
             }
-            for nested_key in ["data", "params"] {
+            for nested_key in ["data", "params", "zinstant_msg", "customMsg"] {
                 if let Some(nested) = o.get(nested_key) {
                     match nested {
                         Value::Object(_) => {
@@ -6142,7 +7036,7 @@ fn extract_content_text(v: &Value) -> Option<String> {
                                 }
                             }
                         }
-                        Value::String(s) if s.trim().starts_with('{') => {
+                        Value::String(s) if s.trim().starts_with('{') || s.trim().starts_with('[') => {
                             if let Some(inner) = extract_content_text(nested) {
                                 if !inner.is_empty() {
                                     return Some(inner);
@@ -6152,6 +7046,16 @@ fn extract_content_text(v: &Value) -> Option<String> {
                         _ => {}
                     }
                 }
+            }
+            if let Some(vi_en) = o
+                .get("vi")
+                .or_else(|| o.get("en"))
+                .or_else(|| o.get("previewTxt"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(vi_en.to_string());
             }
             if let Some(Value::String(s)) = o.get("fileName").or_else(|| o.get("name")) {
                 if !s.trim().is_empty() {
@@ -6181,10 +7085,13 @@ fn normalize_msg_type(it: &Value) -> String {
             Some(4) | Some(5) | Some(13) => "chat.sticker".into(),
             Some(6) => "chat.contact".into(),
             Some(7) => "chat.gif".into(),
+            Some(15) | Some(21) => "chat.list.action".into(),
             Some(17) | Some(24) => "chat.location".into(),
             Some(18) => "chat.video".into(),
             Some(19) => "chat.file".into(),
             Some(20) | Some(31) => "chat.undo".into(),
+            Some(25) => "chat.ecard".into(),
+            Some(53) => "chat.webcontent.v2".into(),
             _ => n.to_string(),
         },
         _ => String::new(),
@@ -6392,6 +7299,13 @@ pub fn resolve_attachment_file_name(title: Option<&str>, text: &str, url: &str) 
     }
 }
 
+pub(crate) fn is_video_file_extension(ext: &str) -> bool {
+    matches!(
+        ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str(),
+        "mp4" | "mov" | "mkv" | "webm" | "avi"
+    )
+}
+
 /// Extract rich link/media card metadata (`link_url`, `link_title`, `link_desc`, `link_thumb`, `link_src`)
 /// from a Zalo `chat.recommended` (`recommened.link`) or rich-object `content`.
 fn extract_link_info(
@@ -6464,20 +7378,15 @@ fn extract_link_info(
                 .filter(|s| !s.is_empty());
             let mut has_file_params =
                 o.get("fileName").is_some() || url.to_ascii_lowercase().contains("/renewmedia");
+            let mut has_duration = o.get("duration").is_some();
 
             let mut is_video = o.get("videoUrl").is_some()
-                || o.get("duration").is_some()
                 || o.get("video_width").is_some()
                 || o.get("video_height").is_some()
                 || url.to_ascii_lowercase().contains("video-")
                 || url.to_ascii_lowercase().contains(".dlmd.me")
                 || url.to_ascii_lowercase().contains("/video/")
-                || file_ext.as_deref().is_some_and(|e| {
-                    matches!(
-                        e.to_ascii_lowercase().as_str(),
-                        "mp4" | "mov" | "mkv" | "webm" | "avi"
-                    )
-                });
+                || file_ext.as_deref().is_some_and(is_video_file_extension);
 
             if let Some(params_str) = o.get("params").and_then(Value::as_str) {
                 if let Ok(p_json) = serde_json::from_str::<Value>(params_str.trim()) {
@@ -6497,12 +7406,10 @@ fn extract_link_info(
                             .map(|s| s.trim().trim_start_matches('.').to_string())
                             .filter(|s| !s.is_empty());
                     }
-                    if p_json.get("video_width").is_some()
-                        || p_json.get("video_height").is_some()
-                        || p_json.get("duration").is_some()
-                    {
+                    if p_json.get("video_width").is_some() || p_json.get("video_height").is_some() {
                         is_video = true;
                     }
+                    has_duration |= p_json.get("duration").is_some();
                     if p_json.get("fileExt").is_some()
                         || p_json.get("fileSize").is_some()
                         || p_json.get("checksum").is_some()
@@ -6516,6 +7423,21 @@ fn extract_link_info(
                         .filter(|s| !s.is_empty())
                         .map(str::to_string);
                 }
+            }
+            let title_ext = title
+                .as_deref()
+                .filter(|name| !name.starts_with("http://") && !name.starts_with("https://"))
+                .and_then(|name| name.rsplit_once('.'))
+                .filter(|(base, ext)| {
+                    !base.is_empty() && !ext.is_empty() && !ext.chars().any(char::is_whitespace)
+                })
+                .map(|(_, ext)| ext);
+            let has_file_extension = file_ext.is_some() || title_ext.is_some();
+            is_video |= file_ext.as_deref().is_some_and(is_video_file_extension)
+                || title_ext.is_some_and(is_video_file_extension);
+            is_video |= has_duration && !has_file_extension;
+            if title.is_none() && file_ext.is_some() {
+                title = Some(resolve_attachment_file_name(None, "", &url));
             }
             if let (Some(ref mut t), Some(ref ext)) = (&mut title, &file_ext) {
                 let suffix = format!(".{ext}");
@@ -6559,6 +7481,385 @@ fn extract_link_info(
         _ => (None, None, None, None, None),
     }
 }
+
+fn parse_embedded_json(v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(_) | Value::Array(_) => Some(v.clone()),
+        Value::String(s) => {
+            let t = s.trim();
+            if (t.starts_with('{') && t.ends_with('}'))
+                || (t.starts_with('[') && t.ends_with(']'))
+            {
+                serde_json::from_str::<Value>(t).ok()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn pick_nonempty_str(o: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| o.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|s| !s.is_empty() && *s != "sendBubbleMessage")
+        .map(str::to_string)
+}
+
+fn pick_http_url(o: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| o.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .map(str::to_string)
+}
+
+fn pick_action_url(o: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| o.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|s| {
+            s.starts_with("http://") || s.starts_with("https://") || s.starts_with("zalo://")
+        })
+        .map(str::to_string)
+}
+
+fn extract_oa_card_items(arr: &[Value]) -> Vec<OaCardItem> {
+    let mut out = Vec::new();
+    for entry in arr {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let item_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+        let is_header = item_type.starts_with("l.a.header.")
+            || obj
+                .get("header")
+                .or_else(|| obj.get("isHeader"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        let title = pick_nonempty_str(obj, &["title", "name", "text"]).unwrap_or_default();
+        let description = pick_nonempty_str(
+            obj,
+            &["description", "desc", "subTitle", "subtitle", "caption"],
+        )
+        .unwrap_or_default();
+        let thumb = pick_http_url(
+            obj,
+            &["thumb", "thumbUrl", "image", "cover", "photo", "icon"],
+        );
+        let mut url = pick_action_url(obj, &["href", "url", "link"]);
+        if url.is_none() {
+            if let Some(p) = obj.get("params").and_then(parse_embedded_json) {
+                if let Some(po) = p.as_object() {
+                    url = pick_action_url(po, &["href", "url", "link"]);
+                }
+            }
+        }
+        if !title.is_empty() || thumb.is_some() {
+            out.push(OaCardItem {
+                is_header,
+                title,
+                description,
+                thumb,
+                url,
+            });
+        }
+    }
+    out
+}
+
+fn extract_oa_buttons_from_array(arr: &[Value], out: &mut Vec<OaCardButton>) {
+    for entry in arr {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let Some(label) = pick_nonempty_str(obj, &["title", "name", "label", "text"]) else {
+            continue;
+        };
+        let action = pick_nonempty_str(obj, &["action", "actionId", "type"]);
+        let mut url = pick_action_url(obj, &["href", "url", "link"]);
+        if url.is_none() {
+            if let Some(data_val) = obj.get("data").and_then(parse_embedded_json) {
+                if let Some(data_obj) = data_val.as_object() {
+                    url = pick_action_url(data_obj, &["href", "url", "link"]);
+                }
+            }
+        }
+        if url.is_none() {
+            if let Some(p_val) = obj.get("params").and_then(parse_embedded_json) {
+                if let Some(p_obj) = p_val.as_object() {
+                    url = pick_action_url(p_obj, &["href", "url", "link"]);
+                }
+            }
+        }
+        if !out.iter().any(|b| b.label == label && b.url == url) {
+            out.push(OaCardButton { label, url, action });
+        }
+    }
+}
+
+fn collect_oa_buttons(v: &Value, out: &mut Vec<OaCardButton>) {
+    let Some(obj) = v.as_object() else {
+        return;
+    };
+    for key in ["actions", "buttons"] {
+        if let Some(arr) = obj.get(key).and_then(Value::as_array) {
+            extract_oa_buttons_from_array(arr, out);
+        }
+    }
+    for nested_key in ["customMsg", "data"] {
+        if let Some(nested) = obj.get(nested_key).and_then(parse_embedded_json) {
+            collect_oa_buttons(&nested, out);
+        }
+    }
+}
+
+fn collect_oa_nested_items(v: &Value) -> Vec<OaCardItem> {
+    let Some(obj) = v.as_object() else {
+        return Vec::new();
+    };
+    for key in ["elements", "list", "items", "articles"] {
+        if let Some(arr) = obj.get(key).and_then(Value::as_array) {
+            let parsed = extract_oa_card_items(arr);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    if let Some(custom) = obj.get("customMsg").and_then(parse_embedded_json) {
+        let parsed = collect_oa_nested_items(&custom);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    Vec::new()
+}
+
+fn extract_custom_msg_text(v: &Value) -> Option<String> {
+    let obj = v.as_object()?;
+    let custom = obj.get("customMsg").and_then(parse_embedded_json)?;
+    let custom_obj = custom.as_object()?;
+    if let Some(msg) = custom_obj.get("msg").and_then(Value::as_object) {
+        if let Some(txt) = pick_nonempty_str(msg, &["vi", "en"]) {
+            return Some(txt);
+        }
+    }
+    pick_nonempty_str(custom_obj, &["msg", "description", "title", "text"])
+}
+
+fn build_oa_list_card(arr: &[Value]) -> Option<OaRichCard> {
+    let parsed = extract_oa_card_items(arr);
+    if parsed.is_empty() {
+        return None;
+    }
+    let header_idx = parsed.iter().position(|it| it.is_header);
+    let mut card = OaRichCard {
+        card_type: "oa_list".to_string(),
+        ..Default::default()
+    };
+    if let Some(idx) = header_idx {
+        let header = &parsed[idx];
+        card.banner_thumb = header.thumb.clone();
+        if !header.title.is_empty() {
+            card.title = Some(header.title.clone());
+        }
+        if !header.description.is_empty() {
+            card.description = Some(header.description.clone());
+        }
+        card.url = header.url.clone();
+        card.items = parsed
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, it)| (i != idx).then_some(it))
+            .collect();
+    } else {
+        card.items = parsed;
+    }
+    (!card.is_empty()).then_some(card)
+}
+
+/// Extract structured OA / MiniApp / ZInstant / ECard rich card metadata from a Zalo wire payload.
+pub(crate) fn extract_oa_rich_card(msg_type: &str, raw_content_val: Option<&Value>) -> Option<OaRichCard> {
+    let raw = raw_content_val?;
+    let parsed = parse_embedded_json(raw)?;
+
+    if let Some(arr) = parsed.as_array() {
+        return build_oa_list_card(arr);
+    }
+
+    let obj = parsed.as_object()?;
+    let action_str = obj
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if action_str.starts_with("recommened.misscall")
+        || action_str.starts_with("recommened.calling")
+        || action_str.starts_with("recommened.receivecall")
+        || action_str.starts_with("recommened.calltime")
+        || action_str == "recommened.user"
+        || action_str == "recommened.contact"
+        || action_str == "recommened.stickerset"
+    {
+        return None;
+    }
+
+    let params_val = obj.get("params").and_then(parse_embedded_json);
+    let zinstant_val = obj
+        .get("zinstant_msg")
+        .and_then(parse_embedded_json)
+        .or_else(|| {
+            params_val
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|p| p.get("zinstant_msg"))
+                .and_then(parse_embedded_json)
+        });
+    let meta_val = zinstant_val.as_ref().or(params_val.as_ref());
+
+    if msg_type == "chat.ecard" {
+        let ecard_type = obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if ecard_type == "7" || ecard_type == "client.onboarding" {
+            return None;
+        }
+        let mut buttons = Vec::new();
+        collect_oa_buttons(&parsed, &mut buttons);
+        if let Some(p) = &params_val {
+            collect_oa_buttons(p, &mut buttons);
+        }
+        let banner_thumb = pick_http_url(obj, &["href", "thumb", "image", "banner", "cover"]);
+        let title = pick_nonempty_str(obj, &["title"]);
+        let description = pick_nonempty_str(obj, &["description"]).or_else(|| {
+            params_val
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|p| pick_nonempty_str(p, &["previewTxt"]))
+        });
+        let card = OaRichCard {
+            card_type: "ecard".to_string(),
+            banner_thumb,
+            title,
+            description,
+            url: None,
+            source_label: None,
+            items: Vec::new(),
+            buttons,
+        };
+        return (!card.is_empty()).then_some(card);
+    }
+
+    let is_webcontent = matches!(msg_type, "chat.webcontent" | "chat.webcontent.v2");
+    let is_oa_action_type = msg_type == "chat.list.action"
+        || action_str.contains("miniapp")
+        || action_str.starts_with("oa.")
+        || action_str.contains("zinstant");
+
+    let mut buttons = Vec::new();
+    collect_oa_buttons(&parsed, &mut buttons);
+    if let Some(p) = &params_val {
+        collect_oa_buttons(p, &mut buttons);
+    }
+    if let Some(z) = &zinstant_val {
+        collect_oa_buttons(z, &mut buttons);
+    }
+
+    let mut items = collect_oa_nested_items(&parsed);
+    if items.is_empty() {
+        if let Some(m) = meta_val {
+            items = collect_oa_nested_items(m);
+        }
+    }
+
+    let has_http_href = pick_http_url(obj, &["href", "normalUrl", "hdUrl", "oriUrl", "url"]).is_some();
+    let banner_thumb = pick_http_url(
+        obj,
+        &["thumb", "thumbUrl", "image", "banner", "cover", "icon"],
+    )
+    .or_else(|| {
+        meta_val
+            .and_then(Value::as_object)
+            .and_then(|m| pick_http_url(m, &["thumb", "thumbUrl", "image", "banner", "cover"]))
+    });
+    let title = pick_nonempty_str(obj, &["title", "name"]).or_else(|| {
+        meta_val
+            .and_then(Value::as_object)
+            .and_then(|m| pick_nonempty_str(m, &["title", "name"]))
+    });
+    let description = pick_nonempty_str(obj, &["description", "caption", "subTitle"])
+        .or_else(|| meta_val.and_then(extract_custom_msg_text))
+        .or_else(|| {
+            meta_val
+                .and_then(Value::as_object)
+                .and_then(|m| pick_nonempty_str(m, &["description", "previewTxt"]))
+        });
+    let url = pick_action_url(obj, &["href", "url", "link"]).or_else(|| {
+        meta_val
+            .and_then(Value::as_object)
+            .and_then(|m| pick_action_url(m, &["href", "url", "link"]))
+    });
+    let source_label = pick_nonempty_str(obj, &["src", "appName", "oaName"]).or_else(|| {
+        meta_val
+            .and_then(Value::as_object)
+            .and_then(|m| pick_nonempty_str(m, &["src", "source", "appName", "oaName"]))
+    });
+
+    let is_banner_only_notice = !has_http_href
+        && banner_thumb.is_some()
+        && (title.is_some() || description.is_some())
+        && obj.get("catId").is_none()
+        && obj.get("stickerId").is_none()
+        && obj.get("fileName").is_none();
+
+    if !is_webcontent
+        && !is_oa_action_type
+        && items.is_empty()
+        && buttons.is_empty()
+        && !is_banner_only_notice
+    {
+        return None;
+    }
+
+    let is_miniapp = action_str.contains("miniapp")
+        || url.as_deref().is_some_and(|u| u.starts_with("zalo://") || u.contains("mini.zalo.me"))
+        || meta_val
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.contains_key("appId") || m.contains_key("miniAppId"));
+
+    let card_type = if !items.is_empty() && msg_type == "chat.list.action" {
+        "oa_list"
+    } else if is_miniapp {
+        "miniapp"
+    } else if is_webcontent {
+        "webcontent"
+    } else if !items.is_empty() {
+        "oa_list"
+    } else {
+        "banner"
+    };
+
+    let mut card = OaRichCard {
+        card_type: card_type.to_string(),
+        banner_thumb,
+        title,
+        description,
+        url,
+        source_label,
+        items,
+        buttons,
+    };
+    if let (Some(t), Some(d)) = (card.title.as_deref(), card.description.as_deref()) {
+        if t.trim() == d.trim() {
+            card.description = None;
+        }
+    }
+    (!card.is_empty()).then_some(card)
+}
+
 fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_type = normalize_msg_type(it);
 
@@ -6597,7 +7898,6 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
             "chat.video" | "video" | "18" | "chat.video.msg"
         ) || link_src.as_deref() == Some("Video Zalo")
             || raw_content_val.and_then(|v| v.get("videoUrl")).is_some()
-            || raw_content_val.and_then(|v| v.get("duration")).is_some()
             || link_url.as_deref().is_some_and(|u| {
                 let l = u.to_ascii_lowercase();
                 l.ends_with(".mp4")
@@ -6612,8 +7912,15 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     if is_video_msg {
         link_src = Some("Video Zalo".to_string());
     }
+    let is_undo_type = matches!(msg_type.as_str(), "chat.undo" | "undo" | "31");
+    let oa_card = if !is_voice_msg && !is_video_msg && !is_undo_type && sticker_meta.is_none() {
+        extract_oa_rich_card(&msg_type, raw_content_val)
+    } else {
+        None
+    };
     let is_link_card_msg = !is_voice_msg
         && !is_video_msg
+        && oa_card.is_none()
         && (matches!(
             msg_type.as_str(),
             "chat.link" | "link" | "6" | "share.link" | "chat.recommended"
@@ -6629,12 +7936,14 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
 
     let is_photo_msg = !is_video_msg
         && !is_link_card_msg
+        && oa_card.is_none()
         && (matches!(msg_type.as_str(), "chat.photo" | "photo" | "2" | "11")
             || link_src.as_deref() == Some("Hình ảnh Zalo")
             || link_url.as_deref().is_some_and(is_zalo_photo_cdn_url)
             || link_thumb.as_deref().is_some_and(is_zalo_photo_cdn_url));
     let is_file_msg = !is_voice_msg
         && !is_video_msg
+        && oa_card.is_none()
         && (matches!(
             msg_type.as_str(),
             "chat.file" | "file" | "19" | "share.file"
@@ -6704,12 +8013,25 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
             }
         }
     }
-    let is_undo_type = matches!(msg_type.as_str(), "chat.undo" | "undo" | "31");
     if is_undo_type {
         content = "[Tin nhắn đã thu hồi]".to_string();
         sticker_meta = None;
     } else if sticker_meta.is_some() && (content.is_empty() || content.starts_with('{')) {
         content = "[Nhãn dán]".to_string();
+    } else if content.is_empty() {
+        if let Some(ref card) = oa_card {
+            content = card
+                .title
+                .clone()
+                .or_else(|| card.description.clone())
+                .or_else(|| {
+                    card.items
+                        .iter()
+                        .find(|it| !it.title.is_empty())
+                        .map(|it| it.title.clone())
+                })
+                .unwrap_or_else(|| "[Tin nhắn OA]".to_string());
+        }
     }
     if sticker_meta.is_none() {
         let parse_ami = |s: &str| -> Option<(u64, u64, u32)> {
@@ -6732,6 +8054,16 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         }
     }
 
+    // Poll events ("X voted in the poll: …") carry an empty href/thumb and no text, and
+    // used to fall through to the "[Hình ảnh]" label below.
+    let is_poll_event = msg_type == "group.poll";
+    if is_poll_event {
+        let actor = it.get("dName").and_then(Value::as_str).unwrap_or_default();
+        if let Some(notice) = raw_content_val.and_then(|c| poll_notice_text(c, actor)) {
+            content = notice;
+        }
+    }
+
     if content.is_empty() {
         content = match msg_type.as_str() {
             "chat.sticker" | "sticker" | "4" | "5" | "13" => "[Nhãn dán]".to_string(),
@@ -6751,7 +8083,11 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
                         || o.get("id").is_some()
                     {
                         "[Nhãn dán]".to_string()
-                    } else if o.get("href").is_some() || o.get("thumb").is_some() {
+                    } else if [o.get("href"), o.get("thumb")]
+                        .into_iter()
+                        .flatten()
+                        .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+                    {
                         "[Hình ảnh]".to_string()
                     } else if o.is_object() {
                         "[Tin nhắn]".to_string()
@@ -6971,7 +8307,9 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         }
     }
 
-    let msg_kind = if sticker_meta.is_some() {
+    let msg_kind = if is_poll_event {
+        crate::message_model::MessageKind::System
+    } else if sticker_meta.is_some() {
         crate::message_model::MessageKind::Sticker
     } else if is_voice_msg {
         crate::message_model::MessageKind::Voice
@@ -6979,6 +8317,18 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         crate::message_model::MessageKind::Video
     } else if is_file_msg {
         crate::message_model::MessageKind::File
+    } else if msg_type == "chat.list.action"
+        || oa_card
+            .as_ref()
+            .is_some_and(|c| c.card_type == "oa_list")
+    {
+        crate::message_model::MessageKind::Action
+    } else if matches!(
+        msg_type.as_str(),
+        "chat.webcontent" | "chat.webcontent.v2" | "chat.ecard"
+    ) || oa_card.is_some()
+    {
+        crate::message_model::MessageKind::WebContent
     } else if is_link_card_msg {
         crate::message_model::MessageKind::Link
     } else if is_photo_msg {
@@ -7021,6 +8371,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         link_desc,
         link_thumb,
         link_src,
+        oa_card,
         media_group: if is_photo_msg {
             raw_content_val.and_then(MediaGroupLayout::from_content)
         } else {
@@ -7283,6 +8634,56 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
             else {
                 continue;
             };
+            if parsed.oa_card.is_none() {
+                let raw_mt = m_val.get("msgType").and_then(Value::as_str).unwrap_or("");
+                let cval = m_val.get("content");
+                let has_structured_content = cval.is_some_and(|v| {
+                    v.is_object()
+                        || v.is_array()
+                        || v.as_str().is_some_and(|s| {
+                            let t = s.trim_start();
+                            t.starts_with('{') || t.starts_with('[')
+                        })
+                });
+                if raw_mt.contains("webcontent")
+                    || raw_mt.contains("list")
+                    || raw_mt.contains("oa")
+                    || raw_mt.contains("ecard")
+                    || has_structured_content
+                {
+                    let c_keys: String = match cval {
+                        Some(Value::Object(map)) => {
+                            let mut ks: Vec<&str> = map.keys().map(String::as_str).collect();
+                            ks.sort_unstable();
+                            format!("obj[{}]", ks.join(","))
+                        }
+                        Some(Value::Array(arr)) => format!("arr({})", arr.len()),
+                        Some(Value::String(s)) => {
+                            if let Ok(pv) = serde_json::from_str::<Value>(s.trim()) {
+                                match pv {
+                                    Value::Object(map) => {
+                                        let mut ks: Vec<&str> =
+                                            map.keys().map(String::as_str).collect();
+                                        ks.sort_unstable();
+                                        format!("json_str_obj[{}]", ks.join(","))
+                                    }
+                                    Value::Array(arr) => format!("json_str_arr({})", arr.len()),
+                                    _ => format!("str({})", s.len()),
+                                }
+                            } else {
+                                format!("str({})", s.len())
+                            }
+                        }
+                        Some(_) => "other".into(),
+                        None => "none".into(),
+                    };
+                    let has_params = m_val.get("params").is_some();
+                    crate::logger::log_sync(&format!(
+                        "preview_diag tid={} mid={} mt={} content={} has_params={}",
+                        tid, parsed.id, raw_mt, c_keys, has_params
+                    ));
+                }
+            }
 
             if let Some(thread_index) = threads.iter().position(|thread| thread.id == tid) {
                 let t = &mut threads[thread_index];
@@ -7333,6 +8734,14 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                             && existing.text.trim() != "[Tin nhắn đã thu hồi]"
                         {
                             existing.text = parsed.text;
+                        }
+                    }
+                    if existing.oa_card.is_none() && parsed.oa_card.is_some() {
+                        existing.oa_card = parsed.oa_card;
+                        if existing.kind == crate::message_model::MessageKind::Text
+                            && parsed.kind != crate::message_model::MessageKind::Text
+                        {
+                            existing.kind = parsed.kind;
                         }
                     }
                     if !parsed.reactions.is_empty() {
@@ -7480,6 +8889,14 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
                         existing.text = m.text;
                     }
                 }
+                if existing.oa_card.is_none() && m.oa_card.is_some() {
+                    existing.oa_card = m.oa_card;
+                    if existing.kind == crate::message_model::MessageKind::Text
+                        && m.kind != crate::message_model::MessageKind::Text
+                    {
+                        existing.kind = m.kind;
+                    }
+                }
                 identities.insert(existing, row);
             } else {
                 identities.insert(&m, thread.messages.len());
@@ -7549,6 +8966,57 @@ pub fn parse_friendship_status_response(resp: &Value) -> FriendshipStatus {
         return FriendshipStatus::OutgoingPending;
     }
     FriendshipStatus::Stranger
+}
+
+/// Returns `true` when a 1-1 thread is a Zalo system account or Official Account (OA)
+/// that cannot be friended and must not display "Người lạ" / "Kết bạn" UI.
+pub fn is_system_or_oa_thread(thread_id: &str, thread_name: &str) -> bool {
+    let tid = thread_id.trim();
+    if tid.starts_with("oa_") || tid.starts_with("OA_") {
+        return true;
+    }
+    let norm = thread_name.trim().to_lowercase();
+    if norm.is_empty() {
+        return false;
+    }
+    const EXACT_NAMES: &[&str] = &[
+        "zalo",
+        "trợ lý kiki",
+        "kiki",
+        "thời tiết",
+        "cloudotp",
+        "zalopay",
+        "zalo cloud",
+        "zalo security",
+        "zalo bảo mật",
+        "zalo official",
+        "zalo oa",
+        "zalo video",
+        "zalo mini app",
+        "zalo stickers",
+        "zing mp3",
+        "zing news",
+        "báo mới",
+        "baomoi",
+        "truyền thông số",
+        "nạp điện thoại",
+    ];
+    if EXACT_NAMES.contains(&norm.as_str()) {
+        return true;
+    }
+    const PREFIXES: &[&str] = &[
+        "zalo ",
+        "zalo-",
+        "zalo –",
+        "zstyle",
+        "zalopay",
+        "trợ lý ",
+        "cloudotp",
+        "tổng đài ",
+        "cskh ",
+        "thông báo ",
+    ];
+    PREFIXES.iter().any(|p| norm.starts_with(p))
 }
 
 /// Query `/api/friend/reqstatus` (`cmd 11430`) and return the typed `FriendshipStatus`.
@@ -7859,6 +9327,44 @@ pub async fn find_user_by_phone(s: &Session, raw_phone: &str) -> Result<PhoneLoo
         friendship,
     })
 }
+/// Fetch a group poll (`GET group_poll /api/poll/detail`, cmd `12081`).
+///
+/// # Errors
+/// Fails when logged out, on transport errors, or when the server rejects the poll
+/// (see [`crate::poll::parse_poll_detail`]).
+pub async fn get_poll_detail(s: &Session, poll_id: &str) -> Result<crate::poll::PollDetail> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let params = s.encoded_params(&crate::poll::detail_params(poll_id, &s.imei))?;
+    let path = format!("/api/poll/detail?{}&params={params}", s.common_params());
+    let resp = s.get_endpoint("group_poll", &path).await?;
+    let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    crate::poll::parse_poll_detail(&resp)
+}
+
+/// Vote, change or clear a vote in a group poll (`GET group_poll /api/poll/vote`, cmd `12084`).
+/// `option_ids` is the full new selection. Returns the options from the reply.
+///
+/// # Errors
+/// Fails when logged out, on transport errors, or when the server rejects the vote
+/// (code `166`: poll closed or locked).
+pub async fn vote_poll(
+    s: &Session,
+    poll_id: &str,
+    option_ids: &[i64],
+) -> Result<Vec<crate::poll::PollOption>> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let params = s.encoded_params(&crate::poll::vote_params(poll_id, option_ids, &s.imei))?;
+    let path = format!("/api/poll/vote?{}&params={params}", s.common_params());
+    let resp = s.get_endpoint("group_poll", &path).await?;
+    let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    let data = crate::poll::poll_response_data(&resp)?;
+    Ok(crate::poll::parse_options(&data).unwrap_or_default())
+}
+
 /// Board topic type for a pinned chat message (`MSG_TOPIC` = 2 in Zalo's topic enum:
 /// `TEXT_TOPIC=0`, `LINK_TOPIC=1`, `MSG_TOPIC=2`, `POLL_TOPIC=3`, `REMINDER_TOPIC=4`).
 pub const MSG_TOPIC: i32 = 2;
@@ -8323,9 +9829,38 @@ pub async fn set_unread_mark(
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
-/// Mute or unmute notifications for a conversation (`setMuteConversation` @ `compact-app-pc.js:14304409`, cmd `11288`).
+/// Wire action code for muting a conversation (`SET_MUTE` in Official Zalo PC JS).
+pub const MUTE_ACTION_SET: u8 = 1;
+/// Wire action code for unmuting a conversation (`UNSET_MUTE` in Official Zalo PC JS).
+pub const MUTE_ACTION_UNSET: u8 = 3;
+
+/// Build the decrypted JSON payload for `/api/social/profile/setmute`.
+pub fn build_set_mute_payload(
+    thread_id: &str,
+    is_group: bool,
+    duration_sec: i64,
+    mute: bool,
+    start_time: i64,
+    imei: &str,
+) -> Value {
+    let clean = thread_id
+        .trim_start_matches("group_")
+        .trim_start_matches('g')
+        .trim_start_matches('G')
+        .trim();
+    json!({
+        "toid": clean,
+        "duration": if mute { duration_sec } else { -1 },
+        "action": if mute { MUTE_ACTION_SET } else { MUTE_ACTION_UNSET },
+        "startTime": start_time,
+        "muteType": if is_group { 2 } else { 1 },
+        "imei": imei
+    })
+}
+
+/// Mute or unmute notifications for a conversation (`setMuteConversation` @ `compact-app-pc.js`, cmd `11288`).
 /// `duration_sec`: `3600` (1h), `14400` (4h), seconds until 8:00 AM, or `-1` (until reopened).
-/// `mute`: `true` -> `action = 1`, `false` -> `action = 2`.
+/// `mute`: `true` -> `action = 1` (`MUTE_ACTION_SET`), `false` -> `action = 3` (`MUTE_ACTION_UNSET`).
 pub async fn set_mute_conversation(
     s: &Session,
     thread_id: &str,
@@ -8336,19 +9871,14 @@ pub async fn set_mute_conversation(
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let clean = thread_id
-        .trim_start_matches("group_")
-        .trim_start_matches('g')
-        .trim_start_matches('G')
-        .trim();
-    let body = json!({
-        "toid": clean,
-        "duration": duration_sec,
-        "action": if mute { 1 } else { 2 },
-        "startTime": crate::login::unix_now(),
-        "muteType": if is_group { 2 } else { 1 },
-        "imei": s.imei
-    });
+    let body = build_set_mute_payload(
+        thread_id,
+        is_group,
+        duration_sec,
+        mute,
+        crate::login::unix_now(),
+        &s.imei,
+    );
     let params = s.encoded_params(&body)?;
     let path = format!("/api/social/profile/setmute?{}", s.common_params());
     let resp = s
@@ -8882,12 +10412,13 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
     }
     // Đúng Zalo `generateRandomString(32)`: 32 ký tự base62 (A-Za-z0-9),
     // KHÔNG phải hex. Phone/server validate format, hex bị bỏ qua.
+    let uin = s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or_default();
     let sync_id = crate::param_cipher::random_base62(32);
     crate::history_sync::set_active_v2_sync_id(Some(sync_id.clone()));
     // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
     // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
     // The loader's error already says how to fix a missing Zalo PC / WASM.
-    crate::history_sync::generate_sync_v2_keys()
+    crate::history_sync::generate_sync_v2_keys_for(uin)
         .map_err(|e| anyhow::anyhow!("Không sinh được khóa Sync V2: {e}"))?;
     crate::logger::log_sync(&format!(
         "V2 session mở: sync={}",
@@ -9189,14 +10720,6 @@ pub fn send_sync_v2_request_with_queries(
         sync_data.to_string().chars().take(600).collect::<String>()
     ));
     let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
-    let s_clone = s.clone();
-    let sync_data_clone = sync_data.clone();
-    let sync_id_str = sync_id.to_string();
-    tokio::spawn(async move {
-        if let Ok(resp) = request_phone_sync_v2_http(&s_clone, &sync_id_str, &sync_data_clone).await {
-            crate::logger::log_sync(&format!("12888 http request-sync: {resp:?}"));
-        }
-    });
     crate::logger::log_sync(&format!(
         "590 gửi: sync={} ws_590={}",
         &sync_id.chars().take(8).collect::<String>(),
@@ -9344,6 +10867,17 @@ pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlE
                 .is_some_and(|u| !u.is_empty());
             crate::logger::log_sync(&format!(
                 "ctrl transfer_sync2: act={act} sync={sid_log} status={st_log:?} batchType={bt_log:?} err={err_log:?} isLast={last_log:?} has_url={has_url}"
+            ));
+        } else if matches!(act_type, "transfer_msg" | "syncmsgmb") && act != "transfer_after_login" {
+            let ua_log = parsed_data
+                .get("user_action")
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+            let has_url = parsed_data
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.is_empty());
+            crate::logger::log_sync(&format!(
+                "ctrl {act_type}: act={act} user_action={ua_log:?} has_url={has_url}"
             ));
         }
         match act {
@@ -9672,6 +11206,63 @@ pub async fn leave_group(s: &Session, grid: &str, silent: bool) -> Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_target_uses_wire_sender_and_message_ids() {
+        // Group row as stored from a live push: display name in `sender`, uid on the wire.
+        let group_row = ChatMessage {
+            id: "8506658781118".into(),
+            sender: "Vũ Thái Học".into(),
+            client_message_id: "1795077587420".into(),
+            ts: 1795077587922,
+            wire_ref: crate::message_model::WireMessageRef {
+                server_id: Some(json!("8506658781118")),
+                client_id: Some(json!("1795077587420")),
+                sender: Some(json!("2526995101091055705")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            quote_target(&group_row, "me", "g1", true),
+            QuoteTarget {
+                owner: "2526995101091055705".into(),
+                msg_id: Some("8506658781118".into()),
+                cli_msg_id: Some("1795077587420".into()),
+            }
+        );
+
+        // `id` holding the cliMsgId must not be sent as qmsgId.
+        let by_client_id = ChatMessage {
+            id: "1795077587420".into(),
+            ..group_row.clone()
+        };
+        assert_eq!(
+            quote_target(&by_client_id, "me", "g1", true)
+                .msg_id
+                .as_deref(),
+            Some("8506658781118")
+        );
+
+        // Own message: owner is our uid even though the wire sender is "0".
+        let own = ChatMessage {
+            is_outgoing: true,
+            wire_ref: crate::message_model::WireMessageRef {
+                sender: Some(json!("0")),
+                ..group_row.wire_ref.clone()
+            },
+            ..group_row.clone()
+        };
+        assert_eq!(quote_target(&own, "me", "g1", true).owner, "me");
+
+        // 1-1 without any uid falls back to the peer.
+        let peer = ChatMessage {
+            sender: "An".into(),
+            wire_ref: Default::default(),
+            ..group_row
+        };
+        assert_eq!(quote_target(&peer, "me", "u42", false).owner, "u42");
+    }
 
     #[test]
     fn media_group_layout_reads_incoming_params() {
@@ -10309,6 +11900,43 @@ mod tests {
     }
 
     #[test]
+    fn reaction_targets_server_and_client_ids_not_timestamp() {
+        let mut msg = ChatMessage {
+            id: "1700000000123".into(),
+            client_message_id: "1700000000123".into(),
+            ts: 1_700_000_000_000,
+            ..Default::default()
+        };
+        msg.wire_ref.server_id = Some(json!("7012345678901"));
+        msg.wire_ref.client_id = Some(json!("1700000000123"));
+        let (g, c) = reaction_target_ids(&msg, 1);
+        assert_eq!(g, json!("7012345678901"));
+        assert_eq!(c, 1_700_000_000_123);
+
+        // Optimistic local row without server identity: empty gMsgID, client id kept.
+        let local = ChatMessage {
+            id: "out_42".into(),
+            client_message_id: "1700000000999".into(),
+            ts: 1_700_000_000_500,
+            ..Default::default()
+        };
+        let (g, c) = reaction_target_ids(&local, 1);
+        assert_eq!(g, json!(""));
+        assert_eq!(c, 1_700_000_000_999);
+
+        // Merged row: `id` is the bare client id and only a wire server id is known.
+        let mut merged = ChatMessage {
+            id: "1700000000777".into(),
+            client_message_id: "1700000000777".into(),
+            ..Default::default()
+        };
+        merged.wire_ref.server_id = Some(json!("7012345670000"));
+        let (g, c) = reaction_target_ids(&merged, 1);
+        assert_eq!(g, json!("7012345670000"));
+        assert_eq!(c, 1_700_000_000_777);
+    }
+
+    #[test]
     fn test_parse_thread_boolean_is_group_and_string_time() {
         let val = json!({
             "userId": "grp_test",
@@ -10723,7 +12351,8 @@ mod send_identity_tests {
             "contact-1",
             "Text",
             &ChatMessage {
-                id: "server-quote".into(),
+                // A numeric server id, so the quote request is attempted (and fails over).
+                id: "8506658781118".into(),
                 ..Default::default()
             },
             false,
@@ -10899,6 +12528,117 @@ mod send_identity_tests {
         let msg_b = parse_chat_message(&raw_file_no_ext).expect("must parse file message");
         assert_eq!(msg_b.link_src.as_deref(), Some("Tập tin Zalo"));
         assert_eq!(msg_b.link_title.as_deref(), Some("De_cuong_mon_hoc.doc"));
+    }
+
+    #[test]
+    fn parse_share_file_preserves_file_ext_for_opaque_mp3_url() {
+        let raw_file = json!({
+            "msgId": "file_mp3_opaque",
+            "msgType": "share.file",
+            "uidFrom": "1000002",
+            "ts": 1700000003000_i64,
+            "content": {
+                "href": "https://files.example/download/opaque-token",
+                "params": "{\"fileSize\":\"12345\",\"fileExt\":\"mp3\",\"duration\":\"120\"}"
+            }
+        });
+
+        let msg = parse_chat_message(&raw_file).expect("must parse MP3 file message");
+        assert_eq!(msg.kind, crate::message_model::MessageKind::File);
+        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
+        assert_eq!(msg.link_title.as_deref(), Some("opaque-token.mp3"));
+        assert_eq!(msg.text, "[Tập tin] opaque-token.mp3");
+    }
+
+    #[test]
+    fn parse_share_file_with_mp3_filename_and_duration_stays_a_file() {
+        let raw_file = json!({
+            "msgId": "file_mp3_named",
+            "msgType": "share.file",
+            "uidFrom": "1000002",
+            "ts": 1700000004000_i64,
+            "content": {
+                "title": "meeting.mp3",
+                "href": "https://files.example/download/opaque-token",
+                "params": "{\"duration\":\"120\"}"
+            }
+        });
+
+        let msg = parse_chat_message(&raw_file).expect("must parse named MP3 message");
+        assert_eq!(msg.kind, crate::message_model::MessageKind::File);
+        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
+        assert_eq!(msg.link_title.as_deref(), Some("meeting.mp3"));
+    }
+
+    #[test]
+    fn parse_regular_file_with_duration_stays_a_file() {
+        let raw_file = json!({
+            "msgId": "file_pdf_duration",
+            "msgType": "share.file",
+            "uidFrom": "1000002",
+            "ts": 1700000004500_i64,
+            "content": {
+                "title": "report.pdf",
+                "href": "https://files.example/download/opaque-token",
+                "params": "{\"duration\":\"120\"}"
+            }
+        });
+
+        let msg = parse_chat_message(&raw_file).expect("must parse PDF message");
+        assert_eq!(msg.kind, crate::message_model::MessageKind::File);
+        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
+    }
+
+    #[test]
+    fn parse_dotted_display_title_uses_duration_video_fallback() {
+        let raw_video = json!({
+            "msgId": "video_dotted_title",
+            "msgType": "chat.recommended",
+            "uidFrom": "1000002",
+            "ts": 1700000004700_i64,
+            "content": {
+                "title": "v1.2 notes",
+                "href": "https://media.example/download/opaque-token",
+                "params": "{\"duration\":\"45\"}"
+            }
+        });
+
+        let msg = parse_chat_message(&raw_video).expect("must parse duration-based video message");
+        assert_eq!(msg.kind, crate::message_model::MessageKind::Video);
+        assert_eq!(msg.link_src.as_deref(), Some("Video Zalo"));
+    }
+
+    #[test]
+    fn parse_video_with_duration_and_opaque_url_stays_a_video() {
+        let raw_video = json!({
+            "msgId": "video_opaque_duration",
+            "msgType": "chat.recommended",
+            "uidFrom": "1000002",
+            "ts": 1700000005000_i64,
+            "content": {
+                "href": "https://media.example/download/opaque-token",
+                "params": "{\"duration\":\"45\"}"
+            }
+        });
+
+        let msg = parse_chat_message(&raw_video).expect("must parse video message");
+        assert_eq!(msg.kind, crate::message_model::MessageKind::Video);
+        assert_eq!(msg.link_src.as_deref(), Some("Video Zalo"));
+        assert_eq!(msg.text, "[Video]");
+
+        let named_video = json!({
+            "msgId": "video_named_duration",
+            "msgType": "chat.recommended",
+            "uidFrom": "1000002",
+            "ts": 1700000006000_i64,
+            "content": {
+                "title": "clip.mp4",
+                "href": "https://media.example/download/opaque-token",
+                "params": "{\"duration\":\"45\"}"
+            }
+        });
+        let named_msg = parse_chat_message(&named_video).expect("must parse named video message");
+        assert_eq!(named_msg.kind, crate::message_model::MessageKind::Video);
     }
 
     #[test]
@@ -11593,7 +13333,7 @@ mod send_identity_tests {
             1,
             "recall must update in place without inserting duplicate rows"
         );
-        assert_eq!(threads[0].messages[0].text, "[Đã thu hồi] Tin nhắn gốc");
+        assert_eq!(threads[0].messages[0].text, "[Tin nhắn đã thu hồi]");
         assert_eq!(threads[0].messages[0].ts, 1700000010000);
     }
 
@@ -11618,6 +13358,99 @@ mod send_identity_tests {
         assert_eq!(parsed.text, "[Video]");
         assert_eq!(parsed.link_src.as_deref(), Some("Video Zalo"));
         assert_eq!(parsed.link_title.as_deref(), Some("Video"));
+    }
+
+    /// A `group.poll` vote as it arrives on the wire (shape from a real group; ids and names are made up).
+    fn poll_vote_payload() -> Value {
+        json!({
+            "msgId": "9000000000001",
+            "cliMsgId": "1700000000001",
+            "msgType": "group.poll",
+            "uidFrom": "1000000000000000001",
+            "idTo": "2000000000000000002",
+            "dName": "Lan",
+            "ts": "1700000000001",
+            "content": {
+                "action": "vote",
+                "childnumber": 0,
+                "description": "",
+                "href": "",
+                "thumb": "",
+                "title": "",
+                "type": "",
+                "params": "{\"msg\":{\"vi\":\"%1$s tham gia cuộc bình chọn: %2$s\",\"en\":\"%1$s voted in the poll: %2$s\"},\"isAnonymous\":false,\"question\":\"Họp lớp tối nay?\",\"pollId\":42,\"dName\":\"Lan\"}"
+            }
+        })
+    }
+
+    #[test]
+    fn poll_vote_is_a_system_notice_not_a_photo() {
+        let cm = parse_chat_message(&poll_vote_payload()).expect("poll vote parses");
+        assert_eq!(cm.text, "Lan tham gia cuộc bình chọn: Họp lớp tối nay?");
+        assert_eq!(cm.kind, crate::message_model::MessageKind::System);
+        assert!(cm.link_src.is_none());
+    }
+
+    #[test]
+    fn poll_notice_falls_back_without_a_template() {
+        let content = json!({ "params": "{\"question\":\"Đi đâu?\"}" });
+        assert_eq!(
+            poll_notice_text(&content, "An").as_deref(),
+            Some("An đã cập nhật cuộc bình chọn: Đi đâu?")
+        );
+        assert_eq!(poll_notice_text(&json!({ "href": "" }), "An"), None);
+    }
+
+    #[test]
+    fn cached_poll_votes_labelled_as_photos_are_repaired() {
+        let raw = poll_vote_payload();
+        let mut stale = parse_chat_message(&raw).expect("poll vote parses");
+        // What older builds stored: the photo label on a plain text row.
+        stale.text = "[Hình ảnh]".into();
+        stale.kind = crate::message_model::MessageKind::Text;
+        let mut threads = vec![Thread {
+            id: "2000000000000000002".into(),
+            messages: vec![stale],
+            ..Default::default()
+        }];
+        repair_poll_notices(&mut threads);
+        let msg = &threads[0].messages[0];
+        assert_eq!(msg.text, "Lan tham gia cuộc bình chọn: Họp lớp tối nay?");
+        assert_eq!(msg.kind, crate::message_model::MessageKind::System);
+    }
+
+    #[test]
+    fn merging_a_parsed_poll_notice_replaces_the_stale_photo_label() {
+        let fresh = parse_chat_message(&poll_vote_payload()).expect("poll vote parses");
+        let mut stale = fresh.clone();
+        stale.text = "[Hình ảnh]".into();
+        stale.kind = crate::message_model::MessageKind::Text;
+        assert!(stale.merge_reaction_metadata(&fresh));
+        assert_eq!(stale.text, fresh.text);
+        assert_eq!(stale.kind, crate::message_model::MessageKind::System);
+        // Already repaired rows are also rebuilt from wire content on load.
+        let mut threads = vec![Thread {
+            messages: vec![ChatMessage {
+                text: "[Hình ảnh]".into(),
+                ..fresh.clone()
+            }],
+            ..Default::default()
+        }];
+        repair_poll_notices(&mut threads);
+        assert_eq!(threads[0].messages[0].text, fresh.text);
+    }
+
+    #[test]
+    fn empty_href_and_thumb_do_not_make_a_photo_label() {
+        let msg = json!({
+            "msgId": "1",
+            "msgType": "group.unknownevent",
+            "uidFrom": "u1",
+            "ts": "1700000000000",
+            "content": { "href": "", "thumb": "", "title": "" }
+        });
+        let cm = parse_chat_message(&msg).expect("parses");
+        assert_ne!(cm.text, "[Hình ảnh]");
     }
 
     #[test]
@@ -11728,5 +13561,231 @@ mod send_identity_tests {
 
         let err_other: anyhow::Error = crate::session::SessionError::new(114, "Other").into();
         assert!(!is_cloud_stop_retry(&err_other));
+    }
+
+    #[test]
+    fn is_system_or_oa_thread_identifies_bots_without_false_positives() {
+        assert!(is_system_or_oa_thread("378702083183087169", "Trợ lý Kiki"));
+        assert!(is_system_or_oa_thread("995144610173421775", "Zalo"));
+        assert!(is_system_or_oa_thread("174368941280994155", "Thời Tiết"));
+        assert!(is_system_or_oa_thread(
+            "6091808854554923872",
+            "zStyle – Phong cách Zalo"
+        ));
+        assert!(is_system_or_oa_thread("2864797716192570561", "CloudOTP"));
+        assert!(is_system_or_oa_thread("oa_12345", "Shop ABC"));
+
+        assert!(!is_system_or_oa_thread("5758525960230414336", "Đỗ Thành"));
+        assert!(!is_system_or_oa_thread("123456", "Nguyễn Zalo"));
+        assert!(!is_system_or_oa_thread("123456", "Hoang"));
+    }
+
+    #[test]
+    fn parse_chat_message_oa_list_action_extracts_banner_and_sub_articles() {
+        let msg = json!({
+            "msgId": "1794571926938",
+            "msgType": "chat.list.action",
+            "uidFrom": "6091808854554923872",
+            "dName": "zStyle – Phong cách Zalo",
+            "ts": "1794571926938",
+            "content": [
+                {
+                    "type": "l.a.header.full",
+                    "title": "⚡Siêu Ưu Đãi: Mua 1 Tặng 1",
+                    "description": "Áp dụng cho gói zStyle tháng 11",
+                    "thumb": "https://res-zalo.zadn.vn/upload/media/zstyle_banner.jpg",
+                    "action": "action.open.inapp",
+                    "href": "https://zstyle.zalo.me/promo"
+                },
+                {
+                    "type": "l.a.child.full",
+                    "title": "Khám phá bộ hình nền mới",
+                    "description": "Hơn 50 chủ đề mùa đông",
+                    "thumb": "https://res-zalo.zadn.vn/upload/media/zstyle_sub1.jpg",
+                    "action": "action.open.inapp",
+                    "href": "https://zstyle.zalo.me/themes"
+                },
+                {
+                    "type": "l.a.child.full",
+                    "title": "Nhạc chờ Zalo hot tuần này",
+                    "thumb": "https://res-zalo.zadn.vn/upload/media/zstyle_sub2.jpg",
+                    "action": "action.open.inapp",
+                    "href": "https://zstyle.zalo.me/music"
+                }
+            ]
+        });
+        let cm = parse_chat_message(&msg).expect("should parse OA list message");
+        assert_eq!(cm.kind, crate::message_model::MessageKind::Action);
+        assert_eq!(cm.text, "⚡Siêu Ưu Đãi: Mua 1 Tặng 1");
+        let card = cm.effective_oa_card().expect("should have OA rich card");
+        assert_eq!(card.card_type, "oa_list");
+        assert_eq!(
+            card.banner_thumb.as_deref(),
+            Some("https://res-zalo.zadn.vn/upload/media/zstyle_banner.jpg")
+        );
+        assert_eq!(card.title.as_deref(), Some("⚡Siêu Ưu Đãi: Mua 1 Tặng 1"));
+        assert_eq!(
+            card.description.as_deref(),
+            Some("Áp dụng cho gói zStyle tháng 11")
+        );
+        assert_eq!(card.url.as_deref(), Some("https://zstyle.zalo.me/promo"));
+        assert_eq!(card.items.len(), 2);
+        assert_eq!(card.items[0].title, "Khám phá bộ hình nền mới");
+        assert_eq!(
+            card.items[0].url.as_deref(),
+            Some("https://zstyle.zalo.me/themes")
+        );
+        assert_eq!(card.items[1].title, "Nhạc chờ Zalo hot tuần này");
+    }
+
+    #[test]
+    fn parse_chat_message_webcontent_zinstant_extracts_banner_articles_and_buttons() {
+        let params_str = json!({
+            "customMsg": {
+                "msg": {
+                    "vi": "Chúc một ngày tốt lành, thời tiết TP. Hà Nội hôm nay 22/11: Nhiều mây."
+                },
+                "actions": [
+                    {
+                        "title": "Xem dự báo 7 ngày",
+                        "href": "https://thoitiet.zalo.me/hanoi"
+                    },
+                    {
+                        "name": "Mở Mini App",
+                        "actionId": "open.miniapp",
+                        "data": { "url": "zalo://miniapp/weather" }
+                    }
+                ]
+            },
+            "elements": [
+                {
+                    "title": "Chất lượng không khí: Trung bình",
+                    "description": "AQI 68",
+                    "thumb": "https://res-zalo.zadn.vn/weather/aqi.png",
+                    "href": "https://thoitiet.zalo.me/aqi"
+                }
+            ]
+        })
+        .to_string();
+        let msg = json!({
+            "msgId": "1795306210316",
+            "msgType": "chat.webcontent",
+            "uidFrom": "5128600805588494022",
+            "dName": "Thời Tiết",
+            "ts": "1795306210316",
+            "content": {
+                "title": "Thời tiết TP. Hà Nội 22/11",
+                "thumb": "https://res-zalo.zadn.vn/weather/banner_hanoi.png",
+                "params": params_str
+            }
+        });
+        let cm = parse_chat_message(&msg).expect("should parse webcontent message");
+        assert_eq!(cm.kind, crate::message_model::MessageKind::WebContent);
+        let card = cm.effective_oa_card().expect("should have webcontent card");
+        assert_eq!(card.card_type, "webcontent");
+        assert_eq!(
+            card.banner_thumb.as_deref(),
+            Some("https://res-zalo.zadn.vn/weather/banner_hanoi.png")
+        );
+        assert_eq!(card.title.as_deref(), Some("Thời tiết TP. Hà Nội 22/11"));
+        assert_eq!(
+            card.description.as_deref(),
+            Some("Chúc một ngày tốt lành, thời tiết TP. Hà Nội hôm nay 22/11: Nhiều mây.")
+        );
+        assert_eq!(card.items.len(), 1);
+        assert_eq!(card.items[0].title, "Chất lượng không khí: Trung bình");
+        assert_eq!(card.buttons.len(), 2);
+        assert_eq!(card.buttons[0].label, "Xem dự báo 7 ngày");
+        assert_eq!(
+            card.buttons[0].url.as_deref(),
+            Some("https://thoitiet.zalo.me/hanoi")
+        );
+        assert_eq!(card.buttons[1].label, "Mở Mini App");
+        assert_eq!(
+            card.buttons[1].url.as_deref(),
+            Some("zalo://miniapp/weather")
+        );
+    }
+
+    #[test]
+    fn parse_chat_message_ecard_and_malformed_params_behave_safely() {
+        let ecard_msg = json!({
+            "msgId": "2001",
+            "msgType": "chat.ecard",
+            "uidFrom": "5226566053441588578",
+            "dName": "Zalo",
+            "ts": "1795312339143",
+            "content": {
+                "title": "Chúc mừng sinh nhật",
+                "description": "Gửi lời chúc ngay hôm nay",
+                "href": "https://res-zalo.zadn.vn/ecard/bday.png",
+                "params": "{\"actions\":[{\"name\":\"Gửi lời chúc\",\"actionId\":\"greet\",\"data\":{\"url\":\"https://zalo.me/bday\"}}]}"
+            }
+        });
+        let cm = parse_chat_message(&ecard_msg).expect("should parse ecard");
+        assert_eq!(cm.kind, crate::message_model::MessageKind::WebContent);
+        let card = cm.effective_oa_card().expect("ecard should produce oa_card");
+        assert_eq!(card.card_type, "ecard");
+        assert_eq!(card.buttons.len(), 1);
+        assert_eq!(card.buttons[0].label, "Gửi lời chúc");
+
+        let malformed_msg = json!({
+            "msgId": "2002",
+            "msgType": "chat.webcontent.v2",
+            "uidFrom": "5128600805588494022",
+            "dName": "Thời Tiết",
+            "ts": "1795312339999",
+            "content": {
+                "title": "Bản tin thời tiết",
+                "zinstant_msg": "{not valid json"
+            }
+        });
+        let malformed = parse_chat_message(&malformed_msg).expect("should not panic on bad json");
+        assert_eq!(malformed.kind, crate::message_model::MessageKind::WebContent);
+        assert_eq!(
+            malformed.effective_oa_card().and_then(|c| c.title).as_deref(),
+            Some("Bản tin thời tiết")
+        );
+    }
+
+    #[test]
+    fn effective_oa_card_synthesizes_cached_zalo_banner_and_skips_empty_or_calls() {
+        let cached_zalo_login = ChatMessage {
+            id: "1795312339143".into(),
+            sender: "Zalo".into(),
+            text: "Đăng nhập Zalo trên máy tính thành công".into(),
+            kind: crate::message_model::MessageKind::Text,
+            link_title: Some("Đăng nhập Zalo trên máy tính thành công".into()),
+            link_desc: Some("Bạn đã đăng nhập Zalo PC trên ADMIN-PC".into()),
+            link_thumb: Some(
+                "https://res-zalo.zadn.vn/upload/media/2019/2/20/banner_loginPC_Success_1550651290804_16793.png".into(),
+            ),
+            ..Default::default()
+        };
+        let card = cached_zalo_login
+            .effective_oa_card()
+            .expect("cached Zalo banner should synthesize card");
+        assert_eq!(card.card_type, "banner");
+        assert_eq!(
+            card.title.as_deref(),
+            Some("Đăng nhập Zalo trên máy tính thành công")
+        );
+
+        let empty_card_msg = ChatMessage {
+            id: "empty1".into(),
+            text: "hello".into(),
+            oa_card: Some(OaRichCard::default()),
+            ..Default::default()
+        };
+        assert!(empty_card_msg.effective_oa_card().is_none());
+
+        let legacy_call = ChatMessage {
+            id: "call1".into(),
+            text: "Cuộc gọi".into(),
+            link_title: Some("sendBubbleMessage".into()),
+            link_thumb: Some("https://res-zalo.zadn.vn/call.png".into()),
+            ..Default::default()
+        };
+        assert!(legacy_call.effective_oa_card().is_none());
     }
 }

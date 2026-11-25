@@ -604,8 +604,33 @@ fn paint_circular_image(
         (Pos2::new(0.0, crop), Pos2::new(1.0, 1.0 - crop))
     };
 
-    let mut mesh = egui::Mesh::with_texture(tex.id());
-    let n_pts = 48;
+    painter.add(egui::Shape::mesh(circular_image_mesh(
+        tex.id(),
+        center,
+        radius,
+        uv_min,
+        uv_max,
+        painter.ctx().pixels_per_point(),
+    )));
+}
+
+/// Textured disc with a one-physical-pixel feathered rim. egui anti-aliases its own shapes
+/// but not textured meshes, so without the rim the edge of every avatar is jagged.
+fn circular_image_mesh(
+    texture: egui::TextureId,
+    center: Pos2,
+    radius: f32,
+    uv_min: Pos2,
+    uv_max: Pos2,
+    pixels_per_point: f32,
+) -> egui::Mesh {
+    let feather = 1.0 / pixels_per_point.max(0.5);
+    let inner_r = (radius - feather * 0.5).max(0.0);
+    let outer_r = radius + feather * 0.5;
+    // Enough segments that the polygon stays round on large profile avatars.
+    let n_pts = ((radius * pixels_per_point) as u32).clamp(32, 128);
+
+    let mut mesh = egui::Mesh::with_texture(texture);
     mesh.vertices.push(egui::epaint::Vertex {
         pos: center,
         uv: Pos2::new((uv_min.x + uv_max.x) * 0.5, (uv_min.y + uv_max.y) * 0.5),
@@ -614,21 +639,59 @@ fn paint_circular_image(
     for i in 0..=n_pts {
         let angle = (i as f32) / (n_pts as f32) * std::f32::consts::TAU;
         let (sin_a, cos_a) = angle.sin_cos();
-        let pos = Pos2::new(center.x + radius * cos_a, center.y + radius * sin_a);
-        let u = uv_min.x + (cos_a * 0.5 + 0.5) * (uv_max.x - uv_min.x);
-        let v = uv_min.y + (sin_a * 0.5 + 0.5) * (uv_max.y - uv_min.y);
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos,
-            uv: Pos2::new(u, v),
-            color: Color32::WHITE,
-        });
-        if i > 0 {
-            mesh.indices.push(0);
-            mesh.indices.push(i as u32);
-            mesh.indices.push((i + 1) as u32);
+        let uv = Pos2::new(
+            uv_min.x + (cos_a * 0.5 + 0.5) * (uv_max.x - uv_min.x),
+            uv_min.y + (sin_a * 0.5 + 0.5) * (uv_max.y - uv_min.y),
+        );
+        for (r, color) in [(inner_r, Color32::WHITE), (outer_r, Color32::TRANSPARENT)] {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: Pos2::new(center.x + r * cos_a, center.y + r * sin_a),
+                uv,
+                color,
+            });
         }
     }
-    painter.add(egui::Shape::mesh(mesh));
+    // Vertex layout: 0 = centre, then (inner_i, outer_i) pairs at 1 + 2i and 2 + 2i.
+    for i in 0..n_pts {
+        let inner = 1 + 2 * i;
+        let outer = inner + 1;
+        let next_inner = inner + 2;
+        let next_outer = inner + 3;
+        mesh.indices.extend_from_slice(&[0, inner, next_inner]);
+        mesh.indices.extend_from_slice(&[inner, outer, next_outer]);
+        mesh.indices.extend_from_slice(&[inner, next_outer, next_inner]);
+    }
+    mesh
+}
+
+#[cfg(test)]
+mod circular_image_tests {
+    use super::*;
+
+    #[test]
+    fn mesh_has_opaque_disc_and_transparent_feathered_rim() {
+        let mesh = circular_image_mesh(
+            egui::TextureId::default(),
+            Pos2::new(10.0, 10.0),
+            8.0,
+            Pos2::ZERO,
+            Pos2::new(1.0, 1.0),
+            2.0,
+        );
+        assert!(mesh.is_valid());
+        let n = 32; // radius * ppp = 16, clamped up to the 32-segment minimum
+        assert_eq!(mesh.vertices.len(), 1 + 2 * (n + 1));
+        assert_eq!(mesh.indices.len(), 9 * n);
+        let dist = |v: &egui::epaint::Vertex| v.pos.distance(Pos2::new(10.0, 10.0));
+        let inner = &mesh.vertices[1];
+        let outer = &mesh.vertices[2];
+        // Rim is one physical pixel (0.5 pt at 2x) wide, centred on the radius.
+        assert!((dist(inner) - 7.75).abs() < 1e-4);
+        assert!((dist(outer) - 8.25).abs() < 1e-4);
+        assert_eq!(inner.color, Color32::WHITE);
+        assert_eq!(outer.color, Color32::TRANSPARENT);
+        assert_eq!(inner.uv, outer.uv);
+    }
 }
 
 fn paint_single_circle_avatar(
@@ -656,6 +719,7 @@ fn paint_single_circle_avatar(
         // 240x240 / 480x480 Zalo avatars by 1.5x–3x).
         let key = format!("avt_{hash}");
         if let Some(tex) = textures.get(&key) {
+            crate::gui::mark_texture_used(&key);
             paint_circular_image(painter, center, radius, tex);
             painter.circle_stroke(
                 center,
@@ -911,12 +975,13 @@ pub mod lucide {
     pub const LOG_OUT: &str = "\u{e10e}";
     pub const FILE_TEXT: &str = "\u{e0cc}";
     pub const FILM: &str = "\u{e0d0}";
-    pub const SHIELD_CHECK: &str = "\u{e15c}";
+    pub const SHIELD_CHECK: &str = "\u{e1ff}";
     pub const LOCK: &str = "\u{e10b}";
     pub const BELL: &str = "\u{e059}";
     pub const PAINTBRUSH: &str = "\u{e2e7}";
     pub const SLIDERS: &str = "\u{e29a}";
     pub const FOLDER_OPEN: &str = "\u{e247}";
+    pub const CHEVRON_LEFT: &str = "\u{e06e}";
     pub const CHEVRON_RIGHT: &str = "\u{e06f}";
     pub const CHEVRON_DOWN: &str = "\u{e06d}";
     pub const USER: &str = "\u{e19f}";
@@ -926,6 +991,7 @@ pub mod lucide {
     pub const SHARE_2: &str = "\u{e156}";
     pub const TRASH_2: &str = "\u{e18e}";
     pub const INFO: &str = "\u{e0f9}";
+    pub const DOWNLOAD: &str = "\u{e0b2}";
 }
 
 pub(super) fn draw_lucide_icon(
@@ -1441,6 +1507,7 @@ pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool
         "bundled_sans_semibold".to_owned(),
         egui::FontData::from_static(BUNDLED_SANS_SEMIBOLD),
     );
+    use_bundled_emoji_font(&mut fonts);
 
     // 3. Optional user-selected system or custom font family (Requirement R2)
     let mut selected_font_loaded = false;
@@ -1496,6 +1563,21 @@ pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool
                     break;
                 }
             }
+        }
+        "open_sans" => {
+            // Bundled Open Sans (OFL), the face Telegram Desktop uses; covers Vietnamese.
+            const OPEN_SANS: &[u8] = include_bytes!("../assets/fonts/OpenSans-Regular.ttf");
+            const OPEN_SANS_SEMIBOLD: &[u8] =
+                include_bytes!("../assets/fonts/OpenSans-SemiBold.ttf");
+            fonts.font_data.insert(
+                "selected_font".to_owned(),
+                egui::FontData::from_static(OPEN_SANS),
+            );
+            fonts.font_data.insert(
+                "selected_font_semibold".to_owned(),
+                egui::FontData::from_static(OPEN_SANS_SEMIBOLD),
+            );
+            selected_font_loaded = true;
         }
         "default" | "" => {
             // Uses bundled_sans directly at priority index 0
@@ -1596,11 +1678,15 @@ pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool
     mono.push("lucide_font".to_owned());
 
     let semibold = fonts.families.entry(font_family_semibold()).or_default();
+    if fonts.font_data.contains_key("selected_font_semibold") {
+        semibold.push("selected_font_semibold".to_owned());
+    }
     if selected_font_loaded {
         semibold.push("selected_font".to_owned());
     }
     semibold.push("bundled_sans_semibold".to_owned());
     semibold.push("bundled_sans".to_owned());
+    semibold.push(EMOJI_FONT.to_owned());
     if fonts.font_data.contains_key("vietnamese_font") {
         semibold.push("vietnamese_font".to_owned());
     }
@@ -1612,9 +1698,52 @@ pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool
     ctx.set_fonts(fonts);
 }
 
+const EMOJI_FONT: &str = "noto_emoji";
+
+/// Replace egui's built-in emoji fallback with the bundled Noto Emoji 3.002.
+///
+/// The built-in copy stops around Unicode 8, so newer emoji such as 🤣 drew as `◻`.
+/// The bundled font also maps the U+FE0F variation selector to an empty glyph;
+/// before, every "❤️" sent from a phone ended in a `◻`.
+fn use_bundled_emoji_font(fonts: &mut egui::FontDefinitions) {
+    // Static Regular instance of google/fonts `ofl/notoemoji/NotoEmoji[wght].ttf`,
+    // with the layout tables dropped because egui does no shaping.
+    const NOTO_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoEmoji-Regular.ttf");
+    const BUILTIN_EMOJI: &str = "NotoEmoji-Regular";
+    fonts.font_data.remove(BUILTIN_EMOJI);
+    fonts.font_data.insert(
+        EMOJI_FONT.to_owned(),
+        egui::FontData::from_static(NOTO_EMOJI),
+    );
+    for family in fonts.families.values_mut() {
+        for name in family.iter_mut().filter(|name| *name == BUILTIN_EMOJI) {
+            *name = EMOJI_FONT.to_owned();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_emoji_font_covers_new_emoji_and_hides_variation_selector() {
+        let ctx = egui::Context::default();
+        build_fonts(&ctx, "default", false);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        for family in [
+            egui::FontFamily::Proportional,
+            egui::FontFamily::Monospace,
+            font_family_semibold(),
+        ] {
+            let font = egui::FontId::new(14.0, family);
+            ctx.fonts(|f| {
+                // 🤣 (Unicode 9) and 🫠 (Unicode 14) were missing from egui's copy.
+                assert!(f.has_glyphs(&font, "🤣🫠❤\u{fe0f}"), "{font:?}");
+                assert_eq!(f.glyph_width(&font, '\u{fe0f}'), 0.0, "{font:?}");
+            });
+        }
+    }
 
     #[test]
     fn test_parse_and_format_hex_color() {

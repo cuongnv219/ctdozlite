@@ -15,7 +15,7 @@ Client Zalo Desktop viết bằng Rust (`eframe`/`egui` + `ratatui`), giao tiế
 > [!NOTE]
 > **Tuyên bố miễn trừ trách nhiệm (Disclaimer):** Dự án này là một nghiên cứu kỹ thuật hệ thống độc lập mã nguồn mở vì mục đích học tập, giáo dục và tương thích giao thức (*Educational & Interoperability Research Purposes Only*). Dự án **KHÔNG** có bất kỳ mối liên hệ, hợp tác, tài trợ hay bảo trợ nào từ VNG Corporation hay Zalo, và **hoàn toàn phi thương mại** (100% mã nguồn mở, không thu phí, không quảng cáo, không bán dữ liệu, không có bất kỳ hình thức kiếm tiền nào).
 >
-> Để hiểu định dạng gói tin và luồng ký request, nhóm phát triển có thực hiện **phân tích tĩnh** (static analysis) trên gói cài đặt **công khai** của Zalo và các thư viện native đi kèm. Kết quả chỉ dùng để **viết lại độc lập** bằng Rust — **không** sao chép, **không** tái phân phối mã máy, mã nguồn JS/WASM hay tài nguyên đồ hoạ/âm thanh nào của Zalo. Chi tiết và giới hạn đầy đủ ở mục **[Phân tích tĩnh & tài nguyên bên thứ ba](#về-phân-tích-tĩnh--tài-nguyên-bên-thứ-ba)**.
+> Để hiểu định dạng gói tin và luồng ký request, nhóm phát triển có thực hiện **phân tích tĩnh** (static analysis) trên gói cài đặt **công khai** của Zalo và các thư viện native đi kèm. Kết quả chỉ dùng để **viết lại độc lập** bằng Rust — **không** tái phân phối mã máy hay tài nguyên gốc trong sản phẩm phát hành; ngoại lệ duy nhất là thư mục `web-bundle/` phục vụ nghiên cứu giao thức (xem mục **Về phân tích tĩnh & tài nguyên bên thứ ba**). Chi tiết và giới hạn đầy đủ ở mục [Phân tích tĩnh & tài nguyên bên thứ ba](#về-phân-tích-tĩnh--tài-nguyên-bên-thứ-ba).
 >
 > Người dùng tự chịu mọi trách nhiệm khi sử dụng phần mềm này.
 [![Website](https://img.shields.io/badge/website-ctdozlite.ctdo.net-0068FF.svg)](https://ctdozlite.ctdo.net/)
@@ -61,7 +61,7 @@ Bản Zalo PC chính thức đóng gói trên Electron thường chiếm 350–6
   - Hỗ trợ tìm kiếm theo cụm từ cuối câu và tải trước (prefetch) ảnh sticker song song ở luồng nền, lưu cache tại `stickers_cache/`.
 - **Lưu trữ cục bộ 2 tầng (`src/store.rs`)**
   - `threads_cache.json`: Snapshot danh sách hội thoại giúp hiển thị giao diện ngay khi mở app.
-  - `zalo_history.db` (SQLite): Lưu trữ lịch sử tin nhắn cục bộ trên máy, khử trùng lặp theo `msg_id` và mốc thời gian. Ứng dụng không gửi dữ liệu sang bất kỳ máy chủ bên thứ ba nào ngoài hệ thống Zalo; khuyến nghị bật mã hóa ổ đĩa hệ điều hành (BitLocker / FileVault / LUKS) nếu dùng trên máy chung.
+  - `zalo_history.db` (SQLite): Lưu trữ lịch sử tin nhắn cục bộ trên máy, khử trùng lặp theo `msg_id` và mốc thời gian. Mặc định dữ liệu không gửi ra ngoài hệ thống Zalo; chỉ khi bạn chủ động bật trợ lý AI / cầu nối Telegram, dữ liệu liên quan mới tới dịch vụ bạn chọn — xem mục **Về quyền riêng tư dữ liệu**. Khuyến nghị bật mã hóa ổ đĩa hệ điều hành (BitLocker / FileVault / LUKS) nếu dùng trên máy chung.
 - **Đồng bộ dữ liệu (`src/history_sync.rs`)**
   - **Đồng bộ dữ liệu cơ bản:** Đã hoàn thiện tính năng kéo dữ liệu và giải mã tin nhắn. Hiện tại hoạt động tốt và ổn định với Android (qua container `.db.crypt` mã hóa RSA 2048 + AES-256-CBC + LZMA2).
   - **Tương thích iOS:** Đã hoàn thiện giao thức bắt tay Sync v2 (Curve25519 / X25519 Double-Ratchet), tuy nhiên quy trình nén đa lô của Zalo iOS vẫn đang tiếp tục được hoàn thiện trong các bản cập nhật tiếp theo.
@@ -299,8 +299,8 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 
 | Contributor | GitHub | Đóng góp chính | Khối lượng |
 | :--- | :--- | :--- | :---: |
-| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 – v0.1.2 | **> 75,600+ lines** |
-| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & đồng phát hành v0.0.5 – v0.1.2 | **> 35,100+ lines** 🏆 |
+| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 – v0.1.3 | **> 75,600+ lines** |
+| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & đồng phát hành v0.0.5 – v0.1.3 | **> 35,100+ lines** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | Loạt 10 PRs: Múi giờ OS, tùy biến data-dir, helpers macOS, session atomic, media cache, updater, message state, định danh tin nhắn (#61), điều hướng trích dẫn (#60), quyền thông báo macOS (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | Loạt 5 PRs: Tiêu chuẩn kỹ thuật, bảo toàn session an toàn, phân giải domain mạng | **> 3,400+ lines** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | Loạt 8 PRs: Tối ưu khởi động SQLite, đồng bộ lịch sử nhóm/Cloud (#45), poll timer worker (#46), virtualization chat, lazy load Font CJK | **~950+ lines** |
@@ -456,14 +456,17 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 ### Về phân tích tĩnh & tài nguyên bên thứ ba
 
 - **Phân tích tĩnh:** các ghi chú trong `re-notes/` ghi lại quá trình đọc gói cài đặt công khai của Zalo và các thư viện native nhằm hiểu định dạng khung gói tin, luồng ký request và cơ chế mã hóa tham số. Đây là hoạt động **nghiên cứu tương thích**, không nhằm sao chép sản phẩm.
-- **Không phân phối lại tài sản của Zalo:** kho mã nguồn **không** chứa tệp APK/XAPK, `.dex`, `.so`, `.class`, JS/WASM hay bất kỳ tài nguyên đồ họa/âm thanh nào của Zalo. Các thư mục giải nén phục vụ nghiên cứu (`xapk_extracted/`, `test_lab/`) nằm **ngoài** kho mã nguồn và không được đưa lên Git.
+- **Không phân phối lại tài sản của Zalo:** dự án không sao chép, trích xuất hay tái phân phối mã máy (`.dll`, `.so`, `.dylib`), tệp nhị phân gốc hay tài nguyên đồ họa/âm thanh gốc của Zalo vào bất kỳ sản phẩm phát hành nào. Trường hợp ngoại lệ: thư mục `web-bundle/` trong kho mã nguồn chứa các gói JS được trích từ gói cài đặt công khai của Zalo PC, phục vụ phân tích giao thức. Dự án không tuyên bố quyền sở hữu, không cấp phép lại các tệp này và sẽ **gỡ bỏ ngay** khi VNG/Zalo yêu cầu. Các thư mục giải nén phục vụ nghiên cứu (`xapk_extracted/`, `test_lab/`) nằm **ngoài** kho mã nguồn và không được đưa lên Git.
 - **Bộ nhãn dán "Mèo Ami Bụng Bự" (`src/assets/ami_fat_cat/`):** đây là tác phẩm của **bên thứ ba (họa sĩ gốc)**, **không** phải tài sản của VNG/Zalo và **không** thuộc quyền sở hữu của nhóm phát triển. Bộ ảnh hiện được nhúng để thử nghiệm giao diện; nhóm phát triển **không tuyên bố bất kỳ quyền nào** đối với tác phẩm này và sẽ **gỡ bỏ ngay** nếu chủ sở hữu quyền yêu cầu.
 - **Không phân phối công cụ vượt qua bảo vệ:** dự án không cung cấp công cụ, khóa hay quy trình nhằm vượt qua biện pháp bảo vệ kỹ thuật của máy chủ Zalo. Mọi request đều đi qua đúng luồng xác thực của tài khoản người dùng.
 
 ### Về quyền riêng tư dữ liệu
 
 - Mọi tin nhắn và dữ liệu người dùng đều được lưu **cục bộ trên máy của bạn** (`zalo_history.db`, `session.json`, `threads_cache.json`).
-- Ứng dụng **không gửi** bất kỳ dữ liệu nào tới máy chủ của tác giả dự án hay bất kỳ bên thứ ba nào. Kết nối mạng duy nhất là tới hệ thống chính thức của Zalo — giống hệt trình duyệt khi bạn mở `chat.zalo.me`.
+- Kết nối mạng mặc định duy nhất là tới hệ thống chính thức của Zalo — tương tự trình duyệt khi bạn mở `chat.zalo.me`. Dữ liệu hội thoại **không tự rời máy**; chỉ rời máy khi bạn chủ động bật một tính năng tuỳ chọn: **Trợ lý AI** (gửi nội dung hội thoại tới endpoint OpenAI-compatible bạn cấu hình — mặc định Ollama cục bộ thì không đi ra ngoài) và **Cầu nối Telegram ↔ Zalo** (chuyển nội dung/tệp qua Telegram Bot API). Bật tính năng nào thì dữ liệu của tính năng đó đi tới dịch vụ bạn chọn; app không thu qua dịch vụ trung gian nào.
+- Kiểm tra cập nhật gọi GitHub Releases API (IP/user-agent của bạn được GitHub nhìn thấy); không kèm dữ liệu hội thoại.
+- Trang web `ctdozlite.ctdo.net` tải font từ Google Fonts (trình duyệt kết nối Google); app desktop không kết nối tới Google.
+- Với hội thoại, người gửi khác trong hội thoại không thể đồng ý trước với việc bạn bật trợ lý AI — hãy cân nhắc trước khi dùng cho hội thoại nhạy cảm.
 
 ### Về khả năng gỡ bỏ
 

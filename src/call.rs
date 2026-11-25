@@ -1021,7 +1021,8 @@ pub fn extract_voip_controls(data_node: &Value) -> Vec<Value> {
 }
 
 /// Poll `lp_control` (`getControllFromPolling`, cmd `99101`) once and return incoming VoIP
-/// control events, real-time conversation mute/unmute events, typing indicators, and seen events.
+/// control events, real-time conversation mute/unmute events, typing indicators, seen events,
+/// and mobile sync control events (`transfer_msg` / `syncmsgmb` / `transfer_sync2`).
 pub async fn poll_control_events(
     s: &Session,
     state: &mut CtrlPollState,
@@ -1030,6 +1031,7 @@ pub async fn poll_control_events(
     Vec<crate::chat::MuteControlEvent>,
     Vec<crate::chat::TypingEvent>,
     Vec<crate::chat::SeenEvent>,
+    Vec<crate::chat::MobileSyncControlEvent>,
 )> {
     if s.login.is_none() {
         bail!("chưa đăng nhập");
@@ -1084,8 +1086,15 @@ pub async fn poll_control_events(
                 ev_ms > 0 && now_ms.saturating_sub(ev_ms) <= 45_000
             })
             .collect();
-        return Ok((fresh_invites, mute_events, typing_events, seen_events));
+        return Ok((
+            fresh_invites,
+            mute_events,
+            typing_events,
+            seen_events,
+            Vec::new(),
+        ));
     }
+    let sync_events = crate::chat::extract_mobile_sync_controls(data_node);
     let events = extract_voip_controls(data_node);
     if !events.is_empty() {
         trace_line(
@@ -1098,12 +1107,12 @@ pub async fn poll_control_events(
             ),
         );
     }
-    Ok((events, mute_events, typing_events, seen_events))
+    Ok((events, mute_events, typing_events, seen_events, sync_events))
 }
 
 /// Poll `lp_control` (`getControllFromPolling`, cmd `99101`) once and return any incoming VoIP control events.
 pub async fn poll_voip_controls(s: &Session, state: &mut CtrlPollState) -> Result<Vec<Value>> {
-    let (voip, _, _, _) = poll_control_events(s, state).await?;
+    let (voip, _, _, _, _) = poll_control_events(s, state).await?;
     Ok(voip)
 }
 

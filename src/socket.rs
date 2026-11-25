@@ -504,8 +504,10 @@ async fn run_once(
     };
     trace(format!("handshake {}", resp.status()));
 
+    const MAX_PENDING_OUTBOUND: usize = 32;
     let mut cipher_key: Option<Vec<u8>> = None;
     let mut authed = false;
+    let mut pending_outbound: Vec<Vec<u8>> = Vec::new();
     let mut req_id = 0u64;
     let mut ping = tokio::time::interval(Duration::from_secs(PING_SECS));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -542,6 +544,11 @@ async fn run_once(
                 if authed {
                     ws.send(Message::Binary(frame.into())).await?;
                     trace("-> outbound ws frame");
+                } else if pending_outbound.len() < MAX_PENDING_OUTBOUND {
+                    pending_outbound.push(frame);
+                    trace("queued outbound ws frame until auth");
+                } else {
+                    trace("dropped outbound ws frame (pre-auth queue full)");
                 }
             }
             incoming = ws.next() => {
@@ -601,6 +608,10 @@ async fn run_once(
                         req_id += 1;
                         ws.send(Message::Binary(pull_frame(qcmd, qsub, &id).into())).await?;
                         trace(format!("-> pull {qcmd}_{qsub} {id}"));
+                    }
+                    for queued in pending_outbound.drain(..) {
+                        ws.send(Message::Binary(queued.into())).await?;
+                        trace("-> flushed queued outbound ws frame");
                     }
                     continue;
                 }

@@ -18,56 +18,65 @@ pub use zalo_rust::{
 
 pub const POLL_SECS: u64 = 4;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn run_async<F: std::future::Future<Output = Result<()>>>(fut: F) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    rt.block_on(fut)
+}
+
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("ctdozlite v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.iter().any(|a| a == "--check-update") {
-        match gui::check_github_release_cli().await {
-            Ok(info) => {
-                if info.has_update {
-                    println!(
-                        "🚀 Có bản cập nhật mới v{} trên GitHub (hiện tại: v{})",
-                        info.latest_version, info.current_version
-                    );
-                    println!("   Tiêu đề: {}", info.release_title);
-                    println!("   Trang phát hành: {}", info.html_url);
-                    if let Some(ref dl) = info.download_url {
-                        println!("   Tải xuống: {dl}");
-                    }
-                    if !info.release_notes.trim().is_empty() {
-                        println!("\n📋 Nội dung cập nhật & sửa lỗi (GitHub Releases API):");
-                        for line in info.release_notes.lines() {
-                            let trimmed = line.trim();
-                            if trimmed.starts_with("- ")
-                                || trimmed.starts_with("* ")
-                                || trimmed.starts_with("### ")
-                            {
-                                println!("   {trimmed}");
+        return run_async(async {
+            match gui::check_github_release_cli().await {
+                Ok(info) => {
+                    if info.has_update {
+                        println!(
+                            "🚀 Có bản cập nhật mới v{} trên GitHub (hiện tại: v{})",
+                            info.latest_version, info.current_version
+                        );
+                        println!("   Tiêu đề: {}", info.release_title);
+                        println!("   Trang phát hành: {}", info.html_url);
+                        if let Some(ref dl) = info.download_url {
+                            println!("   Tải xuống: {dl}");
+                        }
+                        if !info.release_notes.trim().is_empty() {
+                            println!("\n📋 Nội dung cập nhật & sửa lỗi (GitHub Releases API):");
+                            for line in info.release_notes.lines() {
+                                let trimmed = line.trim();
+                                if trimmed.starts_with("- ")
+                                    || trimmed.starts_with("* ")
+                                    || trimmed.starts_with("### ")
+                                {
+                                    println!("   {trimmed}");
+                                }
                             }
                         }
+                        updater::notify_os_new_update(
+                            &info.latest_version,
+                            &info.current_version,
+                            &info.release_title,
+                        );
+                    } else {
+                        println!(
+                            "✅ Bạn đang sử dụng phiên bản mới nhất (v{})",
+                            info.current_version
+                        );
                     }
-                    updater::notify_os_new_update(
-                        &info.latest_version,
-                        &info.current_version,
-                        &info.release_title,
-                    );
-                } else {
-                    println!(
-                        "✅ Bạn đang sử dụng phiên bản mới nhất (v{})",
-                        info.current_version
-                    );
+                    Ok(())
                 }
-                return Ok(());
+                Err(e) => {
+                    eprintln!("⚠️ Không kiểm tra được bản cập nhật từ GitHub API: {e}");
+                    std::process::exit(1);
+                }
             }
-            Err(e) => {
-                eprintln!("⚠️ Không kiểm tra được bản cập nhật từ GitHub API: {e}");
-                std::process::exit(1);
-            }
-        }
+        });
     }
     let data_path = data_dir::initialize(&args)?;
     if args.iter().any(|a| a == "--print-data-dir") {
@@ -80,7 +89,8 @@ async fn main() -> Result<()> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let msg = format!("[{ts}] PANIC: {info}\n");
+        let bt = std::backtrace::Backtrace::force_capture();
+        let msg = format!("[{ts}] PANIC: {info}\n{bt}\n");
         eprint!("{msg}");
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -257,7 +267,7 @@ async fn main() -> Result<()> {
             anyhow::bail!("--agent yêu cầu --thread <id>");
         };
         let db = store::db_path_for_account(s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or(""));
-        return agent::run_agent_loop(s, db, tid, agent_poll, agent_send).await;
+        return run_async(agent::run_agent_loop(s, db, tid, agent_poll, agent_send));
     }
 
     // `--tg-bridge --tg-map "<tg_chat>[/topic]:<zalo_tid>[,...]" [--tg-owner ID] [--dry-run]`.
@@ -268,7 +278,7 @@ async fn main() -> Result<()> {
         }
         let db = store::db_path_for_account(s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or(""));
         let data_dir = data_dir::initialize(&args)?;
-        return tg_bridge::run_bridge_loop_full(
+        return run_async(tg_bridge::run_bridge_loop_full(
             s,
             db,
             data_dir,
@@ -277,34 +287,45 @@ async fn main() -> Result<()> {
             tg_owner,
             tg_dry,
             tg_media,
-        )
-        .await;
+        ));
     }
     // If `--mcp` is requested, run the Model Context Protocol JSON-RPC 2.0 server over stdio (#35).
     // `--thread <id>` locks thread-scoped tools to one thread (per-thread agent session).
+    let cli_uin = s
+        .login
+        .as_ref()
+        .map(|l| l.uin.as_str())
+        .unwrap_or("")
+        .to_string();
+    let cli_db = store::db_path_for_account(&cli_uin);
     if force_mcp {
+        account_manager::set_active_uin(&cli_uin);
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(s));
-        return api_mcp::run_mcp_stdio_server_bound(shared, "zalo_history.db", thread_arg).await;
+        return run_async(api_mcp::run_mcp_stdio_server_bound(shared, &cli_db, thread_arg));
     }
 
+    let launch_gui = force_gui
+        || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone")));
+
     // If `--api-port <PORT>` is set without `--gui`/`--tui`, run headless REST + MCP server if `--api-only` is passed;
-    // otherwise spawn the REST server in the background alongside GUI/TUI (#35).
+    // otherwise spawn the REST server inside the worker (GUI) or TUI async runtime (#35).
     if let Some(port) = api_port {
-        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(s.clone()));
-        println!("🌐 REST API & MCP HTTP server đang lắng nghe tại http://127.0.0.1:{port}/api/v1/status");
+        account_manager::set_active_uin(&cli_uin);
         if args.iter().any(|a| a == "--api-only") {
-            return api_mcp::run_local_http_server(shared, port, "zalo_history.db".into()).await;
+            let shared = std::sync::Arc::new(tokio::sync::Mutex::new(s));
+            println!("🌐 REST API & MCP HTTP server đang lắng nghe tại http://127.0.0.1:{port}/api/v1/status");
+            return run_async(api_mcp::run_local_http_server(shared, port, cli_db));
         }
-        tokio::spawn(async move {
-            let _ = api_mcp::run_local_http_server(shared, port, "zalo_history.db".into()).await;
-        });
+        if launch_gui {
+            std::env::set_var("CTDOZLITE_API_PORT", port.to_string());
+        }
     }
 
     // Determine launch mode:
     // If `--gui` is specified (or default when not `--tui` / `--qr` / `--phone`):
     // Open the native GUI window IMMEDIATELY without blocking on network requests!
     // Background worker in `gui.rs` handles `get_server_info`, `get_friends`, and `poll_new_messages`.
-    if force_gui || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone"))) {
+    if launch_gui {
         println!("🚀 Đang khởi chạy giao diện đồ họa ctdozlite (egui)…");
         #[cfg(target_os = "windows")]
         if dev_mode {
@@ -330,9 +351,13 @@ async fn main() -> Result<()> {
             ..Default::default()
         };
 
-        let mut initial_threads = chat::load_threads_cache();
-        // Hydrate từ đúng account DB (read-point/vanish/note lưu theo acc, #119).
         let startup_uin = s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or("");
+        account_manager::set_active_uin(startup_uin);
+        if !startup_uin.is_empty() {
+            let _ = account_manager::save_current_account_snapshot(startup_uin);
+        }
+        let mut initial_threads = chat::load_threads_cache_for(startup_uin);
+        // Hydrate từ đúng account DB (read-point/vanish/note lưu theo acc, #119).
         let startup_db = store::db_path_for_account(startup_uin);
         store::load_history_into_threads(
             &startup_db,
@@ -354,12 +379,35 @@ async fn main() -> Result<()> {
             }),
         )
         .map_err(|e| anyhow::anyhow!("Không thể khởi chạy GUI: {e}"));
+        if let Err(ref e) = res {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("crash.log")
+            {
+                let _ = writeln!(f, "[{ts}] EFRAME_EXIT_ERR: {e}");
+            }
+        }
         if res.is_ok() {
             std::process::exit(0);
         }
         return res;
     }
 
+    run_async(async move {
+    if let Some(port) = api_port {
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(s.clone()));
+        println!("🌐 REST API & MCP HTTP server đang lắng nghe tại http://127.0.0.1:{port}/api/v1/status");
+        let api_db = cli_db.clone();
+        tokio::spawn(async move {
+            let _ = api_mcp::run_local_http_server(shared, port, api_db).await;
+        });
+    }
     // 1. Initial server info check for TUI mode (skipped offline).
     if !offline_mode {
         if let Ok(resp) = login::get_server_info(&s).await {
@@ -510,4 +558,5 @@ async fn main() -> Result<()> {
     tui::run_tui(tui_app).await?;
 
     Ok(())
+    })
 }

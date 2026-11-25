@@ -21,16 +21,21 @@ use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
 
-mod attachments;
+pub(crate) mod attachments;
+mod color_emoji;
 pub(crate) mod messages;
 mod modals;
+mod poll_card;
 mod reactions_dialog;
 mod stickers;
 mod theme;
-mod worker;
-mod workspace;
+#[cfg(target_os = "linux")]
+mod tray;
+pub(crate) mod worker;
+pub(crate) mod workspace;
 
 use messages::*;
+use poll_card::*;
 use stickers::*;
 use theme::*;
 pub use theme::{emoji_to_tex_key, load_app_icon, lucide, REACTION_LIST};
@@ -889,6 +894,7 @@ pub enum GuiEvent {
         error: Option<String>,
         /// Why the phone (Sync V2) step could not start, captured by the worker for this run.
         phone_error: Option<String>,
+        warnings: Vec<String>,
     },
     /// Result of pinning/unpinning a single chat message through the group-board API.
     MessagePinResult {
@@ -898,6 +904,16 @@ pub enum GuiEvent {
         topic_id: String,
         error: Option<String>,
     },
+    /// Detail of one group poll, or why it could not be read.
+    PollDetailLoaded {
+        poll_id: String,
+        result: Result<crate::poll::PollDetail, String>,
+    },
+    /// Outcome of `WorkerCmd::VotePoll`: the reply's options, or the error.
+    PollVoted {
+        poll_id: String,
+        result: Result<Vec<crate::poll::PollOption>, String>,
+    },
     /// Server-side pinned board items for one conversation.
     BoardPinsUpdated {
         thread_id: String,
@@ -906,6 +922,11 @@ pub enum GuiEvent {
     },
     ProxyUpdated(Result<Option<String>, String>),
     FileDownloaded(Result<(String, String), String>),
+    /// Answer to `WorkerCmd::SaveMedia`; `result` is `(file_name, full_path)`.
+    MediaSaved {
+        url: String,
+        result: Result<(String, String), String>,
+    },
     /// Worker đã tải + trích text xem trước tài liệu (session-only).
     DocPreviewReady {
         msg_id: String,
@@ -997,12 +1018,15 @@ fn phone_sync_completion_message(
     cancelled: bool,
     error: Option<&str>,
     phone_error: Option<&str>,
+    warnings: &[String],
 ) -> String {
     if let Some(err) = error {
         return format!("⚠️ Đồng bộ thất bại: {err}");
     }
     let prefix = if cancelled {
         "Đã dừng"
+    } else if !warnings.is_empty() {
+        "Đồng bộ chưa đầy đủ"
     } else {
         "Đã hoàn tất"
     };
@@ -1010,7 +1034,11 @@ fn phone_sync_completion_message(
         Some(err) => format!("Không đồng bộ được từ điện thoại: {err}"),
         None => "Lịch sử điện thoại chưa được tải vào ứng dụng.".to_string(),
     };
-    format!("{prefix} yêu cầu: {added} tin mới từ Cloud/Nhóm ({active_threads} hội thoại). {phone_note}")
+    let warning_note = warnings
+        .first()
+        .map(|first| format!(" · {} lỗi tải dữ liệu (vd. {first})", warnings.len()))
+        .unwrap_or_default();
+    format!("{prefix} yêu cầu: {added} tin mới từ Cloud/Nhóm ({active_threads} hội thoại). {phone_note}{warning_note}")
 }
 
 #[derive(Debug, Clone)]
@@ -1079,6 +1107,22 @@ struct ImageViewerModal {
     time: String,
     zoom: f32,
     pan: Vec2,
+    /// Every photo of the open conversation, oldest first, for prev/next browsing.
+    /// Filled lazily by the viewer on its first frame (empty = not built yet).
+    gallery: Vec<GalleryPhoto>,
+    /// Position of the shown photo in `gallery`.
+    gallery_index: usize,
+}
+
+/// One photo the image viewer can step to.
+#[derive(Debug, Clone)]
+struct GalleryPhoto {
+    tex_key: String,
+    thumb_url: String,
+    full_url: String,
+    title: String,
+    sender: String,
+    time: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1177,7 +1221,7 @@ pub(crate) struct EditingMessage {
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct AppSettings {
+pub(crate) struct AppSettings {
     // 1. Cài đặt chung
     show_all_contacts: bool,
     language: String,
@@ -1204,6 +1248,8 @@ struct AppSettings {
     pub(crate) use_avatar_as_wallpaper: bool,
     pub(crate) font_family: String,
     pub(crate) font_scale: f32,
+    #[serde(default = "default_scroll_speed")]
+    pub(crate) scroll_speed: f32,
     #[serde(default = "settings_default_true")]
     pub(crate) animations_enabled: bool,
     #[serde(default = "settings_default_animation_speed")]
@@ -1302,6 +1348,7 @@ impl Default for AppSettings {
             use_avatar_as_wallpaper: false,
             font_family: "default".into(),
             font_scale: 1.0,
+            scroll_speed: default_scroll_speed(),
             animations_enabled: true,
             animation_speed: 1.0,
             custom_primary_color: None,
@@ -1361,6 +1408,14 @@ impl AppSettings {
             1.0
         } else {
             self.animation_speed.clamp(0.5, 2.0)
+        }
+    }
+
+    pub(crate) fn normalized_scroll_speed(&self) -> f32 {
+        if !self.scroll_speed.is_finite() || self.scroll_speed <= 0.0 {
+            default_scroll_speed()
+        } else {
+            self.scroll_speed.clamp(0.5, 4.0)
         }
     }
 
@@ -1432,6 +1487,28 @@ pub(crate) struct IncomingPopupState {
     pub(crate) reply_draft: String,
 }
 
+impl IncomingPopupState {
+    pub(crate) fn new(
+        thread_id: String,
+        sender_name: String,
+        preview_text: String,
+        avatar_url: Option<String>,
+        is_group: bool,
+        unread_total: usize,
+    ) -> Self {
+        Self {
+            thread_id,
+            sender_name,
+            preview_text,
+            avatar_url,
+            is_group,
+            unread_total: unread_total.max(1),
+            created_at: std::time::Instant::now(),
+            reply_draft: String::new(),
+        }
+    }
+}
+
 /// Message search hits for the sidebar: (thread_idx, msg_id, sender, text, is_outgoing).
 pub(crate) type MsgHits = Vec<(usize, String, String, String, bool)>;
 
@@ -1493,6 +1570,8 @@ pub struct ZaloGuiApp {
     pub(crate) video_player: Option<VideoPlayerModal>,
 
     info_drawer_open: bool,
+    sidebar_collapsed: bool,
+    last_sidebar_rail: bool,
     /// Sidebar list cache (query, filter, len, fingerprint, selected, indices, at).
     /// Avoids re-filter+sort (~1300 threads) every repaint (#135).
     thread_list_cache: crate::gui::workspace::ThreadListCache,
@@ -1505,6 +1584,8 @@ pub struct ZaloGuiApp {
     /// "Đăng xuất" is pending confirmation (#130).
     pub(crate) logout_confirm_open: bool,
     toast_notice: Option<(String, std::time::Instant)>,
+    /// Saved file shown by the current toast's "Mở thư mục" button, if any.
+    toast_reveal_path: Option<String>,
     /// Rich corner notification popup for incoming messages
     incoming_popup: Option<IncomingPopupState>,
     phone_modal_open: bool,
@@ -1521,6 +1602,8 @@ pub struct ZaloGuiApp {
     sticker_picker_open: bool,
     sticker_tab: StickerTab,
     sticker_textures: HashMap<String, TextureHandle>,
+    texture_lru: crate::media_resources::ResourceLru,
+    last_frame_textures: HashSet<String>,
     loading_stickers: HashSet<String>,
     /// Tracks sticker/avatar/thumb URLs that failed to download: `(attempts, last_failed_at)`.
     failed_stickers: HashMap<String, (u8, std::time::Instant)>,
@@ -1556,6 +1639,8 @@ pub struct ZaloGuiApp {
     reaction_unread_counts: HashMap<String, usize>,
     /// Message IDs that have already triggered an unread bump/notification in this session (#146).
     notified_msg_ids: HashSet<String>,
+    /// `(uin, banner progress)`: persisted so replayed reactions do not re-banner.
+    reaction_banner_mark: (String, crate::reactions::BannerMark),
     link_metadata_cache: HashMap<String, crate::chat::LinkMetadata>,
     loading_link_previews: HashSet<String>,
     /// Tin đang chờ dịch (translate_request_key) → disable menu Dịch.
@@ -1610,10 +1695,14 @@ pub struct ZaloGuiApp {
     pending_delete_thread: Option<(usize, String, String, bool, String)>,
     /// Pending confirmation before leaving a group (`(idx, group_id, group_name)`).
     pub(crate) pending_leave_group: Option<(usize, String, String)>,
+    /// Group poll cards (session-only), keyed by poll id.
+    polls: HashMap<String, PollCardState>,
     /// Xem trước tài liệu (session-only): msg_id → text đã trích.
     doc_previews: HashMap<String, String>,
     /// msg_id đang tải xem trước (tránh gửi trùng mỗi frame).
     doc_preview_loading: HashSet<String>,
+    /// Media URLs being saved to Downloads, so repeated clicks do not save duplicates.
+    saving_media: HashSet<String>,
     /// msg_id xem trước lỗi (msg_id → message): hiện lỗi + cho thử lại.
     doc_preview_errors: HashMap<String, String>,
     /// Popup xem đầy đủ text tài liệu (msg_id, file_name, text).
@@ -1624,8 +1713,6 @@ pub struct ZaloGuiApp {
     settings_tab: SettingsTab,
     notification_authorization: crate::native_notifications::AuthorizationState,
     settings: AppSettings,
-    settings_blur_tex: Option<TextureHandle>,
-    settings_blur_req_at: Option<std::time::Instant>,
     update_checking: bool,
     update_downloading: bool,
     update_progress: Option<(u64, u64)>,
@@ -1696,6 +1783,9 @@ pub struct ZaloGuiApp {
     pub(crate) folder_modal_open: bool,
     last_typing_sent_at: Option<(String, std::time::Instant)>,
     last_synced_icon_unread: Option<usize>,
+    /// System-tray icon with an unread dot; `None` when the tray thread could not start.
+    #[cfg(target_os = "linux")]
+    tray: Option<tray::TrayHandle>,
     // Background channels
     event_rx: Receiver<GuiEvent>,
     #[allow(dead_code)]
@@ -1703,8 +1793,11 @@ pub struct ZaloGuiApp {
     /// (thread id, number of newest bubbles rendered) — see `CHAT_RENDER_STEP`.
     chat_render_window: (String, usize),
     quote_jump: Option<QuoteJump>,
+    /// Twemoji textures painted over emoji glyphs at the end of each frame.
+    color_emoji: color_emoji::ColorEmoji,
     ime_active: bool,
     ime_just_committed: bool,
+    ime_is_cjk: bool,
     history_reached_start: HashSet<String>,
     force_scroll_to_bottom: bool,
     #[cfg(target_os = "windows")]
@@ -1841,6 +1934,7 @@ impl ZaloGuiApp {
             .max_by_key(|(_, t)| t.messages.last().map(|m| m.ts).unwrap_or(0))
             .map(|(idx, _)| idx)
             .unwrap_or(0);
+        let startup_sched_db = crate::store::db_path_for_account(&user_uin);
 
         let app = Self {
             dark_mode,
@@ -1880,6 +1974,8 @@ impl ZaloGuiApp {
             video_player: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
             info_drawer_open: loaded_settings.info_drawer_open,
+            sidebar_collapsed: false,
+            last_sidebar_rail: false,
             thread_list_cache: None,
             llm_test_result: None,
             llm_test_pending: false,
@@ -1887,6 +1983,7 @@ impl ZaloGuiApp {
             wipe_confirm_open: false,
             logout_confirm_open: false,
             toast_notice: None,
+            toast_reveal_path: None,
             incoming_popup: None,
             phone_modal_open: false,
             phone_modal_input: String::new(),
@@ -1900,6 +1997,8 @@ impl ZaloGuiApp {
             sticker_picker_open: false,
             sticker_tab: StickerTab::Popular,
             sticker_textures: HashMap::new(),
+            texture_lru: crate::media_resources::ResourceLru::new(64 * 1024 * 1024),
+            last_frame_textures: HashSet::new(),
             loading_stickers: HashSet::new(),
             failed_stickers: HashMap::new(),
             emoji_textures: load_default_emoji_textures(&cc.egui_ctx),
@@ -1937,6 +2036,7 @@ impl ZaloGuiApp {
             unread_counts: HashMap::new(),
             reaction_unread_counts: HashMap::new(),
             notified_msg_ids: HashSet::new(),
+            reaction_banner_mark: (String::new(), Default::default()),
             link_metadata_cache: HashMap::new(),
             loading_link_previews: HashSet::new(),
             translate_pending: HashSet::new(),
@@ -1972,8 +2072,10 @@ impl ZaloGuiApp {
             script_output: String::new(),
             pending_delete_thread: None,
             pending_leave_group: None,
+            polls: HashMap::new(),
             doc_previews: HashMap::new(),
             doc_preview_loading: HashSet::new(),
+            saving_media: HashSet::new(),
             doc_preview_errors: HashMap::new(),
             doc_viewer: None,
             user_online_map: HashMap::new(),
@@ -1982,8 +2084,6 @@ impl ZaloGuiApp {
             settings_tab: SettingsTab::General,
             notification_authorization: Default::default(),
             settings: loaded_settings,
-            settings_blur_tex: None,
-            settings_blur_req_at: None,
             update_checking: false,
             update_downloading: false,
             update_progress: None,
@@ -2021,7 +2121,7 @@ impl ZaloGuiApp {
             schedule_modal_open: false,
             schedule_custom_input: String::new(),
             schedule_editing_id: None,
-            scheduled_items: crate::scheduler::list_pending_scheduled("zalo_history.db", None)
+            scheduled_items: crate::scheduler::list_pending_scheduled(&startup_sched_db, None)
                 .unwrap_or_default(),
             phone_sync_progress: 0.0,
             phone_sync_status: String::new(),
@@ -2044,12 +2144,16 @@ impl ZaloGuiApp {
             folder_modal_open: false,
             last_typing_sent_at: None,
             last_synced_icon_unread: None,
+            #[cfg(target_os = "linux")]
+            tray: tray::spawn(cc.egui_ctx.clone()),
             event_rx: rx,
             event_tx: tx.clone(),
             chat_render_window: (String::new(), CHAT_RENDER_STEP),
             quote_jump: None,
+            color_emoji: Default::default(),
             ime_active: false,
             ime_just_committed: false,
+            ime_is_cjk: false,
             history_reached_start: HashSet::new(),
             force_scroll_to_bottom: false,
             #[cfg(target_os = "windows")]
@@ -2130,6 +2234,27 @@ pub(crate) fn record_sticker_fetch_failure(
     entry.1 = now;
 }
 
+thread_local! {
+    static FRAME_TOUCHED_TEXTURES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+pub(crate) fn mark_texture_used(key: &str) {
+    FRAME_TOUCHED_TEXTURES.with(|cell| {
+        if let Ok(mut set) = cell.try_borrow_mut() {
+            set.insert(key.to_owned());
+        }
+    });
+}
+
+fn drain_frame_touched_textures() -> HashSet<String> {
+    FRAME_TOUCHED_TEXTURES.with(|cell| {
+        cell.try_borrow_mut()
+            .map(|mut set| std::mem::take(&mut *set))
+            .unwrap_or_default()
+    })
+}
+
 /// Queues a worker download for a sticker/avatar/thumbnail without borrowing the full `ZaloGuiApp`.
 pub(crate) fn queue_sticker_fetch(
     sticker_textures: &HashMap<String, TextureHandle>,
@@ -2138,8 +2263,11 @@ pub(crate) fn queue_sticker_fetch(
     key: String,
     url: String,
 ) {
+    if sticker_textures.contains_key(&key) {
+        mark_texture_used(&key);
+        return;
+    }
     if url.is_empty()
-        || sticker_textures.contains_key(&key)
         || loading_stickers.contains(&key)
         || !can_attempt_sticker_fetch(failed_stickers, &key, std::time::Instant::now())
     {
@@ -2152,6 +2280,19 @@ pub(crate) fn queue_sticker_fetch(
 }
 
 impl ZaloGuiApp {
+    /// Ask the worker to save a photo/video into the OS Downloads folder, ignoring repeat
+    /// clicks while the same URL is still being saved.
+    pub(super) fn save_media(&mut self, url: String, file_name: String) {
+        if !self.saving_media.insert(url.clone()) {
+            self.show_toast("⏳ Đang tải, vui lòng chờ…");
+            return;
+        }
+        self.show_toast("⏳ Đang tải về thư mục Downloads…");
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::SaveMedia { url, file_name });
+        }
+    }
+
     /// Queues a worker download for a sticker/avatar/thumbnail once retry backoff allows it.
     pub(super) fn request_sticker_image(&mut self, key: String, url: String) {
         queue_sticker_fetch(
@@ -2219,8 +2360,9 @@ impl ZaloGuiApp {
     }
 
     pub(super) fn refresh_scheduled_items(&mut self) {
+        let db = crate::store::db_path_for_account(&self.user_uin);
         self.scheduled_items =
-            crate::scheduler::list_pending_scheduled("zalo_history.db", None).unwrap_or_default();
+            crate::scheduler::list_pending_scheduled(&db, None).unwrap_or_default();
     }
     /// Tải lại hộp Đã lưu từ DB acc hiện tại (WaveA2).
     pub(super) fn refresh_saved_items(&mut self) {
@@ -2439,9 +2581,15 @@ impl ZaloGuiApp {
 
     fn persist_threads_async(&self) {
         self.publish_known_threads();
+        if self.user_uin.is_empty() {
+            return;
+        }
         let snapshot = self.threads.clone();
         if let Some(wtx) = WORKER_TX.get() {
-            let _ = wtx.send(WorkerCmd::PersistThreads(snapshot));
+            let _ = wtx.send(WorkerCmd::PersistThreads {
+                uin: self.user_uin.clone(),
+                threads: snapshot,
+            });
         }
     }
     /// Chạy script on_message/on_keyword cho các tin mới (worker thread, không block UI).
@@ -2611,9 +2759,9 @@ impl ZaloGuiApp {
                         self.group_summary_pending = None;
                         self.group_jump_pending = None;
                     }
-                    // Refresh (đã login) thì merge, KHÔNG clear — clear + nạp lại sẽ
-                    // khiến nhánh brand-new đếm toàn bộ history thành unread (#119).
-                    let is_refresh = self.is_logged_in;
+                    // Refresh (đã login ĐÚNG cùng tài khoản) thì merge, KHÔNG clear —
+                    // đổi sang tài khoản khác PHẢI clear sạch state cũ (#119).
+                    let is_refresh = self.is_logged_in && self.user_uin == uin;
                     self.is_logged_in = true;
                     self.pending_add_account_uin = None;
                     self.user_name = name;
@@ -2629,7 +2777,17 @@ impl ZaloGuiApp {
                         self.reaction_unread_counts.clear();
                         self.notified_msg_ids.clear();
                         self.history_reached_start.clear();
+                        self.draft_map.clear();
+                        self.draft_reply_map.clear();
+                        self.draft_threads.clear();
+                        self.reminder_items.clear();
+                        self.reminder_due_pending.clear();
+                        self.incoming_popup = None;
+                        self.reaction_inbox = crate::reactions::ReactionInbox::default();
                         self.selected_thread_index = 0;
+                        self.refresh_scheduled_items();
+                        self.refresh_saved_items();
+                        self.publish_known_threads();
                     }
                     self.login_in_progress = false;
                     self.composer_sticker_cache.retain(|_, v| !v.is_empty());
@@ -2638,6 +2796,7 @@ impl ZaloGuiApp {
                 GuiEvent::LoginFailed(err) => {
                     self.login_in_progress = false;
                     self.login_status_msg = format!("Lỗi đăng nhập: {err}");
+                    self.qr_status = format!("⚠️ {err}");
                 }
                 GuiEvent::ThreadsUpdated(updates) => {
                     ensure_cjk_font(ctx, thread_texts(&updates));
@@ -2810,17 +2969,14 @@ impl ZaloGuiApp {
                                                             .copied()
                                                             .unwrap_or(1);
                                                         self.incoming_popup =
-                                                            Some(IncomingPopupState {
-                                                                thread_id: existing.id.clone(),
-                                                                sender_name: sender_label.clone(),
-                                                                preview_text: preview_short.clone(),
-                                                                avatar_url: avt_url,
-                                                                is_group: existing.is_group,
-                                                                unread_total: unread_for_thread,
-                                                                created_at:
-                                                                    std::time::Instant::now(),
-                                                                reply_draft: String::new(),
-                                                            });
+                                                            Some(IncomingPopupState::new(
+                                                                existing.id.clone(),
+                                                                sender_label.clone(),
+                                                                preview_short.clone(),
+                                                                avt_url,
+                                                                existing.is_group,
+                                                                unread_for_thread,
+                                                            ));
                                                         chat_banners
                                                             .push((sender_label, preview_short));
                                                     }
@@ -2954,6 +3110,31 @@ impl ZaloGuiApp {
                                             } else {
                                                 preview_raw.to_string()
                                             };
+                                        let avt_url = nt
+                                            .avatar
+                                            .clone()
+                                            .filter(|u| !u.trim().is_empty());
+                                        if let Some(ref url) = avt_url {
+                                            let tex_key = format!(
+                                                "thumb_{}",
+                                                crate::crypto::md5_hex(url)
+                                            );
+                                            queue_sticker_fetch(
+                                                &self.sticker_textures,
+                                                &mut self.loading_stickers,
+                                                &self.failed_stickers,
+                                                tex_key,
+                                                url.clone(),
+                                            );
+                                        }
+                                        self.incoming_popup = Some(IncomingPopupState::new(
+                                            nt.id.clone(),
+                                            sender.clone(),
+                                            preview_short.clone(),
+                                            avt_url,
+                                            nt.is_group,
+                                            inc_cnt,
+                                        ));
                                         chat_banners.push((sender, preview_short));
                                     }
                                 }
@@ -2968,7 +3149,11 @@ impl ZaloGuiApp {
                             if self.settings.play_notification_sound {
                                 crate::media::play_notification_chime();
                             }
+                            #[cfg(not(target_os = "windows"))]
                             crate::os_notify::notify_chat_batch(&chat_banners);
+                            #[cfg(target_os = "windows")]
+                            let _ = &chat_banners;
+                            ctx.request_repaint();
                             let total_unread: usize = self.unread_counts.values().sum();
                             let title = if total_unread > 0 {
                                 format!("({total_unread}) ctdozlite")
@@ -3039,10 +3224,13 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Trực tuyến · Cập nhật {}", crate::ui::clock());
                 }
                 GuiEvent::SessionExpired(reason) => {
+                    let was_logged_in = self.is_logged_in;
                     self.is_logged_in = false;
-                    self.qr_texture = None;
-                    self.qr_status =
-                        format!("{reason} — Quét mã QR bên dưới để khôi phục phiên trực tuyến.");
+                    if was_logged_in || self.qr_texture.is_none() {
+                        self.qr_texture = None;
+                        self.qr_status =
+                            format!("{reason} — Quét mã QR bên dưới để khôi phục phiên trực tuyến.");
+                    }
                     self.status_msg = format!("{reason} (Lịch sử tin nhắn vẫn được bảo toàn)");
                 }
                 GuiEvent::SessionUnreachable(reason) => {
@@ -3114,6 +3302,11 @@ impl ZaloGuiApp {
                     self.group_stats_loading.clear();
                     self.group_summary_pending = None;
                     self.group_jump_pending = None;
+                    self.saved_items.clear();
+                    self.scheduled_items.clear();
+                    self.incoming_popup = None;
+                    self.reaction_inbox = crate::reactions::ReactionInbox::default();
+                    self.publish_known_threads();
                 }
                 GuiEvent::AccountSwitched {
                     uin,
@@ -3172,6 +3365,11 @@ impl ZaloGuiApp {
                     self.remind_custom_input.clear();
                     self.input_message.clear();
                     self.replying_to = None;
+                    self.incoming_popup = None;
+                    self.reaction_inbox = crate::reactions::ReactionInbox::default();
+                    self.refresh_scheduled_items();
+                    self.refresh_saved_items();
+                    self.publish_known_threads();
                     if let Some(tx) = WORKER_TX.get() {
                         let _ = tx.send(WorkerCmd::RefreshThreads);
                     }
@@ -3399,14 +3597,22 @@ impl ZaloGuiApp {
                     }
                     // Reaction banners for peer reactions onto MY OWN messages
                     // (gate: skip own/removal/historical; respect mute + master toggle).
-                    let mut reaction_banners: Vec<(String, String)> = Vec::new();
+                    let mut reaction_banners: Vec<(String, String, Option<String>, bool, String)> =
+                        Vec::new();
                     let my_uid = self.user_uin.clone();
                     let reactions_notify_on = self.settings.enable_notifications;
                     let reactions_sound_on =
                         self.settings.enable_notifications && self.settings.play_notification_sound;
                     let now_ts_react = crate::login::unix_now();
+                    if self.reaction_banner_mark.0 != self.user_uin {
+                        self.reaction_banner_mark = (
+                            self.user_uin.clone(),
+                            crate::reactions::load_banner_mark(&self.user_uin),
+                        );
+                    }
+                    let banner_state = self.reaction_banner_mark.1.clone();
                     for ev in &accepted {
-                        if ev.r_type < 0 || ev.historical {
+                        if ev.r_type < 0 || ev.historical || banner_state.is_done(ev) {
                             continue;
                         }
                         if ev.sender_id.is_empty() || ev.sender_id == my_uid {
@@ -3436,7 +3642,13 @@ impl ZaloGuiApp {
                                 &ev.emoji,
                                 &m.text,
                             );
-                            reaction_banners.push((t.name.clone(), body));
+                            reaction_banners.push((
+                                t.id.clone(),
+                                t.name.clone(),
+                                t.avatar.clone().filter(|u| !u.trim().is_empty()),
+                                t.is_group,
+                                body,
+                            ));
                             break;
                         }
                     }
@@ -3450,7 +3662,7 @@ impl ZaloGuiApp {
                     let is_focused_now = ctx.input(|i| i.focused);
                     let my_uid_count = self.user_uin.clone();
                     for ev in &accepted {
-                        if ev.r_type < 0 || ev.historical {
+                        if ev.r_type < 0 || ev.historical || banner_state.is_done(ev) {
                             continue;
                         }
                         if ev.sender_id.is_empty() || ev.sender_id == my_uid_count {
@@ -3494,11 +3706,52 @@ impl ZaloGuiApp {
                         }
                         *self.reaction_unread_counts.entry(tid).or_insert(0) += 1;
                     }
+                    // A peer reaction whose target message is not loaded yet got no banner
+                    // decision: keep it pending so a later replay can still banner it.
+                    let mut next_state = banner_state.clone();
+                    for ev in &accepted {
+                        let Some(seq) = crate::reactions::banner_seq(ev) else {
+                            continue;
+                        };
+                        if banner_state.is_done(ev) {
+                            continue;
+                        }
+                        let needs_target = !(ev.r_type < 0
+                            || ev.historical
+                            || ev.sender_id.is_empty()
+                            || ev.sender_id == my_uid);
+                        let resolved = !needs_target
+                            || self
+                                .threads
+                                .iter()
+                                .any(|t| find_reaction_target(&t.messages, ev).is_some());
+                        next_state.record(seq, resolved);
+                    }
+                    if next_state != banner_state {
+                        self.reaction_banner_mark.1 = next_state.clone();
+                        let uin = self.user_uin.clone();
+                        let generation = crate::reactions::next_banner_save_generation();
+                        std::thread::spawn(move || {
+                            crate::reactions::save_banner_mark(&uin, &next_state, generation)
+                        });
+                    }
                     if !reaction_banners.is_empty() && reactions_notify_on {
-                        for (title, body) in &reaction_banners {
+                        #[cfg(target_os = "windows")]
+                        if let Some((tid, title, avt, is_grp, body)) = reaction_banners.last().cloned()
+                        {
+                            self.incoming_popup = Some(IncomingPopupState::new(
+                                tid, title, body, avt, is_grp, 1,
+                            ));
+                            ctx.request_repaint();
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        for (_, title, _, _, body) in &reaction_banners {
                             crate::os_notify::notify(title, body);
                         }
                         if reactions_sound_on {
+                            #[cfg(target_os = "windows")]
+                            crate::media::play_notification_chime();
+                            #[cfg(not(target_os = "windows"))]
                             crate::os_notify::play_notification_sound();
                         }
                     }
@@ -3525,26 +3778,53 @@ impl ZaloGuiApp {
                     msg_id,
                     ts,
                 } => {
+                    let mut recalled_outgoing = false;
                     if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                         if let Some(m) = t.messages.iter_mut().find(|m| {
                             (!msg_id.is_empty() && m.id == msg_id)
                                 || (msg_id.is_empty() && m.ts == ts)
                         }) {
-                            if !m.text.starts_with("[Đã thu hồi]") {
+                            if m.is_outgoing {
+                                recalled_outgoing = true;
+                                m.text = "[Tin nhắn đã thu hồi]".into();
+                                m.link_url = None;
+                                m.link_thumb = None;
+                                m.link_title = None;
+                                m.link_desc = None;
+                                m.link_src = None;
+                                m.sticker_id = None;
+                                m.sticker_cate_id = None;
+                                m.sticker_type = None;
+                                m.oa_card = None;
+                                m.media_group = None;
+                                m.kind = crate::message_model::MessageKind::Text;
+                            } else if !m.text.starts_with("[Đã thu hồi]") {
                                 if m.text.trim().is_empty() {
                                     m.text = "[Tin nhắn đã thu hồi]".into();
                                 } else {
                                     m.text = format!("[Đã thu hồi] {}", m.text);
                                 }
                             }
-                            // Anti-recall: Preserve sticker_id, link_url, link_thumb so user can still see media!
                         }
                         if let Some(last) = t.messages.last() {
-                            t.preview = last.text.clone();
+                            t.preview = if last.text.trim() == "[Tin nhắn đã thu hồi]" {
+                                "Tin nhắn đã được thu hồi".into()
+                            } else {
+                                last.text.clone()
+                            };
                         }
                         self.persist_threads_async();
                     }
-                    self.status_msg = "Có tin nhắn vừa bị thu hồi (đã lưu lại)".into();
+                    if recalled_outgoing {
+                        let db = crate::store::db_path_for_account(&self.user_uin);
+                        if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+                            let _ = st.mark_outgoing_recalled(&thread_id, &msg_id, ts);
+                        }
+                        self.status_msg = "Đã thu hồi tin nhắn với mọi người".into();
+                        self.show_toast("Đã thu hồi tin nhắn với mọi người");
+                    } else {
+                        self.status_msg = "Có tin nhắn vừa bị thu hồi (đã lưu lại)".into();
+                    }
                 }
                 GuiEvent::MessageEdited {
                     thread_id,
@@ -3709,8 +3989,28 @@ impl ZaloGuiApp {
                 GuiEvent::StickerImageReady { key, image } => {
                     self.loading_stickers.remove(&key);
                     self.failed_stickers.remove(&key);
-                    let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
-                    self.sticker_textures.insert(key, tex);
+                    // Avatars and thumbnails are drawn far below their pixel size; without
+                    // mipmaps the downscale aliases into a grainy image. Live call frames are
+                    // replaced every frame, so they skip the mipmap generation cost.
+                    let options = if key.starts_with("call_") {
+                        TextureOptions::LINEAR
+                    } else {
+                        TextureOptions {
+                            mipmap_mode: Some(egui::TextureFilter::Linear),
+                            ..TextureOptions::LINEAR
+                        }
+                    };
+                    let bytes = (image.size[0] as u64)
+                        .saturating_mul(image.size[1] as u64)
+                        .saturating_mul(4);
+                    let tex = ctx.load_texture(&key, image, options);
+                    self.sticker_textures.insert(key.clone(), tex);
+                    for evicted_key in
+                        self.texture_lru
+                            .insert_protecting(key, bytes, &self.last_frame_textures)
+                    {
+                        self.sticker_textures.remove(&evicted_key);
+                    }
                 }
                 GuiEvent::StickerImageFailed { key } => {
                     self.loading_stickers.remove(&key);
@@ -4354,6 +4654,7 @@ impl ZaloGuiApp {
                     cancelled,
                     error,
                     phone_error,
+                    warnings,
                 } => {
                     self.phone_sync_progress = 0.0;
                     if !threads.is_empty() {
@@ -4400,6 +4701,7 @@ impl ZaloGuiApp {
                         cancelled,
                         error.as_deref(),
                         phone_error.as_deref(),
+                        &warnings,
                     );
                     self.phone_sync_status = msg.clone();
                     self.status_msg = msg.clone();
@@ -4433,6 +4735,36 @@ impl ZaloGuiApp {
                         }
                         self.persist_threads_async();
                     }
+                }
+                GuiEvent::PollDetailLoaded { poll_id, result } => {
+                    let st = self.polls.entry(poll_id).or_default();
+                    st.loading = false;
+                    match result {
+                        Ok(detail) => {
+                            st.detail = Some(detail);
+                            st.error = None;
+                        }
+                        // A failed refresh keeps the last good detail on screen.
+                        Err(e) if st.detail.is_none() => st.error = Some(e),
+                        Err(_) => {}
+                    }
+                }
+                GuiEvent::PollVoted { poll_id, result } => {
+                    let st = self.polls.entry(poll_id).or_default();
+                    st.voting = false;
+                    let toast = match result {
+                        Ok(options) => {
+                            st.draft = None;
+                            if let Some(d) = st.detail.as_mut() {
+                                d.apply_vote_reply(options);
+                            }
+                            // The worker re-reads the poll right after a vote.
+                            st.loading = true;
+                            "Đã lưu bình chọn".to_string()
+                        }
+                        Err(e) => format!("Có lỗi xảy ra trong quá trình bình chọn: {e}"),
+                    };
+                    self.show_toast(toast);
                 }
                 GuiEvent::BoardPinsUpdated {
                     thread_id,
@@ -4508,11 +4840,12 @@ impl ZaloGuiApp {
                 },
                 GuiEvent::FileDownloaded(res) => match res {
                     Ok((fname, path)) => {
-                        let msg = format!("✅ Đã lưu tập tin \"{fname}\" tại {path}");
-                        self.status_msg = msg.clone();
-                        self.show_toast(msg);
-                        // Mở thư mục chứa file để user khỏi mất công tìm (#102).
-                        reveal_in_file_manager(&path);
+                        // The toast's "Mở thư mục" button reveals the file on demand (#102)
+                        // instead of popping the file manager up after every download.
+                        self.show_toast_with_reveal(
+                            format!("✅ Đã lưu tập tin \"{fname}\" tại {path}"),
+                            path,
+                        );
                     }
                     Err(e) => {
                         let msg = format!("⚠️ Lỗi lưu tập tin: {e}");
@@ -4520,6 +4853,18 @@ impl ZaloGuiApp {
                         self.show_toast(msg);
                     }
                 },
+                GuiEvent::MediaSaved { url, result } => {
+                    self.saving_media.remove(&url);
+                    // No file-manager pop-up here: Downloads is usually large and slow to open,
+                    // and the user stays in the chat; the toast carries the path instead.
+                    match result {
+                        Ok((fname, path)) => self.show_toast_with_reveal(
+                            format!("✅ Đã lưu \"{fname}\" vào thư mục Downloads"),
+                            path,
+                        ),
+                        Err(e) => self.show_toast(format!("⚠️ Lỗi tải về: {e}")),
+                    }
+                }
                 GuiEvent::DocPreviewReady { msg_id, text } => {
                     self.doc_preview_loading.remove(&msg_id);
                     self.doc_preview_errors.remove(&msg_id);
@@ -4604,12 +4949,55 @@ fn reveal_in_file_manager(path: &str) {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let parent = std::path::Path::new(path)
-            .parent()
-            .map(|p| p.as_os_str())
-            .unwrap_or(std::ffi::OsStr::new("."));
-        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+        // Ask the file manager to open the folder with the file selected
+        // (`org.freedesktop.FileManager1`, Nautilus/Dolphin/Nemo); fall back to opening the
+        // parent folder. Runs on its own thread because `gdbus` is waited on.
+        let path = path.to_string();
+        let _ = std::thread::Builder::new()
+            .name("reveal-file".into())
+            .spawn(move || {
+                let uri = file_uri(&path);
+                let shown = std::process::Command::new("gdbus")
+                    .args([
+                        "call",
+                        "--session",
+                        "--dest",
+                        "org.freedesktop.FileManager1",
+                        "--object-path",
+                        "/org/freedesktop/FileManager1",
+                        "--method",
+                        "org.freedesktop.FileManager1.ShowItems",
+                        &format!("['{uri}']"),
+                        "",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if !shown {
+                    let parent = std::path::Path::new(&path)
+                        .parent()
+                        .map(|p| p.as_os_str().to_owned())
+                        .unwrap_or_else(|| ".".into());
+                    let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+                }
+            });
     }
+}
+
+/// `file://` URI for an absolute path, percent-encoding everything outside the RFC 3986
+/// unreserved set (and `'`, which would break the GVariant string literal).
+#[cfg_attr(any(target_os = "windows", target_os = "macos"), allow(dead_code))]
+fn file_uri(path: &str) -> String {
+    let mut out = String::from("file://");
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -4621,17 +5009,59 @@ fn reveal_in_file_manager(path: &str) {
 // ---------------------------------------------------------------------------
 
 impl eframe::App for ZaloGuiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_frame(ctx, frame);
+        self.color_emoji.paint(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if !self.allow_quit {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("crash.log")
+            {
+                let _ = writeln!(
+                    f,
+                    "[{ts}] UNEXPECTED_EXIT: eframe on_exit called while allow_quit=false"
+                );
+            }
+        }
+        let _ = self.settings.save();
+        std::process::exit(0);
+    }
+}
+
+impl ZaloGuiApp {
+    fn update_frame(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_windows_frameless_subclass(ctx);
 
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q))
-            || ctx.input(|i| i.viewport().close_requested())
-        {
+        // Ctrl+Q and the tray's "Thoát" quit; closing the window only hides it to the
+        // tray while a tray icon is shown, so the app keeps receiving messages.
+        let quit_now = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q))
+            || self.take_tray_quit_request();
+        if quit_now {
+            self.allow_quit = true;
+        }
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested && !self.allow_quit && self.hides_to_tray() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        } else if quit_now || close_requested {
             self.allow_quit = true;
             if let Some(tx) = WORKER_TX.get() {
                 let _ = tx.send(WorkerCmd::EndCall);
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = self.tray.as_mut() {
+            tray.set_unread(self.unread_counts.values().sum());
         }
         if ctx.input(|i| {
             (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)
@@ -4668,7 +5098,17 @@ impl eframe::App for ZaloGuiApp {
 
         self.check_events(ctx);
 
+        let scr_check = ctx.screen_rect();
+        if scr_check.width() < 64.0 || scr_check.height() < 64.0 {
+            if self.incoming_popup.is_some() && self.settings.enable_notifications {
+                let pal = self.cached_palette.clone();
+                self.render_toast_overlay(ctx, &pal);
+            }
+            return;
+        }
+
         self.ime_just_committed = false;
+        let scroll_scale = self.settings.normalized_scroll_speed();
         ctx.input_mut(|i| {
             let mut ime_commit_in_frame = false;
             let mut ime_space_commit = false;
@@ -4722,17 +5162,23 @@ impl eframe::App for ZaloGuiApp {
 
             for event in &mut i.events {
                 match event {
+                    egui::Event::MouseWheel { delta, .. } => {
+                        *delta *= scroll_scale;
+                    }
                     egui::Event::Ime(egui::ImeEvent::Enabled) => {
                         self.ime_active = true;
                         was_composing = true;
                     }
                     egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
                         self.ime_active = !text.is_empty();
+                        self.ime_is_cjk = text.chars().any(crate::gui::theme::is_cjk);
                         if !text.is_empty() {
                             was_composing = true;
                         }
                     }
                     egui::Event::Ime(egui::ImeEvent::Commit(ref mut text)) => {
+                        let commit_is_cjk = text.chars().any(crate::gui::theme::is_cjk);
+                        self.ime_is_cjk = commit_is_cjk;
                         let inferred_macos_space_commit = cfg!(target_os = "macos")
                             && was_composing
                             && !enter_pressed
@@ -4740,7 +5186,7 @@ impl eframe::App for ZaloGuiApp {
                             && !mouse_clicked;
                         if (space_pressed || inferred_macos_space_commit)
                             && !text.is_empty()
-                            && !text.chars().any(crate::gui::theme::is_cjk)
+                            && !commit_is_cjk
                         {
                             if !text.ends_with(' ') {
                                 text.push(' ');
@@ -4753,6 +5199,7 @@ impl eframe::App for ZaloGuiApp {
                     }
                     egui::Event::Ime(egui::ImeEvent::Disabled) => {
                         self.ime_active = false;
+                        self.ime_is_cjk = false;
                     }
                     _ => {}
                 }
@@ -4773,8 +5220,8 @@ impl eframe::App for ZaloGuiApp {
                 });
             }
 
-            if self.ime_active || ime_commit_in_frame {
-                // Suppress Enter key events during IME composition/commit so pressing Enter
+            if self.ime_is_cjk && (self.ime_active || ime_commit_in_frame) {
+                // Suppress Enter key events during CJK IME composition/commit so pressing Enter
                 // to accept an IME candidate does not blur TextEdit or send prematurely (#71).
                 i.events.retain(|e| {
                     !matches!(
@@ -4865,11 +5312,11 @@ impl eframe::App for ZaloGuiApp {
                 Stroke::new(1.0_f32, pal.border),
             );
         }
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let _ = self.settings.save();
-        std::process::exit(0);
+        let touched = drain_frame_touched_textures();
+        for k in &touched {
+            self.texture_lru.touch(k);
+        }
+        self.last_frame_textures = touched;
     }
 }
 
@@ -4972,6 +5419,44 @@ impl ZaloGuiApp {
         }
         let is_max = self.is_window_maximized(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+    }
+
+    pub(super) fn expand_window_from_narrow(&mut self, ctx: &egui::Context) {
+        self.sidebar_collapsed = false;
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = self.resolve_windows_hwnd();
+            if hwnd != 0 {
+                if let Some(cur) = win32_frameless::get_window_rect(hwnd) {
+                    let ppp = ctx.pixels_per_point().max(1.0);
+                    let target_w = (1000.0 * ppp).round() as i32;
+                    let target_h = cur.height().max((640.0 * ppp).round() as i32);
+                    let mut next = WinRect {
+                        left: cur.left,
+                        top: cur.top,
+                        right: cur.left + target_w.max(cur.width()),
+                        bottom: cur.top + target_h,
+                    };
+                    if let Some(work) = win32_frameless::get_monitor_work_area(hwnd) {
+                        if next.right > work.right {
+                            let shift = next.right - work.right;
+                            next.left = (next.left - shift).max(work.left);
+                            next.right = (next.left + target_w.max(cur.width())).min(work.right);
+                        }
+                        if next.bottom > work.bottom {
+                            let shift = next.bottom - work.bottom;
+                            next.top = (next.top - shift).max(work.top);
+                            next.bottom = (next.top + target_h).min(work.bottom);
+                        }
+                    }
+                    win32_frameless::set_window_rect(hwnd, next, false);
+                    ctx.request_repaint();
+                    return;
+                }
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(1000.0, 680.0)));
+        ctx.request_repaint();
     }
 
     fn restore_before_drag_if_maximized(&mut self, ctx: &egui::Context) {
@@ -5178,43 +5663,16 @@ impl ZaloGuiApp {
                     );
 
                     let compact_title_bar = bar_rect.width() < 560.0;
-                    // Subtle "Native v<version>" pill badge (hidden below 560px to preserve controls)
                     if !compact_title_bar {
-                        egui::Frame::none()
-                            .fill(pal.primary.linear_multiply(0.14))
-                            .rounding(Rounding::same(4.0))
-                            .inner_margin(Margin::symmetric(5.0, 1.5))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(format!("Native v{}", env!("CARGO_PKG_VERSION")))
-                                        .color(pal.primary)
-                                        .size(10.5)
-                                        .strong(),
-                                );
-                            });
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .color(pal.text_muted)
+                                .size(11.0),
+                        );
                     }
 
-                    if total_unread > 0 {
-                        ui.add_space(4.0);
-                        let unread_lbl = if bar_rect.width() < 440.0 {
-                            total_unread.to_string()
-                        } else {
-                            format!("{total_unread} tin mới")
-                        };
-                        egui::Frame::none()
-                            .fill(pal.danger)
-                            .rounding(Rounding::same(8.0))
-                            .inner_margin(Margin::symmetric(6.0, 1.5))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(unread_lbl)
-                                        .color(Color32::WHITE)
-                                        .size(10.5)
-                                        .strong(),
-                                );
-                            });
-                    } else if !compact_title_bar && self.is_logged_in && !self.user_name.is_empty()
-                    {
+                    if !compact_title_bar && self.is_logged_in && !self.user_name.is_empty() {
                         ui.add_space(6.0);
                         ui.label(
                             RichText::new(format!("·  {}", truncate_chars(&self.user_name, 18)))
@@ -5252,13 +5710,22 @@ impl ZaloGuiApp {
                             [Pos2::new(cc.x + d, cc.y - d), Pos2::new(cc.x - d, cc.y + d)],
                             Stroke::new(1.4_f32, close_fg),
                         );
-                        let close_resp = close_resp.on_hover_text("Đóng ứng dụng (Ctrl+Q)");
+                        let to_tray = self.hides_to_tray();
+                        let close_resp = close_resp.on_hover_text(if to_tray {
+                            "Ẩn xuống khay hệ thống (thoát: menu icon khay hoặc Ctrl+Q)"
+                        } else {
+                            "Đóng ứng dụng (Ctrl+Q)"
+                        });
                         if close_resp.clicked() {
-                            self.allow_quit = true;
-                            if let Some(tx) = WORKER_TX.get() {
-                                let _ = tx.send(WorkerCmd::EndCall);
+                            if to_tray {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            } else {
+                                self.allow_quit = true;
+                                if let Some(tx) = WORKER_TX.get() {
+                                    let _ = tx.send(WorkerCmd::EndCall);
+                                }
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
 
                         // Maximize / Restore Button (46x32)
@@ -5630,7 +6097,7 @@ impl ZaloGuiApp {
                                         .min_size(Vec2::new(card_w.min(220.0), 36.0));
 
                                         if ui
-                                            .add(refresh_btn)
+                                            .add_enabled(!self.login_in_progress, refresh_btn)
                                             .on_hover_cursor(CursorIcon::PointingHand)
                                             .clicked()
                                         {
@@ -5784,6 +6251,18 @@ impl ZaloGuiApp {
             if self.settings.play_notification_sound {
                 crate::media::play_notification_chime();
             }
+            #[cfg(target_os = "windows")]
+            if let Some((title, body)) = banners.last().cloned() {
+                self.incoming_popup = Some(IncomingPopupState::new(
+                    String::new(),
+                    title,
+                    body,
+                    None,
+                    false,
+                    activity.incoming,
+                ));
+            }
+            #[cfg(not(target_os = "windows"))]
             crate::os_notify::notify_chat_batch(&banners);
         }
     }
@@ -5821,11 +6300,12 @@ impl ZaloGuiApp {
         self.is_logged_in = false;
         self.user_name.clear();
         self.user_uin.clear();
+        crate::account_manager::set_active_uin("");
         self.threads.clear();
         self.selected_thread_index = 0;
         self.qr_texture = None;
         self.login_tab = LoginTab::QrCode;
-        self.login_in_progress = false;
+        self.login_in_progress = true;
         self.login_status_msg.clear();
         self.phone_input.clear();
         self.password_input.clear();
@@ -5856,6 +6336,13 @@ impl ZaloGuiApp {
         let text = msg.into();
         self.status_msg = text.clone();
         self.toast_notice = Some((text, std::time::Instant::now()));
+        self.toast_reveal_path = None;
+    }
+
+    /// Toast with an "Mở thư mục" button that reveals `path` in the OS file manager.
+    fn show_toast_with_reveal(&mut self, msg: impl Into<String>, path: String) {
+        self.show_toast(msg);
+        self.toast_reveal_path = Some(path);
     }
 
     /// Append files to the composer queue, skipping duplicates and anything past the cap,
@@ -5954,6 +6441,10 @@ impl ZaloGuiApp {
 
 fn settings_default_animation_speed() -> f32 {
     1.0
+}
+
+fn default_scroll_speed() -> f32 {
+    2.2
 }
 
 pub(super) fn resolve_dark_mode(theme_mode: &str, ctx: &egui::Context) -> bool {
@@ -6107,6 +6598,14 @@ fn unread_counts_from_read_points(threads: &[Thread]) -> HashMap<String, usize> 
 #[cfg(test)]
 mod tests {
     use super::{is_newer_semver, phone_sync_completion_message};
+
+    #[test]
+    fn file_uri_percent_encodes_spaces_unicode_and_quotes() {
+        assert_eq!(
+            super::file_uri("/home/u/Tải về/a b'c.jpg"),
+            "file:///home/u/T%E1%BA%A3i%20v%E1%BB%81/a%20b%27c.jpg"
+        );
+    }
 
     fn unread_fixture(seen: Option<&str>, ids: &[(&str, bool)]) -> crate::chat::Thread {
         let mut thread = crate::chat::Thread {
@@ -6289,24 +6788,44 @@ mod tests {
 
     #[test]
     fn phone_sync_completion_does_not_claim_phone_messages_were_imported() {
-        let none = phone_sync_completion_message(0, 0, false, None, None);
+        let none = phone_sync_completion_message(0, 0, false, None, None, &[]);
         assert!(none.contains("Lịch sử điện thoại chưa được tải vào ứng dụng"));
         assert!(none.contains("0 tin mới từ Cloud/Nhóm"));
 
-        let cloud = phone_sync_completion_message(12, 3, false, None, None);
+        let cloud = phone_sync_completion_message(12, 3, false, None, None, &[]);
         assert!(cloud.contains("12 tin mới từ Cloud/Nhóm (3 hội thoại)"));
         assert!(cloud.contains("Lịch sử điện thoại chưa được tải vào ứng dụng"));
 
-        let failed = phone_sync_completion_message(0, 0, false, Some("network"), None);
+        let failed = phone_sync_completion_message(0, 0, false, Some("network"), None, &[]);
         assert!(failed.contains("Đồng bộ thất bại: network"));
     }
 
     #[test]
     fn phone_sync_completion_keeps_phone_step_error_visible() {
-        let msg = phone_sync_completion_message(5, 2, false, None, Some("Không tìm thấy Zalo PC trên máy này"));
+        let msg = phone_sync_completion_message(
+            5,
+            2,
+            false,
+            None,
+            Some("Không tìm thấy Zalo PC trên máy này"),
+            &[],
+        );
         assert!(msg.contains("5 tin mới từ Cloud/Nhóm (2 hội thoại)"));
-        assert!(msg.contains("Không đồng bộ được từ điện thoại: Không tìm thấy Zalo PC trên máy này"));
+        assert!(
+            msg.contains("Không đồng bộ được từ điện thoại: Không tìm thấy Zalo PC trên máy này")
+        );
         assert!(!msg.contains("Lịch sử điện thoại chưa được tải"));
+    }
+
+    #[test]
+    fn phone_sync_completion_marks_partial_fetch_failures() {
+        let warnings = vec!["Tải lịch sử Cloud/Nhóm: lỗi kết nối đến Zalo".into()];
+        let msg = phone_sync_completion_message(2, 1, false, None, None, &warnings);
+
+        assert!(msg.contains("Đồng bộ chưa đầy đủ"));
+        assert!(msg.contains("1 lỗi tải dữ liệu"));
+        assert!(msg.contains("lỗi kết nối đến Zalo"));
+        assert!(!msg.contains("Đã hoàn tất"));
     }
 
     #[test]
@@ -6459,5 +6978,40 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
         assert!(!roundtrip.animations_enabled);
         assert!((roundtrip.animation_speed - 0.1).abs() < 1e-4);
+        assert!((legacy.normalized_scroll_speed() - 2.2).abs() < f32::EPSILON);
+
+        let mut fast_scroll = super::AppSettings {
+            scroll_speed: 9.0,
+            ..Default::default()
+        };
+        assert!((fast_scroll.normalized_scroll_speed() - 4.0).abs() < f32::EPSILON);
+        fast_scroll.scroll_speed = -1.0;
+        assert!((fast_scroll.normalized_scroll_speed() - 2.2).abs() < f32::EPSILON);
+    }
+}
+
+impl ZaloGuiApp {
+    /// Closing the window hides it to the tray instead of quitting (Linux, tray shown).
+    fn hides_to_tray(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.tray.is_some() && tray::host_online()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// A pending "Thoát" from the tray menu.
+    fn take_tray_quit_request(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            tray::take_quit_request()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 }

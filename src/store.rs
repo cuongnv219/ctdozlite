@@ -183,10 +183,10 @@ pub struct MessageStore {
     pub conn: Connection,
 }
 /// Returns the database path scoped to the active account UIN.
-/// If `uin` is provided: `accounts/<uin>_history.db`.
-/// If `uin` is empty: falls back to `zalo_history.db`.
+/// If `uin` is a safe UIN: `accounts/<uin>_history.db`.
+/// Otherwise falls back to `zalo_history.db`.
 pub fn db_path_for_account(uin: &str) -> String {
-    if uin.is_empty() {
+    if !crate::account_manager::is_safe_uin(uin) {
         "zalo_history.db".to_string()
     } else {
         let _ = std::fs::create_dir_all("accounts");
@@ -1436,12 +1436,21 @@ impl MessageStore {
                     ],
                 );
             } else if is_incoming_undo {
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET text = '[Tin nhắn đã thu hồi]', msg_type = 'chat.undo', raw_json = '{}'
+                     WHERE msg_id = ?1
+                       AND is_outgoing = 1
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.msg_id],
+                );
                 // Anti-recall: never overwrite saved original text, raw_json, or msg_type
                 // with a `[Tin nhắn đã thu hồi]` / `chat.undo` payload; mark existing content.
                 let _ = self.conn.execute(
                     "UPDATE messages
                      SET text = '[Đã thu hồi] ' || text
                      WHERE msg_id = ?1
+                       AND is_outgoing = 0
                        AND TRIM(text) != ''
                        AND TRIM(text) != '[Tin nhắn đã thu hồi]'
                        AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
@@ -1502,6 +1511,21 @@ impl MessageStore {
         if ts > 0 && !thread_id.is_empty() {
             let _ = self.conn.execute(
                 "DELETE FROM messages WHERE thread_id = ?1 AND ts = ?2",
+                params![thread_id, ts],
+            );
+        }
+        Ok(())
+    }
+
+    pub fn mark_outgoing_recalled(&mut self, thread_id: &str, msg_id: &str, ts: i64) -> Result<()> {
+        if !msg_id.is_empty() {
+            let _ = self.conn.execute(
+                "UPDATE messages SET text = '[Tin nhắn đã thu hồi]', msg_type = 'chat.undo', raw_json = '{}' WHERE msg_id = ?1",
+                params![msg_id],
+            );
+        } else if ts > 0 && !thread_id.is_empty() {
+            let _ = self.conn.execute(
+                "UPDATE messages SET text = '[Tin nhắn đã thu hồi]', msg_type = 'chat.undo', raw_json = '{}' WHERE thread_id = ?1 AND ts = ?2",
                 params![thread_id, ts],
             );
         }
@@ -2030,6 +2054,7 @@ impl MessageStore {
                 let mut link_desc = None;
                 let mut link_thumb = None;
                 let mut link_src = None;
+                let mut oa_card: Option<crate::chat::OaRichCard> = None;
                 let mut media_group: Option<crate::chat::MediaGroupLayout> = None;
                 if !sm.raw_json.is_empty() {
                     // Expiry tombstone (`{"vanished":true}`): authoritative —
@@ -2074,6 +2099,7 @@ impl MessageStore {
                             existing.link_desc = None;
                             existing.link_thumb = None;
                             existing.link_src = None;
+                            existing.oa_card = None;
                             existing.sticker_id = None;
                             existing.sticker_cate_id = None;
                             existing.sticker_type = None;
@@ -2161,6 +2187,9 @@ impl MessageStore {
                             .get("link_src")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
+                        oa_card = val
+                            .get("oa_card")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok());
                         media_group = val
                             .get("media_group")
                             .and_then(|v| serde_json::from_value(v.clone()).ok());
@@ -2243,6 +2272,7 @@ impl MessageStore {
                     link_desc,
                     link_thumb,
                     link_src,
+                    oa_card,
                     media_group,
 
                     ..Default::default()
@@ -2304,6 +2334,17 @@ impl MessageStore {
                         {
                             existing.text = cm.text;
                         }
+                    } else if existing.link_thumb.is_none() && cm.link_thumb.is_some() {
+                        existing.link_thumb = cm.link_thumb;
+                        if existing.link_title.is_none() {
+                            existing.link_title = cm.link_title;
+                        }
+                        if existing.link_desc.is_none() {
+                            existing.link_desc = cm.link_desc;
+                        }
+                    }
+                    if existing.oa_card.is_none() && cm.oa_card.is_some() {
+                        existing.oa_card = cm.oa_card;
                     }
                     if existing.reactions.is_empty() && !cm.reactions.is_empty() {
                         existing.reactions = cm.reactions;
@@ -2353,7 +2394,11 @@ impl From<&ChatMessage> for StoredMessage {
             meta.insert("type".into(), serde_json::json!(st));
             "chat.sticker".to_string()
         } else {
-            "chat.text".to_string()
+            match m.kind {
+                crate::message_model::MessageKind::Action => "chat.list.action".to_string(),
+                crate::message_model::MessageKind::WebContent => "chat.webcontent".to_string(),
+                _ => "chat.text".to_string(),
+            }
         };
         if let Some(ref rid) = m.reply_to_id {
             meta.insert("reply_to_id".into(), serde_json::json!(rid));
@@ -2396,6 +2441,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if let Some(lsrc) = &m.link_src {
             meta.insert("link_src".into(), serde_json::json!(lsrc));
+        }
+        if let Some(card) = &m.oa_card {
+            meta.insert("oa_card".into(), serde_json::json!(card));
         }
         if let Some(group) = &m.media_group {
             meta.insert("media_group".into(), serde_json::json!(group));

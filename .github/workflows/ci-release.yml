@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
 env:
   CARGO_TERM_COLOR: always
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
@@ -88,6 +92,8 @@ jobs:
             libasound2-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
             libgtk-3-dev
+      - name: Enforce repository invariants
+        run: python3 scripts/check_invariants.py
       - name: Run test suite
         run: cargo test --locked
 
@@ -95,7 +101,7 @@ jobs:
   # Produces: .deb (Debian/Ubuntu/Mint/Kali/Pop!_OS), .rpm (Fedora/RHEL/Rocky/Alma/openSUSE), .AppImage (all distros), .tar.gz (Arch/Void/Gentoo/any distro)
   linux-packages:
     name: Linux Multi-Format (.deb / .rpm / .AppImage / .tar.gz)
-    needs: prepare
+    needs: [prepare, test]
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full-package')
     runs-on: ubuntu-22.04
     env:
@@ -111,8 +117,6 @@ jobs:
             libasound2-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
             libgtk-3-dev rpm file desktop-file-utils libfuse2
-      - name: Run test suite
-        run: cargo test --locked
       - name: Build release binary (static libopus & sqlite3)
         run: |
           cargo build --release --locked --bin ctdozlite
@@ -213,7 +217,7 @@ jobs:
   # 2. Legacy Linux build on Debian 11 Bullseye (glibc 2.31) for older distros (Ubuntu 20.04, Debian 11, Mint 20, RHEL/Rocky 8.x/9.x)
   linux-legacy-glibc231:
     name: Linux Legacy glibc 2.31 (Debian 11 / Ubuntu 20.04+)
-    needs: prepare
+    needs: [prepare, test]
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full-package')
     runs-on: ubuntu-22.04
     env:
@@ -274,7 +278,7 @@ jobs:
 
   windows-exe:
     name: Windows (MSVC x86_64 + .exe)
-    needs: prepare
+    needs: [prepare, test]
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full-package')
     runs-on: windows-latest
     env:
@@ -283,6 +287,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Enforce repository invariants
+        run: python scripts/check_invariants.py
       - name: Run test suite
         run: cargo test --locked
       - name: Build release binary & installer
@@ -303,7 +309,7 @@ jobs:
 
   macos-dmg:
     name: macOS (Apple Silicon arm64 + Intel x86_64 + Universal .dmg)
-    needs: prepare
+    needs: [prepare, test]
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full-package')
     runs-on: macos-latest
     env:
@@ -421,8 +427,8 @@ jobs:
           path: dist/*.dmg
   release:
     name: Publish GitHub Release
-    needs: [prepare, linux-packages, linux-legacy-glibc231, windows-exe, macos-dmg]
-    if: always() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true)) && needs.prepare.result == 'success' && needs.linux-packages.result == 'success' && needs.linux-legacy-glibc231.result == 'success' && needs.windows-exe.result == 'success' && needs.macos-dmg.result == 'success'
+    needs: [prepare, test, linux-packages, linux-legacy-glibc231, windows-exe, macos-dmg]
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true)) && needs.prepare.result == 'success' && needs.test.result == 'success' && needs.linux-packages.result == 'success' && needs.linux-legacy-glibc231.result == 'success' && needs.windows-exe.result == 'success' && needs.macos-dmg.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -485,7 +491,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag_name }}
-          name: ctdozlite ${{ needs.prepare.outputs.tag_name }} — Sửa lỗi gõ tiếng Việt Telex macOS (#71), Xem ảnh trực tiếp (#72), Tự động đồng bộ SĐT (#73) & Tải file giữ nguyên tên gốc (#74)
+          name: ctdozlite ${{ needs.prepare.outputs.tag_name }} — Dual Sync iOS/Android (#155, #200), Tối ưu RAM & Cài đặt (#183, #196, #199), Linux Tray, Twemoji & Bình chọn nhóm
           files: release_assets/*
           generate_release_notes: true
           body: |
@@ -493,13 +499,14 @@ jobs:
             >
             > Chọn đúng gói trong mục **Assets** bên dưới cho hệ điều hành của bạn (hỗ trợ Linux `.deb`/`.rpm`/`.AppImage`/`.tar.gz`, Windows `.exe`, và macOS `.dmg` cho cả **Apple Silicon M1/M2/M3/M4 `arm64`**, **Mac Intel `x86_64`** & **Universal**).
 
-            ### 🐛 Đã sửa lỗi trong v0.0.7 (Bug Fixes)
-            - **Sửa lỗi gõ tiếng Việt Telex trên macOS bị nuốt dấu cách & lỗi phím Enter ([#71](https://github.com/ctdoteam1110/ctdozlite/issues/71)):** Bảo toàn ký tự khoảng trắng (`" "`) trong sự kiện `Event::Ime(ImeEvent::Commit(" "))` của macOS NSTextInputClient/egui trước đây bị lọc nhầm bởi `.is_empty()`, đồng thời gắn cờ `ime_preedit_active` để phím `Enter` chỉ xác nhận từ đang gõ dấu thay vì gửi tin nhắn sớm.
-            - **Hiển thị trực tiếp ảnh trong hội thoại & Trình xem ảnh tích hợp ([#72](https://github.com/ctdoteam1110/ctdozlite/issues/72)):** Phóng to khung hiển thị ảnh trực tiếp trong bong bóng chat lên tối đa `340x320`, tự động ẩn chuỗi URL CDN thô (`https://...zdn.vn/...`) khi đã có ảnh đính kèm, và chuyển toàn bộ thao tác bấm vào ảnh hoặc liên kết ảnh sang mở `ImageViewerModal` ngay trong ứng dụng (hỗ trợ phóng to/thu nhỏ, sao chép ảnh vào clipboard và lưu về máy).
-            - **Tự động kích hoạt đồng bộ tin nhắn từ điện thoại ngay khi đăng nhập ([#73](https://github.com/ctdoteam1110/ctdozlite/issues/73)):** Tự động khởi chạy đồng bộ lịch sử đám mây kèm gửi gói yêu cầu WebSocket `cmd 12000` & `cmd 12888` tới điện thoại ngay sau khi đăng nhập QR/Mật khẩu hoặc khôi phục phiên mà không cần bấm nút thủ công.
-            - **Tải tệp đính kèm trực tiếp & giữ nguyên tên file gốc của người gửi ([#74](https://github.com/ctdoteam1110/ctdozlite/issues/74)):** Sửa thứ tự trích xuất tên tệp trong `parse_chat_message` (`src/chat.rs`) ưu tiên trường `title` trước `href` để không bao giờ lấy nhầm đường dẫn endpoint `renewMedia.doc` của Zalo CDN, đồng thời tải trực tiếp tệp về thư mục `Downloads` với đúng tên gốc của người gửi thay vì mở trình duyệt ngoài.
+            ### 🐛 Sửa lỗi & Đồng bộ di động trong ${{ needs.prepare.outputs.tag_name }}
+            - **Dual Sync iOS V2 + tự động chuyển Android V1 ([#155](https://github.com/ctdoteam1110/ctdozlite/issues/155), [#200](https://github.com/ctdoteam1110/ctdozlite/issues/200)):** Thử Sync V2 (`cmd 590`) trước 5,5 giây và tự động dọn phiên (`cmd 591`) chuyển sang Sync V1 (`pull_mobile_msg` `cmd 12000`) nếu điện thoại Android không phản hồi; đồng thời đệm các khung WebSocket gửi đi trước khi `authed` hoàn tất để khắc phục lỗi vừa mở app bấm đồng bộ bị kẹt ở `10%`, và loại bỏ lệnh HTTP `12888` cũ.
+            - **Tối ưu RAM, CPU & giảm luồng hệ thống ([#183](https://github.com/ctdoteam1110/ctdozlite/issues/183)):** Bảo vệ các texture đang hiển thị trên khung hình (`ResourceLru` 64 MB), giới hạn kích thước giải mã ảnh (`128px` avatar / `720px` thường / `2048px` HD) và đồng thời tải sticker (`Semaphore(4)`), loại bỏ Tokio runtime thừa ở chế độ GUI (-39% thread), và ghi stacktrace/`UNEXPECTED_EXIT` vào `crash.log`.
+            - **Mở Cài đặt tức thì không khựng:** Quét thiết bị micro/camera nền không chặn UI, bỏ chụp màn hình + làm mờ CPU đồng bộ khi mở Cài đặt và hiển thị đúng modal Cài đặt ngay cả khi đang ở tab Danh bạ.
+            - **Sửa lỗi tắt thông báo hội thoại ([#199](https://github.com/ctdoteam1110/ctdozlite/issues/199)), gửi ảnh trong Mini App ([#196](https://github.com/ctdoteam1110/ctdozlite/issues/196)), thu hồi tin nhắn gửi đi & cô lập snapshot đa tài khoản.**
 
-            ### ✨ Tính năng nổi bật từ v0.0.6 & v0.0.5 (Recent Highlights)
-            - **Trang Danh bạ chuẩn Zalo PC & Gói nhãn dán động "Mèo Ami Bụng Bự (GIF)":** Hợp nhất mục Danh bạ với 4 phân mục, gom nhóm `A–Z`, hỗ trợ hiển thị văn bản định dạng giàu (Markdown & Zalo RTF `textProperties`), đồng bộ tắt thông báo hai chiều ([#67](https://github.com/ctdoteam1110/ctdozlite/issues/67)) và đa tài khoản / Proxy ([#64](https://github.com/ctdoteam1110/ctdozlite/issues/64)).
-            - **Tự động thông báo & cập nhật trực tiếp qua GitHub Releases API:** Tự động kiểm tra bản mới qua `https://api.github.com/repos/ctdoteam1110/ctdozlite/releases/latest` khi mở ứng dụng và định kỳ mỗi 30 phút, gửi thông báo hệ điều hành, hiển thị thanh banner cùng hộp thoại chi tiết những gì đã sửa/cập nhật và nút **Cập nhật tự động ngay** (xác thực `SHA256SUMS.txt`).
-            - **Hẹn giờ gửi tin nhắn ([#38](https://github.com/ctdoteam1110/ctdozlite/issues/38)), REST API / MCP Server / Auto-Reply ([#35](https://github.com/ctdoteam1110/ctdozlite/issues/35)), Sửa lỗi trùng tên Zalo ([#63](https://github.com/ctdoteam1110/ctdozlite/issues/63)) & Failover đa máy chủ ([#27](https://github.com/ctdoteam1110/ctdozlite/issues/27)).**
+            ### ✨ Tính năng & Đóng góp cộng đồng hợp nhất
+            - **Linux XDG Data Dir & System Tray Icon ([PR #168](https://github.com/ctdoteam1110/ctdozlite/pull/168), [PR #166](https://github.com/ctdoteam1110/ctdozlite/pull/166)):** Lưu dữ liệu tại `$XDG_DATA_HOME/ctdozlite` kèm di trú tự động; thêm icon khay hệ thống có chấm đỏ tin chưa đọc.
+            - **Thẻ bình chọn nhóm (Group Polls) ([PR #193](https://github.com/ctdoteam1110/ctdozlite/pull/193)), Emoji màu Twemoji ([PR #189](https://github.com/ctdoteam1110/ctdozlite/pull/189)) & Font Open Sans ([PR #180](https://github.com/ctdoteam1110/ctdozlite/pull/180)).**
+            - **Lưu ảnh/video về thư mục `Downloads` ([PR #167](https://github.com/ctdoteam1110/ctdozlite/pull/167)), Trình duyệt ảnh hội thoại ([PR #177](https://github.com/ctdoteam1110/ctdozlite/pull/177)), Dán ảnh `Ctrl+V` ([PR #165](https://github.com/ctdoteam1110/ctdozlite/pull/165)), Avatar khử răng cưa & emoticon `/-code` ([PR #169](https://github.com/ctdoteam1110/ctdozlite/pull/169)), Menu chuột phải không viền ([PR #173](https://github.com/ctdoteam1110/ctdozlite/pull/173)) & Báo đồng bộ chưa đầy đủ ([PR #162](https://github.com/ctdoteam1110/ctdozlite/pull/162)).**
+            - **Cải thiện độ ổn định Windows CI & bộ kiểm tra invariant tự động (`scripts/check_invariants.py`).**

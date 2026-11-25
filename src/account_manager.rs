@@ -93,6 +93,7 @@ const SHARED_MEDIA_CACHE_DIR: &str = "stickers_cache";
 // avatars, so the active account id is a tiny shared-read value rather than a
 // message; the critical section only clones or replaces one short string.
 static ACTIVE_UIN: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+static ACCOUNT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// `true` when `uin` is safe to embed in a file name (ASCII letters, digits, `-`, `_`).
 ///
@@ -105,19 +106,49 @@ pub fn is_safe_uin(uin: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Record which account owns the media written from now on (empty = signed out).
+/// Record which account owns the UI and media written from now on (empty = signed out).
+/// Bumps [`account_epoch`] whenever the active account changes so in-flight async tasks
+/// from the previous account can be discarded cleanly.
 pub fn set_active_uin(uin: &str) {
     let next = if is_safe_uin(uin) { uin } else { "" };
     if let Ok(mut guard) = ACTIVE_UIN.write() {
         if guard.as_str() != next {
             *guard = next.to_string();
+            ACCOUNT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
+}
+
+/// Monotonic generation counter incremented every time [`set_active_uin`] switches account.
+pub fn account_epoch() -> u64 {
+    ACCOUNT_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The account that currently owns the UI, or an empty string when signed out.
 pub fn active_uin() -> String {
     ACTIVE_UIN.read().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// Per-account Sync V2 Curve25519 identity key path (`accounts/<uin>/sync_identity.json`).
+pub fn sync_identity_path_for(uin: &str) -> PathBuf {
+    if is_safe_uin(uin) {
+        let dir = account_dir(uin);
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("sync_identity.json")
+    } else {
+        PathBuf::from("sync_identity.json")
+    }
+}
+
+/// Per-account Sync V1 RSA-2048 identity key path (`accounts/<uin>/sync_rsa_identity.json`).
+pub fn sync_rsa_path_for(uin: &str) -> PathBuf {
+    if is_safe_uin(uin) {
+        let dir = account_dir(uin);
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("sync_rsa_identity.json")
+    } else {
+        PathBuf::from("sync_rsa_identity.json")
+    }
 }
 
 /// Saved session snapshot of `uin` (`accounts/<uin>.json`).
@@ -157,6 +188,64 @@ pub fn ensure_media_cache_dir() -> PathBuf {
     // Best effort: a missing cache directory only costs a re-download later.
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// The OS user's own Downloads folder, where photos and videos saved from a chat land.
+///
+/// Linux honours `XDG_DOWNLOAD_DIR` from `user-dirs.dirs`, so a localised folder name
+/// (e.g. `~/Tải về`) is respected; other platforms use `<home>/Downloads`. Falls back to the
+/// home directory, then the working directory, when no Downloads folder can be resolved.
+pub fn os_downloads_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    #[cfg(target_os = "linux")]
+    if let Some(home) = &home {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        if let Ok(contents) = std::fs::read_to_string(config.join("user-dirs.dirs")) {
+            if let Some(dir) = parse_xdg_download_dir(&contents, home) {
+                return dir;
+            }
+        }
+    }
+    match home {
+        Some(home) => {
+            let downloads = home.join("Downloads");
+            if downloads.is_dir() {
+                downloads
+            } else {
+                home
+            }
+        }
+        None => PathBuf::from("."),
+    }
+}
+
+/// Extract `XDG_DOWNLOAD_DIR` from a `user-dirs.dirs` file. The spec only allows `$HOME/...`
+/// or absolute paths; a value equal to `$HOME` itself means "disabled" and is ignored.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_xdg_download_dir(contents: &str, home: &Path) -> Option<PathBuf> {
+    let value = contents
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("XDG_DOWNLOAD_DIR="))?
+        .trim()
+        .trim_matches('"');
+    let path = if let Some(rest) = value.strip_prefix("$HOME") {
+        let rest = rest.trim_start_matches('/');
+        if rest.is_empty() {
+            return None;
+        }
+        home.join(rest)
+    } else if value.starts_with('/') {
+        PathBuf::from(value)
+    } else {
+        return None;
+    };
+    Some(path)
 }
 
 /// Folder that receives files downloaded by `uin`, nested under the user's download root
@@ -236,77 +325,138 @@ pub fn list_saved_accounts(current_uin: &str) -> Vec<AccountProfile> {
     out
 }
 
-/// Save the current session and caches into `accounts/<uin>.*`
+/// Remove legacy root cache/DB files (`threads_cache.json`, `zalo_history.db` + WAL/SHM)
+/// so multi-account switches or QR logins never inherit another account's data.
+pub fn remove_legacy_shared_caches() {
+    for legacy in [
+        "threads_cache.json",
+        "zalo_history.db",
+        "zalo_history.db-wal",
+        "zalo_history.db-shm",
+    ] {
+        let _ = std::fs::remove_file(legacy);
+    }
+}
+
+fn any_account_history_db_exists(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.ends_with("_history.db"))
+    })
+}
+
+/// Save the current session into `accounts/<uin>.json` (only if `session.json` belongs to `uin`).
+///
+/// Runtime history and thread caches already write directly to `accounts/<uin>_history.db` and
+/// `accounts/<uin>_threads.json` — never copy root `zalo_history.db` or `threads_cache.json`
+/// over per-account files (except one-time migration from legacy single-account root storage
+/// when zero `accounts/*_history.db` existed before).
 pub fn save_current_account_snapshot(uin: &str) -> Result<()> {
-    if uin.is_empty() {
+    if !is_safe_uin(uin) {
         return Ok(());
     }
     let dir = accounts_dir();
     std::fs::create_dir_all(&dir)?;
-    if Path::new("session.json").exists() {
-        let _ = std::fs::copy("session.json", dir.join(format!("{uin}.json")));
+
+    let live = Path::new("session.json");
+    if let Ok(text) = std::fs::read_to_string(live) {
+        let owner = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/login/uin")
+                    .and_then(|u| u.as_str())
+                    .map(str::to_string)
+            });
+        if owner.as_deref() == Some(uin) {
+            crate::data_dir::write_private_atomic(&session_snapshot_path(uin), text.as_bytes())?;
+        }
     }
-    if Path::new("threads_cache.json").exists() {
-        let _ = std::fs::copy("threads_cache.json", dir.join(format!("{uin}_threads.json")));
-    }
-    if Path::new("zalo_history.db").exists() {
-        let _ = std::fs::copy("zalo_history.db", dir.join(format!("{uin}_history.db")));
+
+    // One-time migration when upgrading from legacy single-account (`zalo_history.db` in root)
+    // before any `accounts/*_history.db` exists at all.
+    let acc_db = dir.join(format!("{uin}_history.db"));
+    if !acc_db.exists() && !any_account_history_db_exists(&dir) {
+        if Path::new("zalo_history.db").exists() {
+            let _ = std::fs::copy("zalo_history.db", &acc_db);
+        }
+        let acc_threads = threads_snapshot_path(uin);
+        if !acc_threads.exists() && Path::new("threads_cache.json").exists() {
+            let _ = std::fs::copy("threads_cache.json", &acc_threads);
+        }
+        remove_legacy_shared_caches();
     }
     Ok(())
 }
 
 /// Switch to a target account:
-/// 1. Saves current account snapshot to accounts/<current_uin>.*
-/// 2. Restores accounts/<target_uin>.* into session.json, threads_cache.json, zalo_history.db
+/// 1. Saves current account's `session.json` snapshot (if `session.json` matches `current_uin`)
+/// 2. Removes stale root `threads_cache.json` / `zalo_history.db` so accounts stay strictly isolated
+/// 3. Restores `accounts/<target_uin>.json` into `session.json`
 pub fn switch_to_account(current_uin: &str, target_uin: &str) -> Result<()> {
-    if target_uin.is_empty() {
-        anyhow::bail!("Target UIN is empty");
+    if !is_safe_uin(target_uin) {
+        anyhow::bail!("Target UIN không hợp lệ");
     }
-    let dir = accounts_dir();
-    if !current_uin.is_empty() {
+    if is_safe_uin(current_uin) {
         let _ = save_current_account_snapshot(current_uin);
     }
-    let _ = std::fs::remove_file("session.json");
-    let _ = std::fs::remove_file("threads_cache.json");
-    let _ = std::fs::remove_file("zalo_history.db");
+    remove_legacy_shared_caches();
 
-    let target_session = dir.join(format!("{target_uin}.json"));
+    let target_session = session_snapshot_path(target_uin);
     if !target_session.exists() {
         anyhow::bail!("Không tìm thấy dữ liệu phiên của tài khoản {target_uin}");
     }
-    std::fs::copy(&target_session, "session.json")?;
-
-    let target_threads = dir.join(format!("{target_uin}_threads.json"));
-    if target_threads.exists() {
-        let _ = std::fs::copy(&target_threads, "threads_cache.json");
-    }
-
-    let target_db = dir.join(format!("{target_uin}_history.db"));
-    if target_db.exists() {
-        let _ = std::fs::copy(&target_db, "zalo_history.db");
-    }
+    let text = std::fs::read_to_string(&target_session)?;
+    crate::data_dir::write_private_atomic(Path::new("session.json"), text.as_bytes())?;
+    set_active_uin(target_uin);
     Ok(())
 }
 
-/// Delete a saved account from `accounts/`
+/// Delete a saved account and all of its isolated history/cache/sync files from `accounts/`
 pub fn delete_saved_account(uin: &str) -> Result<()> {
-    if uin.is_empty() {
+    if !is_safe_uin(uin) {
         return Ok(());
     }
     let dir = accounts_dir();
     let _ = std::fs::remove_file(dir.join(format!("{uin}.json")));
     let _ = std::fs::remove_file(dir.join(format!("{uin}_threads.json")));
     let _ = std::fs::remove_file(dir.join(format!("{uin}_history.db")));
-    if is_safe_uin(uin) {
-        // Best effort: the per-account folder only holds re-downloadable media cache.
-        let _ = std::fs::remove_dir_all(account_dir(uin));
-    }
+    let _ = std::fs::remove_file(dir.join(format!("{uin}_history.db-wal")));
+    let _ = std::fs::remove_file(dir.join(format!("{uin}_history.db-shm")));
+    let _ = std::fs::remove_dir_all(account_dir(uin));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xdg_download_dir_resolves_home_relative_and_absolute_values() {
+        let home = Path::new("/home/u");
+        let file = "# comment\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Tải về\"\n";
+        assert_eq!(
+            parse_xdg_download_dir(file, home),
+            Some(PathBuf::from("/home/u/Tải về"))
+        );
+        assert_eq!(
+            parse_xdg_download_dir("XDG_DOWNLOAD_DIR=\"/data/dl\"", home),
+            Some(PathBuf::from("/data/dl"))
+        );
+    }
+
+    #[test]
+    fn xdg_download_dir_ignores_missing_disabled_and_relative_values() {
+        let home = Path::new("/home/u");
+        assert_eq!(parse_xdg_download_dir("XDG_MUSIC_DIR=\"$HOME/Music\"", home), None);
+        assert_eq!(parse_xdg_download_dir("XDG_DOWNLOAD_DIR=\"$HOME/\"", home), None);
+        assert_eq!(parse_xdg_download_dir("XDG_DOWNLOAD_DIR=\"dl\"", home), None);
+        assert_eq!(parse_xdg_download_dir("#XDG_DOWNLOAD_DIR=\"/x\"", home), None);
+    }
 
     #[test]
     fn media_cache_is_scoped_per_account() {
@@ -367,5 +517,35 @@ mod tests {
         assert_eq!(account_download_dir(base, "1001"), base.join("1001"));
         assert_eq!(account_download_dir(base, ""), base.to_path_buf());
         assert_eq!(account_download_dir(base, "../x"), base.to_path_buf());
+    }
+
+    #[test]
+    fn per_account_db_and_sync_key_paths_enforce_safe_uin() {
+        assert_eq!(
+            crate::store::db_path_for_account("../escape"),
+            "zalo_history.db"
+        );
+        assert_eq!(crate::store::db_path_for_account(""), "zalo_history.db");
+        assert_eq!(
+            sync_identity_path_for("../escape"),
+            PathBuf::from("sync_identity.json")
+        );
+        assert_eq!(
+            sync_rsa_path_for("../escape"),
+            PathBuf::from("sync_rsa_identity.json")
+        );
+        assert_eq!(sync_identity_path_for(""), PathBuf::from("sync_identity.json"));
+        let test_uin = "test_isolation_999";
+        let id_path = sync_identity_path_for(test_uin);
+        let rsa_path = sync_rsa_path_for(test_uin);
+        assert_eq!(
+            id_path,
+            PathBuf::from("accounts").join(test_uin).join("sync_identity.json")
+        );
+        assert_eq!(
+            rsa_path,
+            PathBuf::from("accounts").join(test_uin).join("sync_rsa_identity.json")
+        );
+        let _ = std::fs::remove_dir_all(account_dir(test_uin));
     }
 }

@@ -214,7 +214,7 @@
   <div class="wrap">
     <div class="meta-tag">Thông tin pháp lý &amp; Phạm vi dự án phi thương mại</div>
     <h1>Tuyên bố miễn trừ trách nhiệm (Disclaimer)</h1>
-    <div class="updated">Cập nhật lần cuối: 04/11/2026 · Mục đích học thuật &amp; Tương thích giao thức mở</div>
+    <div class="updated">Cập nhật lần cuối: 16/11/2026 · Mục đích học thuật &amp; Tương thích giao thức mở</div>
 
     <div class="warning-box">
       <strong>Lưu ý quan trọng:</strong> ctdozlite là một dự án nghiên cứu kỹ thuật mã nguồn mở độc lập (Clean-Room Protocol Research), <strong>hoàn toàn KHÔNG liên kết, không thuộc quyền sở hữu, không được tài trợ, ủy quyền hay chứng thực dưới bất kỳ hình thức nào bởi VNG Corporation hoặc Zalo</strong>. Dự án hoàn toàn phi thương mại (không bán phần mềm, không kinh doanh dịch vụ, không hiển thị quảng cáo và không nhận thù lao).
@@ -234,6 +234,7 @@
     </p>
     <ul>
       <li>Mã nguồn ctdozlite <strong>không</strong> sao chép, trích xuất hay tái phân phối bất kỳ tệp nhị phân gốc (binary), tệp thư viện liên kết động (.dll, .so, .dylib) hay mã máy nào của Zalo PC.</li>
+      <li>Lưu ý: kho mã nguồn hiện có thư mục <code>web-bundle/</code> chứa các gói JS được trích từ gói cài đặt công khai của Zalo PC, phục vụ phân tích tương thích. Dự án không tuyên bố quyền sở hữu và không cấp phép lại các tệp này. Nếu VNG/Zalo yêu cầu gỡ bỏ, chúng sẽ bị xóa khỏi kho mã nguồn.</li>
       <li>Ứng dụng <strong>không</strong> can thiệp bẻ khóa tính năng, không vượt qua bất kỳ cơ chế tường phí (paywall) nào và không làm gián đoạn hay phá hoại hạ tầng máy chủ của nhà cung cấp dịch vụ mạng.</li>
       <li>Giao tiếp mạng của ctdozlite dựa trên giao thức mở chuẩn HTTPS và WebSocket tương tự như một trình duyệt web tiêu chuẩn (WebPC Client), sử dụng phiên đăng nhập và định danh hợp lệ của chính người dùng.</li>
     </ul>
@@ -256,9 +257,20 @@
       Người dùng tự chịu toàn bộ rủi ro và trách nhiệm pháp lý cá nhân khi quyết định sử dụng ctdozlite trên thiết bị của mình.
     </p>
 
+    <h2>5. Các tính năng tùy chọn kết nối tới dịch vụ bên thứ ba</h2>
+    <p>
+      Ngoại trừ kết nối trực tiếp tới hệ sinh thái Zalo, các tính năng sau đây chỉ hoạt động khi bạn chủ động bật hoặc cấu hình. Khi bật, dữ liệu liên quan sẽ được gửi tới / lấy về từ chính dịch vụ bên thứ ba mà bạn đã chọn; bạn chịu trách nhiệm tuân thủ điều khoản của dịch vụ đó:
+    </p>
+    <ul>
+      <li><strong>Trợ lý AI (LLM):</strong> nội dung hội thoại/ghi chú bạn đưa vào trợ lý được gửi tới endpoint AI bạn cấu hình (ví dụ DeepSeek, OpenAI, Anthropic, Ollama cục bộ...). Mặc định Ollama chạy trên chính máy bạn nên dữ liệu không rời máy; các endpoint ở máy chủ khác đồng nghĩa gửi dữ liệu cho nhà cung cấp đó.</li>
+      <li><strong>Cầu nối Telegram ↔ Zalo:</strong> nội dung, tệp đính kèm và thông tin điều khiển được chuyển qua Telegram Bot API theo cấu hình <code>TELEGRAM_BOT_TOKEN</code> của bạn.</li>
+      <li><strong>Kiểm tra cập nhật:</strong> ứng dụng gọi GitHub Releases API để kiểm tra phiên bản mới; GitHub thấy địa chỉ IP và user-agent của bạn. Không có telemetry hay dữ liệu hội thoại nào được gửi kèm.</li>
+      <li><strong>Trang web dự án <code>ctdozlite.ctdo.net</code>:</strong> tải font chữ trực tiếp từ Google Fonts; trình duyệt của bạn kết nối tới máy chủ của Google khi mở trang. Ứng dụng desktop không kết nối tới Google.</li>
+    </ul>
+
     <div style="margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border);">
       <p style="font-size: 13.5px; color: var(--text-2);">
-        Bằng cách tải về, sao chép hoặc chạy mã nguồn ctdozlite, bạn xác nhận đã đọc, hiểu rõ bản chất nghiên cứu kỹ thuật và đồng ý vô điều kiện với tất cả các điều khoản nêu trên.
+        Bằng cách tải về, sao chép hoặc chạy mã nguồn ctdozlite, bạn xác nhận đã đọc và hiểu rõ bản chất nghiên cứu kỹ thuật và các giới hạn nêu trên. Nếu bạn không đồng ý với bất kỳ điều khoản nào, vui lòng không tải về hoặc vận hành phần mềm.
       </p>
     </div>
   </div>

@@ -449,7 +449,7 @@ fn qa_multi_account_snapshot_list_switch_and_delete_lifecycle() {
     std::env::set_current_dir(&temp_workspace).unwrap();
 
     let test_result = std::panic::catch_unwind(|| {
-        // Khởi tạo dữ liệu tài khoản 1 (UIN: 111000111)
+        // 1) Khởi tạo dữ liệu legacy root cho tài khoản 1 (UIN: 111000111) -> migrate 1 lần sang `accounts/`
         let session_acc1 = json!({
             "login": {
                 "uin": "111000111",
@@ -462,8 +462,19 @@ fn qa_multi_account_snapshot_list_switch_and_delete_lifecycle() {
         std::fs::write("zalo_history.db", b"sqlite_acc1_bytes").unwrap();
 
         save_current_account_snapshot("111000111").unwrap();
+        assert_eq!(
+            std::fs::read_to_string("accounts/111000111_threads.json").unwrap(),
+            r#"[{"id":"thread_acc1"}]"#
+        );
+        assert_eq!(
+            std::fs::read("accounts/111000111_history.db").unwrap(),
+            b"sqlite_acc1_bytes"
+        );
+        assert!(!std::path::Path::new("threads_cache.json").exists());
+        assert!(!std::path::Path::new("zalo_history.db").exists());
 
-        // Khởi tạo dữ liệu tài khoản 2 (UIN: 222000222) đang active
+        // 2) Tài khoản 2 (UIN: 222000222): lưu trực tiếp vào `accounts/222000222_*`.
+        // Dù root có file cũ còn sót cũng KHÔNG được ghi đè lên tài khoản 2.
         let session_acc2 = json!({
             "login": {
                 "uin": "222000222",
@@ -472,10 +483,15 @@ fn qa_multi_account_snapshot_list_switch_and_delete_lifecycle() {
             }
         });
         std::fs::write("session.json", session_acc2.to_string()).unwrap();
-        std::fs::write("threads_cache.json", r#"[{"id":"thread_acc2"}]"#).unwrap();
-        std::fs::write("zalo_history.db", b"sqlite_acc2_bytes").unwrap();
+        std::fs::write("accounts/222000222_threads.json", r#"[{"id":"thread_acc2"}]"#).unwrap();
+        std::fs::write("accounts/222000222_history.db", b"sqlite_acc2_bytes").unwrap();
+        std::fs::write("zalo_history.db", b"stale_leak_bytes").unwrap();
 
         save_current_account_snapshot("222000222").unwrap();
+        assert_eq!(
+            std::fs::read("accounts/222000222_history.db").unwrap(),
+            b"sqlite_acc2_bytes"
+        );
 
         // Kiểm tra `list_saved_accounts` bỏ qua các file `*_threads.json` và đánh dấu `is_current` chuẩn xác
         let saved = list_saved_accounts("222000222");
@@ -488,29 +504,37 @@ fn qa_multi_account_snapshot_list_switch_and_delete_lifecycle() {
         assert_eq!(acc2_prof.display_name, "Tài Khoản Số 2");
         assert!(acc2_prof.is_current);
 
-        // Chuyển đổi nhanh từ tài khoản 2 sang tài khoản 1
+        // Chuyển đổi nhanh từ tài khoản 2 sang tài khoản 1 (cô lập, không tạo lại cache chung ở root)
         switch_to_account("222000222", "111000111").unwrap();
+        assert_eq!(zalo_rust::account_manager::active_uin(), "111000111");
 
         let active_session: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string("session.json").unwrap()).unwrap();
         assert_eq!(active_session["login"]["uin"], "111000111");
+        assert!(!std::path::Path::new("threads_cache.json").exists());
+        assert!(!std::path::Path::new("zalo_history.db").exists());
         assert_eq!(
-            std::fs::read_to_string("threads_cache.json").unwrap(),
-            r#"[{"id":"thread_acc1"}]"#
-        );
-        assert_eq!(
-            std::fs::read("zalo_history.db").unwrap(),
+            std::fs::read("accounts/111000111_history.db").unwrap(),
             b"sqlite_acc1_bytes"
         );
+        assert_eq!(
+            std::fs::read("accounts/222000222_history.db").unwrap(),
+            b"sqlite_acc2_bytes"
+        );
 
-        // Chuyển ngược lại sang tài khoản 2 để xác nhận snapshot của tài khoản 2 vẫn toàn vẹn
+        // Chuyển ngược lại sang tài khoản 2 để xác nhận dữ liệu cả hai bên vẫn cô lập toàn vẹn
         switch_to_account("111000111", "222000222").unwrap();
+        assert_eq!(zalo_rust::account_manager::active_uin(), "222000222");
         let active_session_2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string("session.json").unwrap()).unwrap();
         assert_eq!(active_session_2["login"]["uin"], "222000222");
         assert_eq!(
-            std::fs::read("zalo_history.db").unwrap(),
+            std::fs::read("accounts/222000222_history.db").unwrap(),
             b"sqlite_acc2_bytes"
+        );
+        assert_eq!(
+            std::fs::read("accounts/111000111_history.db").unwrap(),
+            b"sqlite_acc1_bytes"
         );
 
         // Chuyển sang UIN không tồn tại phải trả lỗi an toàn
@@ -538,10 +562,12 @@ fn qa_cross_platform_data_dir_and_profile_isolation() {
     let mac_bundle_exe = PathBuf::from("/Applications/ctdozlite.app/Contents/MacOS/ctdozlite");
     let linux_bin_exe = PathBuf::from("/usr/bin/ctdozlite");
     let home = PathBuf::from("/Users/tester");
+    let linux_home = PathBuf::from("/home/tester");
 
     // macOS .app bundle tự động ánh xạ vào Application Support và bật chế độ private
     let (mac_path, mac_priv) =
-        data_dir::resolve(&[], &cwd, &mac_bundle_exe, Some(&home), true).unwrap();
+        data_dir::resolve(&[], &cwd, &mac_bundle_exe, Some(&home), data_dir::Platform::MacOs)
+            .unwrap();
     assert_eq!(
         mac_path,
         PathBuf::from("/Users/tester/Library/Application Support/ctdozlite")
@@ -554,7 +580,7 @@ fn qa_cross_platform_data_dir_and_profile_isolation() {
         &cwd,
         &mac_bundle_exe,
         Some(&home),
-        true,
+        data_dir::Platform::MacOs,
     )
     .unwrap();
     assert_eq!(
@@ -567,12 +593,27 @@ fn qa_cross_platform_data_dir_and_profile_isolation() {
         &["--profile".to_string(), "acc_2".to_string()],
         &cwd,
         &linux_bin_exe,
-        None,
-        false,
+        Some(&linux_home),
+        data_dir::Platform::Linux { xdg_data_home: None },
     )
     .unwrap();
-    assert_eq!(prof_linux, cwd.join("profiles").join("acc_2"));
+    assert_eq!(
+        prof_linux,
+        linux_home.join(".local/share/ctdozlite/profiles/acc_2")
+    );
     assert!(prof_linux_priv);
+
+    // Windows keeps the working directory.
+    let (prof_other, prof_other_priv) = data_dir::resolve(
+        &["--profile".to_string(), "acc_2".to_string()],
+        &cwd,
+        &linux_bin_exe,
+        None,
+        data_dir::Platform::Other,
+    )
+    .unwrap();
+    assert_eq!(prof_other, cwd.join("profiles").join("acc_2"));
+    assert!(prof_other_priv);
 }
 
 // ============================================================================

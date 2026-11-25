@@ -707,12 +707,22 @@ impl<'a> TuiApp<'a> {
         self.rebuild_filter_prefer(selected_id);
     }
 
+    fn save_threads_cache_prod(&self) {
+        #[cfg(not(test))]
+        chat::save_threads_cache(&self.threads);
+    }
+
     fn persist_snapshot(&mut self, threads: &[Thread]) {
         if let Some(ref mut st) = self.store {
             let _ = crate::store::persist_threads(st, threads);
-        } else if let Ok(mut st) = crate::store::MessageStore::open("zalo_history.db") {
-            let _ = crate::store::persist_threads(&mut st, threads);
-            self.store = Some(st);
+        } else {
+            #[cfg(not(test))]
+            if let Ok(mut st) = crate::store::MessageStore::open("zalo_history.db") {
+                let _ = crate::store::persist_threads(&mut st, threads);
+                self.store = Some(st);
+            }
+            #[cfg(test)]
+            let _ = threads;
         }
     }
 
@@ -733,15 +743,18 @@ impl<'a> TuiApp<'a> {
     }
 
     fn persist_async(&self) {
-        let snapshot = self.threads.clone();
-        tokio::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(mut st) = crate::store::MessageStore::open("zalo_history.db") {
-                    let _ = crate::store::persist_threads(&mut st, &snapshot);
-                }
-            })
-            .await;
-        });
+        #[cfg(not(test))]
+        {
+            let snapshot = self.threads.clone();
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(mut st) = crate::store::MessageStore::open("zalo_history.db") {
+                        let _ = crate::store::persist_threads(&mut st, &snapshot);
+                    }
+                })
+                .await;
+            });
+        }
     }
 
     fn spawn_poll(&mut self) {
@@ -952,7 +965,7 @@ impl<'a> TuiApp<'a> {
         self.selected_msg = None;
         self.follow_tail = true;
         self.persist_current_snapshot();
-        chat::save_threads_cache(&self.threads);
+        self.save_threads_cache_prod();
 
         let session = self.session_clone();
         let tx = self.bg_tx.clone();
@@ -1622,7 +1635,7 @@ impl<'a> TuiApp<'a> {
         self.selected_msg = None;
         self.follow_tail = true;
         self.persist_current_snapshot();
-        chat::save_threads_cache(&self.threads);
+        self.save_threads_cache_prod();
         self.bump_thread(&to_id);
 
         let session = self.session_clone();
@@ -2310,7 +2323,7 @@ impl<'a> TuiApp<'a> {
             }
         }
         self.sort_threads();
-        chat::save_threads_cache(&self.threads);
+        self.save_threads_cache_prod();
         self.persist_async();
     }
 
@@ -2322,7 +2335,7 @@ impl<'a> TuiApp<'a> {
                     let changed = self.apply_polled(threads, state);
                     self.status = format!("Cập nhật {}", crate::ui::clock());
                     if changed {
-                        chat::save_threads_cache(&self.threads);
+                        self.save_threads_cache_prod();
                         self.persist_async();
                     }
                 }
@@ -2343,7 +2356,7 @@ impl<'a> TuiApp<'a> {
                     }
                     if count > 0 {
                         self.persist_thread_by_id(&thread_id);
-                        chat::save_threads_cache(&self.threads);
+                        self.save_threads_cache_prod();
                         self.selected_msg = None;
                         self.follow_tail = true;
                         self.status = format!("Đã tải lịch sử nhóm ({count} tin)");
@@ -2375,7 +2388,7 @@ impl<'a> TuiApp<'a> {
                     if appended {
                         self.bump_thread(&thread_id);
                         self.persist_thread_by_id(&thread_id);
-                        chat::save_threads_cache(&self.threads);
+                        self.save_threads_cache_prod();
                         self.follow_tail = true;
                         self.status = "Đã gửi tệp đính kèm".into();
                     }
@@ -2408,7 +2421,7 @@ impl<'a> TuiApp<'a> {
                     }
                     self.selected_msg = None;
                     self.persist_thread_by_id(&thread_id);
-                    chat::save_threads_cache(&self.threads);
+                    self.save_threads_cache_prod();
                     self.status = "Đã xoá tin nhắn".into();
                 }
                 BgEvent::StickerPacks(packs) => {

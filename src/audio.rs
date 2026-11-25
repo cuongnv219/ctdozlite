@@ -2,8 +2,8 @@
 //!
 //! Phase 1 (this file): device enumeration + mic->speaker pass-through on a
 //! dedicated thread (Send-safe handle).
-//! Phase 2 (TODO): Opus encode/decode + RTP packetization over the call's UDP socket.
-//! Phase 3 (TODO): jitter buffer, echo cancellation, mixing, device selection.
+//! Phase 2 (planned): Opus encode/decode + RTP packetization over the call's UDP socket.
+//! Phase 3 (planned): jitter buffer, echo cancellation, mixing, device selection.
 
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

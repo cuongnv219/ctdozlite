@@ -156,12 +156,30 @@ pub async fn request_qr(s: &Session, language: &str) -> Result<QrLogin> {
     let code = v.get("error_code").and_then(Value::as_i64).unwrap_or(0);
     if code != 0 {
         let msg = v.get("error_message").and_then(Value::as_str).unwrap_or("");
+        if code == 18012 {
+            let time_left_ms = v
+                .get("data")
+                .and_then(|d| d.get("time_left"))
+                .and_then(Value::as_u64)
+                .unwrap_or(45_000);
+            let secs = ((time_left_ms + 999) / 1000).max(1);
+            bail!("reqqr: server error 18012 (chờ {secs}s): Quá nhiều yêu cầu tạo mã QR, vui lòng đợi {secs} giây rồi thử lại");
+        }
         bail!("reqqr: server error {code}: {msg}");
     }
     QrLogin::from_data(
         v.get("data")
             .ok_or_else(|| anyhow::anyhow!("reqqr: response has no data"))?,
     )
+}
+
+/// Extract cooldown seconds from a formatted `18012` error string `(chờ <N>s)`.
+pub fn parse_rate_limit_wait_secs(msg: &str) -> Option<u64> {
+    let prefix = "(chờ ";
+    let start = msg.find(prefix)? + prefix.len();
+    let rest = &msg[start..];
+    let end = rest.find("s)")?;
+    rest[..end].trim().parse::<u64>().ok().filter(|&s| s > 0)
 }
 
 /// Draw the QR as terminal art.
@@ -473,5 +491,12 @@ mod tests {
     fn missing_wait_url_is_rejected() {
         let v = json!({"qr_cnt": "http://x/"});
         assert!(QrLogin::from_data(&v).is_err());
+    }
+
+    #[test]
+    fn parse_rate_limit_wait_secs_extracts_wait_seconds() {
+        let err = "reqqr: server error 18012 (chờ 42s): Quá nhiều yêu cầu tạo mã QR, vui lòng đợi 42 giây rồi thử lại";
+        assert_eq!(parse_rate_limit_wait_secs(err), Some(42));
+        assert_eq!(parse_rate_limit_wait_secs("reqqr: server error 500: fail"), None);
     }
 }

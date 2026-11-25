@@ -1,32 +1,24 @@
-<!--
-Tier guide (see docs/standards/git-flow-and-pr-matrix.md):
-- Tier 1 (docs/typo/deps): keep What + Why, delete the rest.
-- Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.
-- Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.
-Use concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/zpw_enk, IMEI or raw captures.
--->
+## Tóm tắt & Nguyên nhân gốc (Root Cause)
+<!-- Mô tả ngắn gọn lỗi/tính năng và nguyên nhân gốc. KHÔNG dùng comment HACK/WORKAROUND để biện minh trong code. -->
 
-## What
--
+## Kiểm tra bằng mã đã thêm (Code-Enforced Invariant)
+- [ ] Đã thêm/cập nhật rule trong `scripts/check_invariants.py`, type/clippy lint, hoặc unit/property test để agent/dev không lặp lại lỗi này
+- [ ] Thông báo lỗi khi vi phạm chỉ rõ cách sửa nguyên nhân gốc
 
-## Why
--
+## Bằng chứng kiểm chứng (Evidence)
+<!-- Bắt buộc đính kèm output test/lint thực tế vừa chạy. Nếu sửa UI/UX, BẮT BUỘC đính kèm ảnh chụp màn hình hoặc video quay lại app chạy thật theo docs/FEATURE_CHECKLIST.md. -->
 
-## How
--
+```text
+python scripts/check_invariants.py
+cargo test --lib -j 1 property_invariants
+```
 
-## Verification
-- [ ] `cargo test --locked`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo fmt --all --check`
-- [ ] Manual: <GUI/TUI, OS, flow, observed error_code>
+- Screenshot / Video (nếu chạm vào `src/gui*`):
+  - Before / After: *(kéo thả ảnh hoặc clip vào đây)*
 
-## Risk & Rollback
-- Risk: two-way door / one-way door
-- Blast radius:
-- Rollback:
-
-## Context
-- Resolves: None
-- Relates to:
-- ADR / RFC: None
+## Checklist tuân thủ
+- [ ] Không chứa `.unwrap()`/`.expect()` mới trong `src/gui/`
+- [ ] Không chứa `.clamp(min, max)` động chưa guard `min <= max`
+- [ ] Không import chéo `crate::gui` từ tầng protocol/storage (`chat`, `store`, `qr`, `session`...)
+- [ ] Không thêm comment `//` biện minh vá tạm hoặc `Instant::now()` thủ công mới trong GUI
+- [ ] Không commit `session.json`, `accounts/`, `*.db`, `crash.log`

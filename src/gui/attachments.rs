@@ -52,6 +52,13 @@ pub fn is_image_path(path: &Path) -> bool {
         .is_some_and(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"))
 }
 
+pub fn is_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| matches!(e.as_str(), "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v"))
+}
+
 /// Still-photo types Zalo groups into an album; GIFs are sent standalone like Zalo Web.
 fn is_album_photo(path: &Path) -> bool {
     path.extension()
@@ -516,7 +523,7 @@ fn dialog_failed_to_open(code: Option<i32>, stderr: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-mod win {
+pub(super) mod win {
     use std::ffi::c_void;
     use std::path::PathBuf;
 
@@ -704,6 +711,17 @@ mod win {
         }
     }
 
+    /// Open the Windows clipboard without sleeping on the UI thread.
+    pub(in crate::gui) unsafe fn try_open_clipboard() -> bool {
+        for _ in 0..32 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                return true;
+            }
+            std::thread::yield_now();
+        }
+        false
+    }
+
     /// Every path in the clipboard's `CF_HDROP` list, in order; empty when absent or locked.
     pub(super) fn clipboard_hdrop_paths() -> Vec<PathBuf> {
         const CF_HDROP: u32 = 15;
@@ -714,15 +732,7 @@ mod win {
             if IsClipboardFormatAvailable(CF_HDROP) == 0 {
                 return Vec::new();
             }
-            let mut opened = false;
-            for _ in 0..6 {
-                if OpenClipboard(std::ptr::null_mut()) != 0 {
-                    opened = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(8));
-            }
-            if !opened {
+            if !try_open_clipboard() {
                 return Vec::new();
             }
             let mut paths = Vec::new();

@@ -5,6 +5,27 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-23
+
+### Added (Tính năng mới & Cộng đồng PRs)
+- **Dual Sync di động iOS V2 + tự động chuyển Android V1 (`src/history_sync.rs`, `src/socket.rs`, `src/chat.rs`, [#155](https://github.com/ctdoteam1110/ctdozlite/issues/155), [#200](https://github.com/ctdoteam1110/ctdozlite/issues/200)):** Thử Sync V2 (`cmd 590`) trước và thăm dò 5,5 giây; nếu điện thoại Android không phản hồi sẽ tự động dọn phiên V2 (`cmd 591`) và kích hoạt Sync V1 (`pull_mobile_msg` `cmd 12000`). Đệm tối đa 32 khung WebSocket gửi đi trước khi `authed` hoàn tất (khắc phục lỗi vừa mở app bấm Đồng bộ bị rơi mất gói `cmd 590` và kẹt ở 10%), đồng thời loại bỏ lời gọi HTTP `12888` cũ không còn dùng ở Zalo PC.
+- **Tích hợp 17 PR cộng đồng & cải tiến nền tảng từ `main`:**
+  - **Linux XDG Data Dir & Tray Icon ([PR #168](https://github.com/ctdoteam1110/ctdozlite/pull/168), [PR #166](https://github.com/ctdoteam1110/ctdozlite/pull/166) bởi @minhngoc2512):** Lưu dữ liệu nhất quán tại `$XDG_DATA_HOME/ctdozlite` kèm di trú tự động; thêm biểu tượng khay hệ thống (StatusNotifierItem via `ksni`) hiển thị chấm đỏ chưa đọc và đóng xuống khay nền.
+  - **Bình chọn nhóm (Group Polls) ([PR #193](https://github.com/ctdoteam1110/ctdozlite/pull/193)):** Hiển thị thẻ bình chọn nhóm trực tiếp và cho phép bầu chọn ngay trong ứng dụng.
+  - **Emoji màu Twemoji & Font Open Sans ([PR #189](https://github.com/ctdoteam1110/ctdozlite/pull/189), [PR #180](https://github.com/ctdoteam1110/ctdozlite/pull/180)):** Nhúng gói Twemoji (`twemoji72.pack`), `NotoEmoji` và tùy chọn font `Open Sans`.
+  - **Lưu ảnh/video về thư mục Downloads & Trình duyệt ảnh hội thoại ([PR #167](https://github.com/ctdoteam1110/ctdozlite/pull/167), [PR #177](https://github.com/ctdoteam1110/ctdozlite/pull/177)):** Tải trực tiếp ảnh/video vào thư mục `Downloads` hệ điều hành và xem duyệt toàn bộ ảnh trong cuộc trò chuyện qua `ImageViewerModal`.
+  - **Dán ảnh `Ctrl+V` (`vendor/egui-winit`, [PR #165](https://github.com/ctdoteam1110/ctdozlite/pull/165))**, **Khử răng cưa avatar tròn & emoticon `/-code` ([PR #169](https://github.com/ctdoteam1110/ctdozlite/pull/169))**, **Menu chuột phải không viền & danh sách hội thoại gọn ([PR #173](https://github.com/ctdoteam1110/ctdozlite/pull/173))**, **Báo trạng thái đồng bộ chưa đầy đủ ([PR #162](https://github.com/ctdoteam1110/ctdozlite/pull/162) bởi @NamGTitm)**, **Gửi ID thật khi thả cảm xúc/trả lời trích dẫn ([PR #171](https://github.com/ctdoteam1110/ctdozlite/pull/171), [PR #190](https://github.com/ctdoteam1110/ctdozlite/pull/190))**, **Phân loại tệp âm thanh theo phần mở rộng ([PR #191](https://github.com/ctdoteam1110/ctdozlite/pull/191))**, **Tô sáng mention chính xác ([PR #161](https://github.com/ctdoteam1110/ctdozlite/pull/161))**, **Giới hạn nội dung popup thông báo ([PR #176](https://github.com/ctdoteam1110/ctdozlite/pull/176))** và **Chặn phát lại banner reaction cũ khi mở app ([PR #154](https://github.com/ctdoteam1110/ctdozlite/pull/154))**.
+
+### Fixed (Sửa lỗi, Tối ưu RAM & CI/CD)
+- **Tối ưu RAM, CPU & giảm luồng hệ thống ([#183](https://github.com/ctdoteam1110/ctdozlite/issues/183)):** Bảo vệ các texture đang hiển thị trên khung hình (`ResourceLru::insert_protecting` ngân sách 64 MB kết hợp `FRAME_TOUCHED_TEXTURES`), giới hạn kích thước giải mã ảnh (`target_decode_max_dim`: avatar `128px`, ảnh thường `720px`, HD `2048px`) và số tác vụ tải sticker đồng thời (`Semaphore(4)`), loại bỏ Tokio runtime thừa ở chế độ GUI (giảm ~39% số thread), đồng thời ghi `UNEXPECTED_EXIT` & stacktrace vào `crash.log`.
+- **Mở Cài đặt tức thì không khựng (`src/media.rs`, `src/gui/modals.rs`, `src/gui/workspace.rs`):** Dò thiết bị micro/camera chạy nền không chặn UI (`list_media_devices_nonblocking`), loại bỏ thao tác chụp màn hình + làm mờ CPU đồng bộ khi mở Cài đặt, và sửa lỗi không mở được Cài đặt khi đang ở tab Danh bạ.
+- **Sửa lỗi người dùng báo cáo & ổn định dữ liệu (`src/account_manager.rs`, `src/chat.rs`, `src/gui/worker.rs`):** Sửa lỗi bật/tắt thông báo hội thoại ([#199](https://github.com/ctdoteam1110/ctdozlite/issues/199)), gửi ảnh trong Mini App ([#196](https://github.com/ctdoteam1110/ctdozlite/issues/196)), thu hồi tin nhắn gửi đi, và cô lập snapshot đa tài khoản theo UIN.
+- **Sửa lỗi Windows CI test & tối ưu pipeline CI/CD (`src/data_dir.rs`, `scripts/check_invariants.py`, `.github/workflows/ci-release.yml`):** Xử lý đúng đường dẫn POSIX `/data/xdg` trong unit test `data_dir` trên Windows, bổ sung cổng kiểm tra invariant `scripts/check_invariants.py`, thêm `concurrency` và gác cổng `needs: [prepare, test]` trước các job đóng gói đa nền tảng.
+
+### Vinh danh đóng góp mới trong v0.1.3
+- **@minhngoc2512:** Đóng góp loạt PR cải thiện Linux XDG data dir & tray icon (#166, #168), lưu ảnh/video Downloads (#167), trình duyệt ảnh (#177), avatar/emoticon (#169), UI menu/settings (#173), emoji màu (#189), Open Sans (#180), bình chọn nhóm (#193) và nhiều bản vá giao thức/UI khác.
+- **@NamGTitm:** [PR #162](https://github.com/ctdoteam1110/ctdozlite/pull/162) (báo trạng thái đồng bộ lịch sử chưa đầy đủ).
+
 ## [0.1.2] - 2026-11-16
 
 ### Added (Tính năng mới & Cập nhật)

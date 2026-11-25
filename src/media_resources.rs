@@ -351,17 +351,44 @@ impl ResourceLru {
         self.order.retain(|k| k != key);
     }
     pub fn insert(&mut self, key: String, bytes: u64) -> Vec<String> {
+        let empty = std::collections::HashSet::new();
+        self.insert_with_policy(key, bytes, &empty, false)
+    }
+    /// Insert `key` (`bytes`) and evict oldest entries NOT present in `protected`
+    /// until `used <= budget` (or only protected entries remain). Prevents GPU texture thrashing.
+    pub fn insert_protecting(
+        &mut self,
+        key: String,
+        bytes: u64,
+        protected: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        self.insert_with_policy(key, bytes, protected, true)
+    }
+    fn insert_with_policy(
+        &mut self,
+        key: String,
+        bytes: u64,
+        protected: &std::collections::HashSet<String>,
+        protect_self: bool,
+    ) -> Vec<String> {
         self.remove(&key);
         self.used = self.used.saturating_add(bytes);
         self.sizes.insert(key.clone(), bytes);
-        self.order.push_back(key);
+        self.order.push_back(key.clone());
         let mut evicted = Vec::new();
         while self.used > self.budget {
-            if let Some(key) = self.order.pop_front() {
-                if let Some(size) = self.sizes.remove(&key) {
-                    self.used -= size;
+            let victim_idx = self
+                .order
+                .iter()
+                .position(|k| (!protect_self || k != &key) && !protected.contains(k));
+            let Some(idx) = victim_idx else {
+                break;
+            };
+            if let Some(victim) = self.order.remove(idx) {
+                if let Some(size) = self.sizes.remove(&victim) {
+                    self.used = self.used.saturating_sub(size);
                 }
-                evicted.push(key);
+                evicted.push(victim);
             } else {
                 break;
             }
@@ -449,5 +476,33 @@ mod admission_and_drop_tests {
         assert!(!partial.exists());
         assert!(!destination.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn resource_lru_never_evicts_protected_visible_textures() {
+        let mut lru = ResourceLru::new(100);
+        let empty = std::collections::HashSet::new();
+        assert!(lru.insert_protecting("vis_a".into(), 60, &empty).is_empty());
+        assert!(lru.insert_protecting("old_b".into(), 30, &empty).is_empty());
+
+        let mut protected = std::collections::HashSet::new();
+        protected.insert("vis_a".to_string());
+        let evicted = lru.insert_protecting("new_c".into(), 50, &protected);
+        assert_eq!(evicted, vec!["old_b".to_string()]);
+        assert_eq!(lru.used(), 110);
+
+        protected.insert("new_c".to_string());
+        let evicted2 = lru.insert_protecting("new_d".into(), 60, &protected);
+        assert!(evicted2.is_empty());
+        assert_eq!(lru.used(), 170);
+    }
+    #[test]
+    fn resource_lru_touch_promotes_recently_used_textures() {
+        let mut lru = ResourceLru::new(100);
+        assert!(lru.insert("a".into(), 40).is_empty());
+        assert!(lru.insert("b".into(), 40).is_empty());
+        lru.touch("a");
+        let evicted = lru.insert("c".into(), 40);
+        assert_eq!(evicted, vec!["b".to_string()]);
+        assert_eq!(lru.used(), 80);
     }
 }

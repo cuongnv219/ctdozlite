@@ -16,7 +16,6 @@ use crate::chat::{self, Thread};
 use crate::session::Session;
 use crate::store::{self, MessageStore};
 
-const DB_PATH: &str = "zalo_history.db";
 const PAGE: u32 = 50;
 /// Pages per thread per run (1 000 messages); run again to go further back.
 const MAX_PAGES: usize = 20;
@@ -39,11 +38,6 @@ async fn persist_thread_snapshot(db_path: &str, snapshot: Thread) -> Result<usiz
             &mut MessageStore::open(&acc_db)?,
             std::slice::from_ref(&snapshot),
         )?;
-        if acc_db != DB_PATH {
-            if let Ok(mut fallback) = MessageStore::open(DB_PATH) {
-                let _ = store::persist_threads(&mut fallback, std::slice::from_ref(&snapshot));
-            }
-        }
         Ok(n)
     })
     .await?
@@ -97,10 +91,7 @@ pub async fn sync_thread(s: &Session, t: &mut Thread) -> Result<usize> {
             return Ok(added);
         }
         is_old = next_is_old;
-        match resp_cursor.or_else(|| next_cursor(t, "")) {
-            Some(c) => cursor = c,
-            None => return Ok(added),
-        }
+        cursor = require_next_cursor(resp_cursor.or_else(|| next_cursor(t, "")), "")?;
         tokio::time::sleep(PAUSE).await;
     } else if cursor.is_empty() {
         cursor = next_cursor(t, "").unwrap_or_else(|| "0".to_string());
@@ -128,16 +119,27 @@ pub async fn sync_thread(s: &Session, t: &mut Thread) -> Result<usize> {
             continue;
         }
         is_old = next_is_old;
-        if !has_more || t.messages.len() == before {
+        if !has_more {
             break;
         }
-        match resp_cursor.or_else(|| next_cursor(t, &cursor)) {
-            Some(c) if c != cursor => cursor = c,
-            _ => break,
-        }
+        cursor = require_next_cursor(resp_cursor.or_else(|| next_cursor(t, &cursor)), &cursor)?;
         tokio::time::sleep(PAUSE).await;
     }
     Ok(added)
+}
+
+fn sync_error_summary(error: &anyhow::Error) -> String {
+    if let Some(error) = error.downcast_ref::<crate::session::SessionError>() {
+        format!("Zalo trả mã lỗi {}", error.code)
+    } else if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+        if error.is_timeout() {
+            "hết thời gian chờ kết nối".into()
+        } else {
+            "lỗi kết nối đến Zalo".into()
+        }
+    } else {
+        "lỗi đồng bộ; xem log --dev".into()
+    }
 }
 
 /// The oldest server message id after a merge, or `None` when the page didn't move the cursor
@@ -150,6 +152,14 @@ fn next_cursor(t: &Thread, current: &str) -> Option<String> {
         .map(|m| m.id.as_str())
         .find(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))?;
     (oldest != current).then(|| oldest.to_string())
+}
+
+fn require_next_cursor(candidate: Option<String>, current: &str) -> Result<String> {
+    candidate
+        .filter(|cursor| !cursor.is_empty() && cursor != current)
+        .ok_or_else(|| {
+            anyhow::anyhow!("server indicated more history but the cursor did not advance")
+        })
 }
 
 static LATEST_MOBILE_TEMP_KEY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
@@ -216,18 +226,21 @@ pub fn clear_sync_keys() {
     }
 }
 
-/// Load (hoặc gen 1 lần + lưu `sync_rsa_identity.json`) RSA-2048 key cố định của
-/// máy cho V1 `pullMobileMsg` (`cmd 12000`). Đúng Zalo PC: phone match
+/// Load (hoặc gen 1 lần + lưu `accounts/<uin>/sync_rsa_identity.json`) RSA-2048 key cố định của
+/// tài khoản cho V1 `pullMobileMsg` (`cmd 12000`). Đúng Zalo PC: phone match
 /// `pc_name`+`public_key` khi gửi `user_confirm` về — key mới mỗi lần khiến
 /// phone thấy thiết bị lạ, bấm vào thông báo không mở được.
-pub fn generate_sync_public_key() -> String {
+pub fn generate_sync_public_key_for(uin: &str) -> String {
     use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
     use rsa::{RsaPrivateKey, RsaPublicKey};
     use base64::Engine;
 
-    const PATH: &str = "sync_rsa_identity.json";
+    let path = crate::account_manager::sync_rsa_path_for(uin);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
     // 1. Thử đọc key đã lưu.
-    if let Ok(raw) = std::fs::read_to_string(PATH) {
+    if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(pem) = v.get("private_pem").and_then(|x| x.as_str()) {
                 if let Ok(priv_key) = RsaPrivateKey::from_pkcs8_pem(pem) {
@@ -244,7 +257,7 @@ pub fn generate_sync_public_key() -> String {
             }
         }
     }
-    // 2. Gen mới + lưu.
+    // 2. Gen mới + lưu với quyền riêng tư.
     let mut rng = rsa::rand_core::OsRng;
     if let Ok(priv_key) = RsaPrivateKey::new(&mut rng, 2048) {
         let pub_key = RsaPublicKey::from(&priv_key);
@@ -252,7 +265,8 @@ pub fn generate_sync_public_key() -> String {
             let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
             if let Ok(pem) = priv_key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF) {
                 let doc = serde_json::json!({ "private_pem": pem.as_str() });
-                let _ = std::fs::write(PATH, serde_json::to_string_pretty(&doc).unwrap_or_default());
+                let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
+                let _ = crate::data_dir::write_private_atomic(&path, text.as_bytes());
             }
             if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
                 *g = Some((priv_key, b64.clone()));
@@ -263,16 +277,22 @@ pub fn generate_sync_public_key() -> String {
     }
     String::new()
 }
+
+/// Wrapper giữ tương thích chữ ký cũ, tự đọc theo `active_uin()`.
+pub fn generate_sync_public_key() -> String {
+    let uin = crate::account_manager::active_uin();
+    generate_sync_public_key_for(&uin)
+}
 /// Synchronize 1-1 and group messages from the user's phone and Zalo cloud (`Đồng bộ tin nhắn từ điện thoại`, #68).
 ///
 /// Workflow:
-/// 1. Sends mobile pull signal (`request_phone_sync` `cmd 12000` + `request_phone_sync_v2` `cmd 12888`)
-///    so the phone Zalo app is notified to push recent 1-1 & group messages.
+/// 1. Sends mobile pull signal (tries Sync V2 `cmd 590` first for iOS, and automatically falls back
+///    to Sync V1 `/api/message/pull_mobile_msg` `cmd 12000` for Android if V2 receives no response).
 /// 2. Drains `lp_chat` (`get_chat_from_polling`) across multiple batches to collect queued 1-1 & group messages.
 /// 3. Queries `/api/preloadconvers/get-last-msgs` (`get_last_msgs`) in 25-thread batches across all
 ///    1-1 and group conversations and merges messages into `threads`.
 /// 4. Fetches recent & older pages via `/api/cm/getrecentv2` and `/api/cm/getoldv2` for Cloud & groups.
-/// 5. Persists all merged messages to `zalo_history.db` and `threads_cache.json`.
+/// 5. Persists all merged messages to per-account SQLite (`accounts/<uin>_history.db`) and cache.
 ///
 /// Returns `(added_messages, synced_threads_count)`.
 pub async fn sync_phone_messages<F>(
@@ -287,6 +307,14 @@ where
     sync_phone_messages_opts(s, poll_state, threads, true, on_progress).await
 }
 
+/// Detailed result for the GUI so partial fetch failures are not reported as success.
+#[derive(Debug, Default)]
+pub(crate) struct PhoneSyncReport {
+    pub(crate) added: usize,
+    pub(crate) active_threads: usize,
+    pub(crate) warnings: Vec<String>,
+}
+
 /// Synchronize messages with explicit control over whether to send a wake-up/pull prompt
 /// (`send_phone_prompt`) to the user's phone or only drain server/cloud queues.
 pub async fn sync_phone_messages_opts<F>(
@@ -294,29 +322,55 @@ pub async fn sync_phone_messages_opts<F>(
     poll_state: &tokio::sync::Mutex<chat::PollState>,
     threads: &mut Vec<Thread>,
     send_phone_prompt: bool,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Result<(usize, usize)>
+where
+    F: FnMut(f32, String),
+{
+    let report =
+        sync_phone_messages_with_report(s, poll_state, threads, send_phone_prompt, on_progress)
+            .await?;
+    Ok((report.added, report.active_threads))
+}
+
+/// Synchronize messages and retain non-fatal endpoint failures for the completion event.
+///
+/// # Errors
+/// Returns an error when there is no active login or required local persistence fails.
+pub(crate) async fn sync_phone_messages_with_report<F>(
+    s: &Session,
+    poll_state: &tokio::sync::Mutex<chat::PollState>,
+    threads: &mut Vec<Thread>,
+    send_phone_prompt: bool,
+    mut on_progress: F,
+) -> Result<PhoneSyncReport>
 where
     F: FnMut(f32, String),
 {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let pub_key = generate_sync_public_key();
+    let uin = s
+        .login
+        .as_ref()
+        .map(|l| l.uin.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let pub_key = generate_sync_public_key_for(&uin);
     let before_total: usize = threads.iter().map(|t| t.messages.len()).sum();
+    let mut warnings = Vec::new();
 
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
         set_last_phone_sync_error(None);
         reset_sync_v2_imported_count();
 
-        // Phase 1 — Sync V2 đúng Zalo PC (`shared-worker.js` SyncSession.start):
-        // 590 là message mạng ĐẦU TIÊN (mở session, phone hiện màn xác nhận).
-        // KHÔNG gửi V1 `pull_mobile_msg` (legacy backup machine, tách biệt V2 —
-        // trộn 2 cơ chế tạo 2 phiên xung đột, văng app phone). KHÔNG gửi 592
-        // mở màn (chỉ wake session đã tồn tại). Sau confirm KHÔNG gửi lại 590
-        // (confirm chỉ mở khóa decrypt; dữ liệu tới qua batch → GET msgUrl).
-        // Kết thúc/huỷ/lỗi → gửi 591 để server/phone dọn session.
+        // Phase 1 — Dual Sync (iOS V2 -> Android V1 fallback):
+        // iOS dùng Sync V2 (`cmd 590` `transfer_sync2`) và phản hồi rất nhanh (~0.5–1.5s).
+        // Android APK không hỗ trợ `transfer_sync2`, chỉ hỗ trợ Sync V1 (`cmd 12000`
+        // `pull_mobile_msg` -> `transfer_msg`/`syncmsgmb` -> `.db.crypt`).
+        // Vì vậy: gửi `cmd 590` trước KHÔNG kèm V1 (tránh 2 phiên đè nhau trên iOS), thăm dò
+        // 5.5s; nếu im lặng hoàn toàn thì dọn phiên V2 (`cmd 591` OutDated) rồi bắn V1!
         on_progress(
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
@@ -324,37 +378,110 @@ where
         let partitions = chat::resolve_thread_partitions(s, threads).await;
         crate::logger::log_sync(&format!("Tìm được {} partitions cho sync", partitions.len()));
 
-        let v2_sync_id = match chat::wake_phone_sync_v2(s).await {
+        let mut v2_sync_id = match chat::wake_phone_sync_v2(s).await {
             Ok(sync_id) => match chat::send_sync_v2_request_with_queries(s, &sync_id, &partitions) {
                 Ok(true) => Some(sync_id),
                 Ok(false) => {
                     set_active_v2_sync_id(None);
-                    on_progress(
-                        0.15,
-                        "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string(),
-                    );
+                    crate::logger::log_sync("V2 cmd 590 thất bại (WebSocket chưa kết nối)");
                     None
                 }
                 Err(e) => {
                     set_active_v2_sync_id(None);
-                    on_progress(0.15, format!("⚠️ Lỗi tạo gói Sync V2: {e}"));
-                    set_last_phone_sync_error(Some(e.to_string()));
+                    crate::logger::log_sync(&format!("V2 tạo gói cmd 590 FAIL: {e}"));
                     None
                 }
             },
             Err(e) => {
                 set_active_v2_sync_id(None);
                 crate::logger::log_sync(&format!("V2 mở session FAIL: {e}"));
-                on_progress(0.15, format!("⚠️ Sync V2: {e}"));
-                set_last_phone_sync_error(Some(e.to_string()));
                 None
             }
         };
 
-        // Chờ user xác nhận trên phone (tối đa 90s). Không gửi lại gì cả.
-        // No session was opened when 590 failed, so no confirmation can arrive:
-        // skip straight to the server/Cloud phases instead of idling for 90s.
-        let confirm_window = if v2_sync_id.is_some() { Duration::from_secs(90) } else { Duration::ZERO };
+        let mut v2_got_response = false;
+        let probe_start = std::time::Instant::now();
+        if v2_sync_id.is_some() {
+            for _ in 0..11 {
+                if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
+                    if let Some(sid) = v2_sync_id.as_deref() {
+                        crate::socket::send_sync_ack_delete(
+                            sid,
+                            crate::socket::SYNC_DISPOSE_USER_CANCEL,
+                        );
+                        remove_sync_v2_session(sid);
+                    }
+                    set_active_v2_sync_id(None);
+                    return Ok(PhoneSyncReport::default());
+                }
+                if last_mobile_sync_status().is_some() {
+                    v2_got_response = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+
+        let mut v1_active = false;
+        if !v2_got_response {
+            if let Some(sid) = v2_sync_id.take() {
+                crate::socket::send_sync_ack_delete(&sid, crate::socket::SYNC_DISPOSE_OUTDATED);
+                remove_sync_v2_session(&sid);
+            }
+            set_active_v2_sync_id(None);
+            set_last_phone_sync_error(None);
+            set_last_mobile_sync_status(None);
+            crate::logger::log_sync(
+                "V2 không phản hồi sau 5.5s (Android / V1) -> chuyển sang pull_mobile_msg (cmd 12000)",
+            );
+            if !pub_key.is_empty() {
+                match chat::request_phone_sync(s, &pub_key).await {
+                    Ok(resp) => {
+                        let ec = resp
+                            .get("error_code")
+                            .and_then(serde_json::Value::as_i64)
+                            .unwrap_or(0);
+                        crate::logger::log_sync(&format!(
+                            "V1 pull_mobile_msg response: error_code={ec}"
+                        ));
+                        if ec == 0 {
+                            v1_active = true;
+                            on_progress(
+                                0.15,
+                                "📲 Đã gửi yêu cầu đồng bộ tới Zalo trên điện thoại — hãy mở Zalo trên điện thoại và bấm 'Đồng bộ'…".to_string(),
+                            );
+                        } else {
+                            let em = resp
+                                .get("error_message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("máy chủ từ chối yêu cầu đồng bộ V1");
+                            let err = format!("⚠️ Yêu cầu đồng bộ V1 thất bại (code {ec}): {em}");
+                            set_last_phone_sync_error(Some(err.clone()));
+                            on_progress(0.15, err);
+                        }
+                    }
+                    Err(e) => {
+                        crate::logger::log_sync(&format!("V1 pull_mobile_msg FAIL: {e}"));
+                        let err = format!("⚠️ Không gửi được yêu cầu đồng bộ tới điện thoại: {e}");
+                        set_last_phone_sync_error(Some(err.clone()));
+                        on_progress(0.15, err);
+                    }
+                }
+            } else {
+                let err = "⚠️ Không tạo được khoá RSA đồng bộ cho điện thoại".to_string();
+                set_last_phone_sync_error(Some(err.clone()));
+                on_progress(0.15, err);
+            }
+        }
+
+        // Chờ user xác nhận trên phone (tối đa 90s kể cả lúc probe). Không gửi lại gì cả.
+        let confirm_window = if v2_sync_id.is_some() {
+            Duration::from_secs(90).saturating_sub(probe_start.elapsed())
+        } else if v1_active {
+            Duration::from_secs(90)
+        } else {
+            Duration::ZERO
+        };
         let deadline = std::time::Instant::now() + confirm_window;
         let mut confirmed = false;
         let mut rejected = false;
@@ -368,8 +495,11 @@ where
                     );
                     remove_sync_v2_session(sid);
                 }
+                if v1_active {
+                    let _ = chat::cancel_phone_sync(s, &pub_key).await;
+                }
                 set_active_v2_sync_id(None);
-                return Ok((0, 0));
+                return Ok(PhoneSyncReport::default());
             }
             if let Some(st) = last_mobile_sync_status().as_deref() {
                 let is_error = st.contains("Lỗi") || st.contains("Không thể") || st.contains("thất bại");
@@ -386,6 +516,7 @@ where
                 } else if st.contains("đã xác nhận")
                     || st.contains("đang nén")
                     || st.contains("giải mã")
+                    || st.contains("Đang tải và giải mã")
                     || st.contains("bỏ qua 1 phân vùng")
                     || st.contains("Đã nhận gói đồng bộ")
                     || st.contains("thành công")
@@ -404,12 +535,15 @@ where
                 crate::socket::send_sync_ack_delete(sid, crate::socket::SYNC_DISPOSE_USER_CANCEL);
                 remove_sync_v2_session(sid);
             }
+            if v1_active {
+                let _ = chat::cancel_phone_sync(s, &pub_key).await;
+            }
             set_active_v2_sync_id(None);
-            return Ok((0, 0));
+            return Ok(PhoneSyncReport::default());
         }
 
         if confirmed {
-            // Đã xác nhận → chỉ chờ batch (meta + message), không gửi lại 590.
+            // Đã xác nhận → chỉ chờ batch / BackupReady, không gửi lại request.
             on_progress(0.50, "📲 Đã xác nhận — chờ điện thoại nén & gửi gói tin…".to_string());
             let finish_deadline = std::time::Instant::now() + Duration::from_secs(180);
             let mut ok = false;
@@ -417,14 +551,34 @@ where
                 if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
                     break;
                 }
+                let v2_done = v2_sync_id.is_some()
+                    && is_sync_v2_last_seen()
+                    && sync_v2_inflight_count() == 0;
+                if v2_done {
+                    let done_msg = last_mobile_sync_status()
+                        .filter(|s| s.contains("thành công"))
+                        .unwrap_or_else(|| {
+                            format!(
+                                "🎉 Đã giải mã & đồng bộ thành công {} tin nhắn từ điện thoại vào ứng dụng!",
+                                sync_v2_imported_count()
+                            )
+                        });
+                    ok = true;
+                    on_progress(0.95, done_msg);
+                    tokio::time::sleep(Duration::from_millis(1200)).await;
+                    let _ = sync_v2_batch_lock().lock().await;
+                    break;
+                }
                 if let Some(st) = last_mobile_sync_status().as_deref() {
                     if st.contains("thành công") {
                         ok = true;
                         on_progress(0.95, st.to_string());
-                        // Đợi nhịp ngắn để các batch upload song song (nếu tới lệch thứ tự
-                        // sau gói `isLast=1`) kịp tải & ghi vào SQLite trước khi gửi `cmd 591`.
-                        tokio::time::sleep(Duration::from_millis(1200)).await;
-                        let _ = sync_v2_batch_lock().lock().await;
+                        if v2_sync_id.is_some() {
+                            // Đợi nhịp ngắn để các batch upload song song (nếu tới lệch thứ tự
+                            // sau gói `isLast=1`) kịp tải & ghi vào SQLite trước khi gửi `cmd 591`.
+                            tokio::time::sleep(Duration::from_millis(1200)).await;
+                            let _ = sync_v2_batch_lock().lock().await;
+                        }
                         break;
                     } else if st.contains("Lỗi") || st.contains("Không thể") || st.contains("thất bại") {
                         set_last_phone_sync_error(Some(st.to_string()));
@@ -442,7 +596,7 @@ where
                     "⚠️ Hết thời gian chờ gói tin nhắn từ điện thoại (hãy giữ Zalo trên điện thoại mở)".to_string(),
                 ));
             }
-            // Xong (hoặc hết chờ) → 591 dọn session với mã số nguyên 0/1/2 đúng Zalo `release()`.
+            // Xong (hoặc hết chờ) → 591 dọn session V2 hoặc clean/cancel V1.
             if let Some(sid) = v2_sync_id.as_deref() {
                 let reason = if ok {
                     crate::socket::SYNC_DISPOSE_SUCCESS
@@ -455,18 +609,25 @@ where
                 remove_sync_v2_session(sid);
             }
             set_active_v2_sync_id(None);
-            if let Some(pub_k) = get_sync_public_key() {
+            if cancelled && v1_active {
+                let _ = chat::cancel_phone_sync(s, &pub_key).await;
+            } else if let Some(pub_k) = get_sync_public_key() {
                 let _ = crate::chat::clean_sync(s, &pub_k).await;
             }
             clear_sync_keys();
-        } else if let Some(sid) = v2_sync_id.as_deref() {
+        } else if v2_sync_id.is_some() || v1_active {
             if !had_error && last_phone_sync_error().is_none() {
                 set_last_phone_sync_error(Some(
                     "⚠️ Hết thời gian chờ xác nhận đồng bộ trên điện thoại".to_string(),
                 ));
             }
-            crate::socket::send_sync_ack_delete(sid, crate::socket::SYNC_DISPOSE_ERROR);
-            remove_sync_v2_session(sid);
+            if let Some(sid) = v2_sync_id.as_deref() {
+                crate::socket::send_sync_ack_delete(sid, crate::socket::SYNC_DISPOSE_ERROR);
+                remove_sync_v2_session(sid);
+            }
+            if v1_active {
+                let _ = chat::cancel_phone_sync(s, &pub_key).await;
+            }
             set_active_v2_sync_id(None);
         }
     }
@@ -482,7 +643,7 @@ where
 
     if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
         let _ = chat::cancel_phone_sync(s, &pub_key).await;
-        return Ok((0, 0));
+        return Ok(PhoneSyncReport::default());
     }
 
     // Phase 2: Drain `lp_chat` multi-batch action queues (`getChatFromPolling`)
@@ -493,14 +654,21 @@ where
     for batch_idx in 0..5 {
         if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
             let _ = chat::cancel_phone_sync(s, &pub_key).await;
-            return Ok((0, 0));
+            return Ok(PhoneSyncReport {
+                warnings,
+                ..PhoneSyncReport::default()
+            });
         }
         let lp_res = {
             let mut ps = poll_state.lock().await;
             chat::get_chat_from_polling(s, &mut ps).await
         };
-        let Ok(lp_resp) = lp_res else {
-            break;
+        let lp_resp = match lp_res {
+            Ok(response) => response,
+            Err(error) => {
+                warnings.push(format!("Hàng đợi tin nhắn: {}", sync_error_summary(&error)));
+                break;
+            }
         };
         chat::merge_previews(threads, &lp_resp);
         if let Some(data_node) = lp_resp.get("data") {
@@ -529,8 +697,12 @@ where
         0.45,
         "🔄 Đang đồng bộ tin nhắn các cuộc trò chuyện 1-1 & nhóm…".to_string(),
     );
-    if let Ok(preview_resp) = chat::get_last_msgs(s, &[]).await {
-        chat::merge_previews(threads, &preview_resp);
+    match chat::get_last_msgs(s, &[]).await {
+        Ok(response) => chat::merge_previews(threads, &response),
+        Err(error) => warnings.push(format!(
+            "Tải danh sách hội thoại: {}",
+            sync_error_summary(&error)
+        )),
     }
     let known_ids: Vec<String> = threads
         .iter()
@@ -550,8 +722,13 @@ where
             let _ = chat::cancel_phone_sync(s, &pub_key).await;
             break;
         }
-        if let Ok(preview_resp) = chat::get_last_msgs(s, chunk).await {
-            chat::merge_previews(threads, &preview_resp);
+        match chat::get_last_msgs(s, chunk).await {
+            Ok(response) => chat::merge_previews(threads, &response),
+            Err(error) => warnings.push(format!(
+                "Tải tin nhắn xem trước lô {}: {}",
+                idx + 1,
+                sync_error_summary(&error)
+            )),
         }
         let frac = 0.45 + 0.25 * ((idx + 1) as f32 / total_chunks as f32);
         on_progress(
@@ -596,63 +773,93 @@ where
             frac,
             format!("☁️ Đang đồng bộ lịch sử: {tname} ({}/{total_cm})…", pos + 1),
         );
-        if let Ok(cm_resp) = chat::get_cloud_messages(s, &tid, "0", false, PAGE).await {
-            chat::merge_group_history(&mut threads[tidx], &cm_resp);
-            let (has_more, is_old, last_msg_id) = chat::parse_cloud_page_meta(&cm_resp);
-            if has_more {
-                if let Some(oldest) = last_msg_id.or_else(|| next_cursor(&threads[tidx], "")) {
-                    if let Ok(old_resp) =
-                        chat::get_cloud_messages(s, &tid, &oldest, is_old, PAGE).await
-                    {
-                        chat::merge_group_history(&mut threads[tidx], &old_resp);
+        match chat::get_cloud_messages(s, &tid, "0", false, PAGE).await {
+            Ok(response) => {
+                chat::merge_group_history(&mut threads[tidx], &response);
+                let (has_more, is_old, last_msg_id) = chat::parse_cloud_page_meta(&response);
+                if has_more {
+                    if let Some(oldest) = last_msg_id.or_else(|| next_cursor(&threads[tidx], "")) {
+                        match chat::get_cloud_messages(s, &tid, &oldest, is_old, PAGE).await {
+                            Ok(old_response) => {
+                                chat::merge_group_history(&mut threads[tidx], &old_response);
+                            }
+                            Err(error) if chat::is_cloud_stop_retry(&error) => {}
+                            Err(error) => warnings.push(format!(
+                                "Tải trang lịch sử Cloud/Nhóm: {}",
+                                sync_error_summary(&error)
+                            )),
+                        }
+                    } else {
+                        warnings.push(
+                            "Cloud/Nhóm: máy chủ báo còn lịch sử nhưng không có mốc phân trang"
+                                .into(),
+                        );
                     }
                 }
             }
+            Err(error) if chat::is_cloud_stop_retry(&error) => {}
+            Err(error) => warnings.push(format!(
+                "Tải lịch sử Cloud/Nhóm: {}",
+                sync_error_summary(&error)
+            )),
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    // Phase 5: Resolve contact/group display names, deduplicate, and persist to SQLite (`zalo_history.db`)
+    // Phase 5: Resolve contact/group display names, deduplicate, and persist to per-account SQLite & cache
+    let uin_str = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let db_path = store::db_path_for_account(&uin_str);
     on_progress(
         0.96,
-        "💾 Đang lưu tin nhắn đã đồng bộ vào cơ sở dữ liệu zalo_history.db…".to_string(),
+        format!("💾 Đang lưu tin nhắn đã đồng bộ vào cơ sở dữ liệu {db_path}…"),
     );
     chat::resolve_thread_names(s, threads).await;
     chat::deduplicate_threads(threads, None);
 
     let mut snapshot = threads.clone();
-    let uin_str = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
-    let db_path = store::db_path_for_account(&uin_str);
     let db_path_clone = db_path.clone();
+    let uin_for_cache = uin_str.clone();
     let (db_added, hydrated_threads) = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<Thread>)> {
         let mut st = MessageStore::open(&db_path_clone)?;
         let n = store::persist_threads(&mut st, &snapshot)?;
         // Hydrate ngược từ SQLite để nạp toàn bộ tin nhắn 1-1 & nhóm vừa giải mã
-        // từ Sync V2 (`import_sync_v2_messages_inner`) trước khi ghi `threads_cache.json`.
+        // từ Sync V2/V1 trước khi ghi `accounts/<uin>_threads.json`.
         let _ = st.hydrate_threads(&mut snapshot, 100);
-        chat::save_threads_cache(&snapshot);
+        chat::save_threads_cache_for(&uin_for_cache, &snapshot);
         Ok((n, snapshot))
     })
     .await??;
     *threads = hydrated_threads;
     chat::resolve_thread_names(s, threads).await;
     chat::deduplicate_threads(threads, None);
-    chat::save_threads_cache(threads);
+    chat::save_threads_cache_for(&uin_str, threads);
     let after_total: usize = threads.iter().map(|t| t.messages.len()).sum();
     let mobile_added = sync_v2_imported_count();
     let added = (db_added + mobile_added).max(after_total.saturating_sub(before_total));
     let active_threads = threads.iter().filter(|t| !t.messages.is_empty()).count();
-    let final_msg = if let Some(phone_note) = last_mobile_sync_status() {
-        format!("{phone_note} · Đã đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại)")
+    let final_msg = if !warnings.is_empty() {
+        format!(
+            "⚠️ Đồng bộ chưa đầy đủ: +{added} tin nhắn ({active_threads} hội thoại), {} lỗi tải dữ liệu (vd. {})",
+            warnings.len(),
+            warnings[0]
+        )
+    } else if let Some(phone_note) = last_mobile_sync_status() {
+        format!(
+            "{phone_note} · Đã đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại)"
+        )
     } else {
         format!("✅ Đã gửi yêu cầu tới điện thoại & đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại). Hãy mở Zalo trên điện thoại để xác nhận nếu muốn kéo tin nhắn 1-1 cũ.")
     };
     on_progress(1.0, final_msg);
-    Ok((added, active_threads))
+    Ok(PhoneSyncReport {
+        added,
+        active_threads,
+        warnings,
+    })
 }
 
 /// Download, decrypt, decompress and ingest a mobile backup container (.db.crypt)
-/// into `zalo_history.db` and hydrate `threads_cache.json`.
+/// into `accounts/<uin>_history.db` and hydrate `accounts/<uin>_threads.json`.
 pub async fn import_mobile_backup_container(
     s: &Session,
     url: &str,
@@ -663,7 +870,7 @@ pub async fn import_mobile_backup_container(
     use rsa::Pkcs1v15Encrypt;
     use rusqlite::Connection;
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::io::Cursor;
     use crate::store::StoredMessage;
 
@@ -750,7 +957,7 @@ pub async fn import_mobile_backup_container(
         if offset + name_len > decrypted.len() {
             break;
         }
-        let name = String::from_utf8_lossy(&decrypted[offset..offset + name_len]).to_string();
+        let raw_name = String::from_utf8_lossy(&decrypted[offset..offset + name_len]).to_string();
         offset += name_len;
         if offset + 4 > decrypted.len() {
             break;
@@ -758,7 +965,16 @@ pub async fn import_mobile_backup_container(
         let size = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
         offset += 4;
 
-        let stem = name.trim_end_matches(".db");
+        let safe_name = std::path::Path::new(&raw_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if safe_name.is_empty() {
+            toc.push((String::new(), size));
+            continue;
+        }
+        let stem = safe_name.trim_end_matches(".db");
         if stem.starts_with("group_") {
             if let Ok(gid) = stem[6..].parse::<i64>() {
                 gids.push(gid);
@@ -767,7 +983,7 @@ pub async fn import_mobile_backup_container(
             fids.push(fid);
         }
 
-        toc.push((name, size));
+        toc.push((safe_name, size));
     }
     let toc_end = offset;
 
@@ -785,58 +1001,125 @@ pub async fn import_mobile_backup_container(
     let mut payload = Vec::new();
     lzma_rs::xz_decompress(&mut cursor, &mut payload)?;
 
-    let noise_body = json!({
-        "fids": fids,
-        "gids": gids
-    });
-    let enc_params = s.encoded_params(&noise_body)?;
-    let znoise_url = format!("https://zwid.api.zalo.me/api/znoise?{}", s.common_params());
-    let resp = s.post_form(&znoise_url, format!("params={enc_params}")).await?;
-    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
-
-    let mut id_map: HashMap<String, String> = HashMap::new();
-    if let Some(data) = dec.get("data") {
-        if let Some(arr) = data.get("fids").and_then(|v| v.as_array()) {
-            for (fid, thread_id_val) in fids.iter().zip(arr.iter()) {
-                if let Some(tid) = thread_id_val.as_str() {
-                    id_map.insert(format!("{fid}.db"), tid.to_string());
-                }
-            }
-        }
-        if let Some(arr) = data.get("gids").and_then(|v| v.as_array()) {
-            for (gid, thread_id_val) in gids.iter().zip(arr.iter()) {
-                if let Some(tid) = thread_id_val.as_str() {
-                    id_map.insert(format!("group_{gid}.db"), tid.to_string());
-                }
-            }
-        }
-    }
-
-    let mut store = crate::store::MessageStore::open("zalo_history.db")?;
-    let temp_dir = std::env::temp_dir().join(format!("ctdozlite_sync_{}", crate::param_cipher::random_hex(8)));
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ctdozlite_sync_{}",
+        crate::param_cipher::random_hex(8)
+    ));
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    let my_uin = 435550501_i64;
-    let my_uid = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
-    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
-
     let mut curr_offset = 0;
-    let mut total_imported = 0;
+    let mut extracted_files: Vec<(String, std::path::PathBuf, Option<i64>, bool)> = Vec::new();
+    let mut seen_fids: HashSet<i64> = fids.iter().copied().collect();
+    let mut all_fids: Vec<i64> = fids.clone();
 
-    for (name, size) in toc {
+    for (name, size) in &toc {
         if curr_offset + size > payload.len() {
             break;
         }
         let db_bytes = &payload[curr_offset..curr_offset + size];
         curr_offset += size;
+        if name.is_empty() {
+            continue;
+        }
+        let stem = name.trim_end_matches(".db");
+        let is_group_db = stem.starts_with("group_");
+        let file_fid = if is_group_db {
+            None
+        } else {
+            stem.parse::<i64>().ok()
+        };
+        let temp_db_path = temp_dir.join(name);
+        if std::fs::write(&temp_db_path, db_bytes).is_err() {
+            continue;
+        }
+        if let Ok(conn) = Connection::open(&temp_db_path) {
+            if let Ok(mut stmt) =
+                conn.prepare("SELECT DISTINCT SenderId FROM ChatContent WHERE SenderId > 0")
+            {
+                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, i64>(0)) {
+                    for sid in rows.flatten() {
+                        if sid > 0 && seen_fids.insert(sid) {
+                            all_fids.push(sid);
+                        }
+                    }
+                }
+            }
+        }
+        extracted_files.push((name.clone(), temp_db_path, file_fid, is_group_db));
+    }
 
-        let Some(thread_id) = id_map.get(&name) else {
+    let mut fid_to_uid: HashMap<i64, String> = HashMap::new();
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    let fid_chunks: Vec<&[i64]> = if all_fids.is_empty() {
+        Vec::new()
+    } else {
+        all_fids.chunks(200).collect()
+    };
+    let gid_chunks: Vec<&[i64]> = if gids.is_empty() {
+        Vec::new()
+    } else {
+        gids.chunks(200).collect()
+    };
+    let n_calls = fid_chunks.len().max(gid_chunks.len());
+    for i in 0..n_calls {
+        let f_slice = fid_chunks.get(i).copied().unwrap_or(&[]);
+        let g_slice = gid_chunks.get(i).copied().unwrap_or(&[]);
+        let noise_body = json!({
+            "fids": f_slice,
+            "gids": g_slice
+        });
+        let enc_params = s.encoded_params(&noise_body)?;
+        let znoise_url = format!("https://zwid.api.zalo.me/api/znoise?{}", s.common_params());
+        let resp = s.post_form(&znoise_url, format!("params={enc_params}")).await?;
+        let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+        if let Some(data) = dec.get("data") {
+            if let Some(arr) = data.get("fids").and_then(|v| v.as_array()) {
+                for (fid, thread_id_val) in f_slice.iter().zip(arr.iter()) {
+                    if let Some(tid) = thread_id_val.as_str() {
+                        let tid_str = tid.trim().to_string();
+                        if !tid_str.is_empty() {
+                            fid_to_uid.insert(*fid, tid_str.clone());
+                            if fids.contains(fid) {
+                                id_map.insert(format!("{fid}.db"), tid_str);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(arr) = data.get("gids").and_then(|v| v.as_array()) {
+                for (gid, thread_id_val) in g_slice.iter().zip(arr.iter()) {
+                    if let Some(tid) = thread_id_val.as_str() {
+                        let tid_str = tid.trim().to_string();
+                        if !tid_str.is_empty() {
+                            id_map.insert(format!("group_{gid}.db"), tid_str);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let db_path = crate::store::db_path_for_account(&uin);
+    let mut store = crate::store::MessageStore::open(&db_path)?;
+
+    let my_uid = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
+    let mut cached_threads = crate::chat::load_threads_cache_for(&uin);
+    let mut total_imported = 0;
+
+    for (name, temp_db_path, file_fid, is_group_db) in extracted_files {
+        let Some(thread_id) = id_map.get(&name).cloned() else {
             continue;
         };
 
-        let temp_db_path = temp_dir.join(&name);
-        if std::fs::write(&temp_db_path, db_bytes).is_err() {
-            continue;
+        if !thread_id.is_empty() && !cached_threads.iter().any(|t| t.id == thread_id) {
+            let short: String = thread_id.chars().take(8).collect();
+            cached_threads.push(Thread {
+                id: thread_id.clone(),
+                name: format!("Hội thoại {short}"),
+                is_group: is_group_db,
+                ..Default::default()
+            });
         }
 
         let Ok(conn) = Connection::open(&temp_db_path) else {
@@ -867,8 +1150,18 @@ pub async fn import_mobile_backup_container(
 
         for r in rows.flatten() {
             let (sender_id_num, cli_msg_id, glb_msg_id, _status, msg_type_num, ts, content_opt, bin_net_opt) = r;
-            let is_outgoing = sender_id_num == my_uin;
-            let sender_id = if is_outgoing { my_uid.clone() } else { thread_id.clone() };
+            let mapped_sender = fid_to_uid.get(&sender_id_num);
+            let is_outgoing = mapped_sender.is_some_and(|u| !my_uid.is_empty() && u == &my_uid)
+                || (!is_group_db && file_fid.is_some_and(|f| sender_id_num > 0 && sender_id_num != f));
+            let sender_id = if is_outgoing {
+                my_uid.clone()
+            } else if let Some(u) = mapped_sender {
+                u.clone()
+            } else if !is_group_db {
+                thread_id.clone()
+            } else {
+                sender_id_num.to_string()
+            };
             let sender_name = if is_outgoing { my_name.clone() } else { String::new() };
 
             let msg_id = if glb_msg_id > 0 {
@@ -932,9 +1225,8 @@ pub async fn import_mobile_backup_container(
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 
-    let mut cached_threads = crate::chat::load_threads_cache();
     let _ = store.hydrate_threads(&mut cached_threads, 50);
-    crate::chat::save_threads_cache(&cached_threads);
+    crate::chat::save_threads_cache_for(&uin, &cached_threads);
 
     // Notify Zalo server and phone that snapshot is downloaded, dismissing mobile spinner
     let _ = crate::chat::clean_sync(s, &pub_key_b64).await;
@@ -962,15 +1254,15 @@ struct SyncV2KeysRaw {
 /// Khóa Sync V2 ed25519 của phiên hiện tại (raw bytes, giữ trong bộ nhớ).
 static CURRENT_V2_KEYS: std::sync::Mutex<Option<SyncV2KeysRaw>> = std::sync::Mutex::new(None);
 
-pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
+pub fn generate_sync_v2_keys_for(uin: &str) -> Result<SyncV2Keys> {
     // wasmtime host (không cần Node.js). scripts/sync_v2_helper.js chỉ còn
     // là tài liệu tham khảo cho luồng JS gốc (deprecated path).
     // QUAN TRỌNG (đúng Zalo PC `genSyncKeyPair`): ik là IDENTITY key cố định
-    // của máy (lưu `sync_identity.json`, gen 1 lần duy nhất), chỉ ek là
-    // ephemeral (gen mới mỗi lần sync). Gen ik mới mỗi lần khiến điện thoại
-    // thấy key lạ → văng app khi bấm vào thông báo đồng bộ.
+    // của tài khoản (lưu `accounts/<uin>/sync_identity.json`, gen 1 lần duy nhất),
+    // chỉ ek là ephemeral (gen mới mỗi lần sync). Gen ik mới mỗi lần khiến điện
+    // thoại thấy key lạ → văng app khi bấm vào thông báo đồng bộ.
     let host = crate::zproto_host::ZprotoHost::load()?;
-    let (ik_pub, ik_priv) = load_or_create_identity_key(&host)?;
+    let (ik_pub, ik_priv) = load_or_create_identity_key(&host, uin)?;
     let (ek_pub, ek_priv) = host.generate_keypair()?;
     use base64::Engine;
     let keys = SyncV2Keys {
@@ -985,6 +1277,11 @@ pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
     Ok(keys)
 }
 
+pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
+    let uin = crate::account_manager::active_uin();
+    generate_sync_v2_keys_for(&uin)
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const H: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -995,14 +1292,17 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// Đọc identity key từ `sync_identity.json`, gen mới + lưu nếu chưa có.
-/// File nằm cùng data dir (app đã `set_current_dir` về đó lúc khởi động).
+/// Đọc identity key từ `accounts/<uin>/sync_identity.json`, gen mới + lưu nếu chưa có.
 fn load_or_create_identity_key(
     host: &crate::zproto_host::ZprotoHost,
+    uin: &str,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     use base64::Engine;
-    const PATH: &str = "sync_identity.json";
-    if let Ok(raw) = std::fs::read_to_string(PATH) {
+    let path = crate::account_manager::sync_identity_path_for(uin);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             let dec = |k: &str| {
                 v.get(k)
@@ -1022,7 +1322,8 @@ fn load_or_create_identity_key(
         "public_key": base64::engine::general_purpose::STANDARD.encode(&pubk),
         "private_key": base64::engine::general_purpose::STANDARD.encode(&privk),
     });
-    let _ = std::fs::write(PATH, serde_json::to_string_pretty(&doc).unwrap_or_default());
+    let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
+    let _ = crate::data_dir::write_private_atomic(&path, text.as_bytes());
     crate::logger::log_sync("ik: đã gen identity key mới + lưu");
     Ok((pubk, privk))
 }
@@ -1114,9 +1415,43 @@ static SYNC_V2_SESSIONS: std::sync::Mutex<Vec<(String, String)>> =
 
 static ACTIVE_V2_SYNC_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 static SYNC_V2_IMPORTED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SYNC_V2_LAST_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static SYNC_V2_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+pub struct SyncV2InflightGuard;
+
+impl SyncV2InflightGuard {
+    pub fn enter() -> Self {
+        SYNC_V2_INFLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for SyncV2InflightGuard {
+    fn drop(&mut self) {
+        let _ = SYNC_V2_INFLIGHT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            Some(v.saturating_sub(1))
+        });
+    }
+}
+
+pub fn mark_sync_v2_last_seen() {
+    SYNC_V2_LAST_SEEN.store(true, Ordering::SeqCst);
+}
+
+pub fn is_sync_v2_last_seen() -> bool {
+    SYNC_V2_LAST_SEEN.load(Ordering::SeqCst)
+}
+
+pub fn sync_v2_inflight_count() -> usize {
+    SYNC_V2_INFLIGHT.load(Ordering::SeqCst)
+}
 
 pub fn reset_sync_v2_imported_count() {
     SYNC_V2_IMPORTED_COUNT.store(0, Ordering::Relaxed);
+    SYNC_V2_LAST_SEEN.store(false, Ordering::SeqCst);
+    SYNC_V2_INFLIGHT.store(0, Ordering::SeqCst);
 }
 
 pub fn add_sync_v2_imported_count(n: usize) -> usize {
@@ -1143,9 +1478,55 @@ static SYNC_V2_BATCH_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 static PROCESSED_SYNC_V2_URLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
+static PROCESSED_BACKUP_URLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 static NOISED_TO_THREAD_ID: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, (String, bool)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Xóa toàn bộ state/key đồng bộ điện thoại trong bộ nhớ khi chuyển/đăng xuất tài khoản.
+pub fn reset_for_account_switch() {
+    set_latest_mobile_temp_key("");
+    set_last_mobile_sync_status(None);
+    set_last_phone_sync_error(None);
+    clear_sync_keys();
+    if let Ok(mut g) = CURRENT_V2_KEYS.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = CURRENT_V2_SESSION.lock() {
+        *g = None;
+    }
+    if let Ok(mut m) = SYNC_V2_SESSIONS.lock() {
+        m.clear();
+    }
+    set_active_v2_sync_id(None);
+    reset_sync_v2_imported_count();
+    if let Ok(mut m) = NOISED_TO_THREAD_ID.lock() {
+        m.clear();
+    }
+    if let Ok(mut s) = PROCESSED_SYNC_V2_URLS.lock() {
+        s.clear();
+    }
+    if let Ok(mut s) = PROCESSED_BACKUP_URLS.lock() {
+        s.clear();
+    }
+}
+
+/// Kiểm tra + đánh dấu URL gói backup V1 đã tải/giải mã chưa (chống trùng giữa WS và `lp_control`).
+pub fn mark_backup_url_seen(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Ok(mut set) = PROCESSED_BACKUP_URLS.lock() {
+        if set.len() > 256 {
+            set.clear();
+        }
+        return set.insert(trimmed.to_string());
+    }
+    true
+}
 
 pub fn sync_v2_batch_lock() -> &'static tokio::sync::Mutex<()> {
     &SYNC_V2_BATCH_LOCK
@@ -1781,7 +2162,111 @@ fn is_sync_v2_call_attach(att: &ParsedProtoAttach, content: &str) -> bool {
 /// verified archive `xi` message-type table (`0=Text`, `2=Doodle`, `3|4|31=Photo`, `6=Voice`,
 /// `10=Sticker`, `12=Contact/Call/Link`, `15=OA`, `18=Location`, `19|25=Video`, `20=ChatInfo`,
 /// `21=ECard`, `22=File`, `23=Gif`, `24|53=Webcontent`, `26=Poll`, `33=Delete`, `36=Undo`).
-pub(crate) fn decode_sync_v2_proto_message(
+pub(crate) fn proto_attach_to_json(att: &ParsedProtoAttach) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(ref t) = att.attach_type {
+        if !t.is_empty() {
+            obj.insert("type".into(), serde_json::json!(t));
+        }
+    }
+    if let Some(ref a) = att.action {
+        if !a.is_empty() {
+            obj.insert("action".into(), serde_json::json!(a));
+        }
+    }
+    if let Some(ref t) = att.title {
+        if !t.is_empty() {
+            obj.insert("title".into(), serde_json::json!(t));
+        }
+    }
+    if let Some(ref d) = att.description {
+        if !d.is_empty() {
+            obj.insert("description".into(), serde_json::json!(d));
+        }
+    }
+    if let Some(ref th) = att.thumb {
+        if !th.is_empty() {
+            obj.insert("thumb".into(), serde_json::json!(th));
+        }
+    }
+    if let Some(ref hr) = att.href {
+        if !hr.is_empty() {
+            obj.insert("href".into(), serde_json::json!(hr));
+        }
+    }
+    if let Some(ref p) = att.params {
+        if !p.is_empty() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(p) {
+                obj.insert("params".into(), v);
+            } else {
+                obj.insert("params".into(), serde_json::json!(p));
+            }
+        }
+    }
+    if let Some(ref ext) = att.ext_info {
+        if !ext.is_empty() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(ext) {
+                if v.get("zinstant_msg").is_some() {
+                    if let Some(zm) = v.get("zinstant_msg") {
+                        obj.insert("zinstant_msg".into(), zm.clone());
+                    }
+                } else {
+                    obj.insert("extInfo".into(), v);
+                }
+            }
+        }
+    }
+    if let Some(ref rem) = att.remains {
+        if !rem.is_empty() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(rem) {
+                if v.get("zinstant_msg").is_some() && !obj.contains_key("zinstant_msg") {
+                    if let Some(zm) = v.get("zinstant_msg") {
+                        obj.insert("zinstant_msg".into(), zm.clone());
+                    }
+                }
+                obj.insert("remains".into(), v);
+            } else {
+                obj.insert("remains".into(), serde_json::json!(rem));
+            }
+        }
+    }
+    serde_json::Value::Object(obj)
+}
+
+fn extract_sync_v2_oa_card(
+    msg_type: i32,
+    msg_type_str: &str,
+    raw_content: &str,
+    attaches: &[ParsedProtoAttach],
+) -> Option<crate::chat::OaRichCard> {
+    if matches!(
+        msg_type,
+        2 | 3 | 4 | 6 | 10 | 18 | 19 | 20 | 22 | 23 | 25 | 26 | 31 | 33 | 36
+    ) {
+        return None;
+    }
+    let trimmed = raw_content.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(card) = crate::chat::extract_oa_rich_card(msg_type_str, Some(&v)) {
+                return Some(card);
+            }
+        }
+    }
+    if attaches.is_empty() {
+        return None;
+    }
+    if msg_type == 15 || attaches.len() > 1 {
+        let arr = serde_json::Value::Array(attaches.iter().map(proto_attach_to_json).collect());
+        if let Some(card) = crate::chat::extract_oa_rich_card(msg_type_str, Some(&arr)) {
+            return Some(card);
+        }
+    }
+    let single = proto_attach_to_json(&attaches[0]);
+    crate::chat::extract_oa_rich_card(msg_type_str, Some(&single))
+}
+
+fn decode_sync_v2_proto_message(
     m: ParsedProtoMsg,
     thread_id: &str,
     uin: &str,
@@ -1831,11 +2316,15 @@ pub(crate) fn decode_sync_v2_proto_message(
     };
 
     let mut text = m.content;
+    let attaches = m.attaches;
+    let raw_content_snapshot = text.clone();
     let mut raw_meta = serde_json::Map::new();
-    let att_opt = m.attaches.into_iter().next();
+    let att_opt = attaches.first().cloned();
+    let mut is_call_bubble = false;
 
     if let Some(ref att) = att_opt {
         if is_sync_v2_call_attach(att, &text) {
+            is_call_bubble = true;
             let (call_txt, is_video, dur_opt) = format_sync_v2_call_text(
                 &text,
                 att.action.as_deref(),
@@ -2102,6 +2591,36 @@ pub(crate) fn decode_sync_v2_proto_message(
         text = "[Video]".into();
     }
 
+    if !is_call_bubble && msg_type_str != "chat.ecall" {
+        if let Some(card) = extract_sync_v2_oa_card(
+            m.msg_type,
+            msg_type_str,
+            &raw_content_snapshot,
+            &attaches,
+        ) {
+            if let Ok(val) = serde_json::to_value(&card) {
+                raw_meta.insert("oa_card".into(), val);
+            }
+            let t_trim = text.trim();
+            if t_trim.is_empty() || t_trim.starts_with('[') || t_trim.starts_with('{') {
+                if let Some(fallback_title) = card
+                    .title
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        card.items
+                            .first()
+                            .map(|i| i.title.as_str())
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| card.description.as_deref().filter(|s| !s.is_empty()))
+                {
+                    text = fallback_title.to_string();
+                }
+            }
+        }
+    }
+
     if let Some(q) = m.quote {
         let q_id = if !q.global_msg_id.is_empty() && q.global_msg_id != "0" {
             Some(q.global_msg_id)
@@ -2197,10 +2716,12 @@ pub(crate) async fn import_sync_v2_messages_inner(
     let db_path = crate::store::db_path_for_account(&uin);
     let mut store = crate::store::MessageStore::open(&db_path)?;
     let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
-    let mut cached_threads = crate::chat::load_threads_cache();
+    let mut cached_threads = crate::chat::load_threads_cache_for(&uin);
 
     let mut imported = 0;
     for part in partitions {
+        let part_msg_count = part.messages.len();
+        let mut part_oa_cards = 0usize;
         let (mut thread_id, is_group_hint) = map_sync_v2_partition_id(&part.id);
         let thread_known = cached_threads.iter().any(|t| t.id == thread_id);
         if !thread_known && is_group_hint != Some(true) {
@@ -2227,6 +2748,23 @@ pub(crate) async fn import_sync_v2_messages_inner(
             .map(|t| t.name.clone())
             .unwrap_or_default();
         for m in part.messages {
+            let mt_num = m.msg_type;
+            let att_len = m.attaches.len();
+            let content_len = m.content.len();
+            let att0_diag = m
+                .attaches
+                .first()
+                .map(|a| {
+                    format!(
+                        "t={:?} act={:?} p={} e={} r={}",
+                        a.attach_type,
+                        a.action,
+                        a.params.as_ref().map_or(0, String::len),
+                        a.ext_info.as_ref().map_or(0, String::len),
+                        a.remains.as_ref().map_or(0, String::len)
+                    )
+                })
+                .unwrap_or_default();
             let sm = decode_sync_v2_proto_message(
                 m,
                 &thread_id,
@@ -2234,15 +2772,27 @@ pub(crate) async fn import_sync_v2_messages_inner(
                 &my_name,
                 &peer_thread_name,
             );
+            if sm.raw_json.contains("oa_card") {
+                part_oa_cards += 1;
+            } else if sm.raw_json.is_empty() && (mt_num != 0 || att_len > 0) {
+                crate::logger::log_sync(&format!(
+                    "v2_empty_raw tid={} mid={} mt={} clen={} atts={} {}",
+                    thread_id, sm.msg_id, mt_num, content_len, att_len, att0_diag
+                ));
+            }
 
             if store.upsert_message(&sm).unwrap_or(false) {
                 imported += 1;
             }
         }
+        crate::logger::log_sync(&format!(
+            "v2_part part={} -> tid={} msgs={} oa_cards={}",
+            part.id, thread_id, part_msg_count, part_oa_cards
+        ));
     }
 
     let _ = store.hydrate_threads(&mut cached_threads, 50);
-    crate::chat::save_threads_cache(&cached_threads);
+    crate::chat::save_threads_cache_for(&uin, &cached_threads);
 
     // Không xoá `SYNC_V2_SESSIONS` ngay tại `is_last == true` vì các gói upload
     // song song có thể tới trễ hơn gói `isLast=1` vài trăm ms; việc dọn session
@@ -2276,6 +2826,24 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn history_sync_requires_an_advancing_cursor_when_more_pages_exist() {
+        assert_eq!(require_next_cursor(Some("20".into()), "10").unwrap(), "20");
+        assert!(require_next_cursor(None, "10").is_err());
+        assert!(require_next_cursor(Some("10".into()), "10").is_err());
+    }
+
+    #[test]
+    fn sync_error_summary_does_not_expose_session_details() {
+        let error: anyhow::Error = crate::session::SessionError::new(600, "private message")
+            .at("https://example.test/?params=private-token")
+            .into();
+
+        let summary = sync_error_summary(&error);
+        assert_eq!(summary, "Zalo trả mã lỗi 600");
+        assert!(!summary.contains("private"));
     }
 
     #[test]
@@ -2428,6 +2996,19 @@ mod tests {
     }
 
     #[test]
+    fn backup_v1_url_dedup_and_reset_work() {
+        assert!(!mark_backup_url_seen("   "));
+        assert!(mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
+        assert!(!mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
+        set_latest_mobile_temp_key("tmp_k");
+        set_last_mobile_sync_status(Some("ok".into()));
+        reset_for_account_switch();
+        assert_eq!(latest_mobile_temp_key(), "");
+        assert_eq!(last_mobile_sync_status(), None);
+        assert!(mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
+    }
+
+    #[test]
     fn sync_v2_call_bubbles_and_archive_msg_types_decode_accurately() {
         // 1. Incoming answered voice call with bare "0:18" duration and sendBubbleMessage
         let call_in = decode_sync_v2_proto_message(
@@ -2548,5 +3129,95 @@ mod tests {
         );
         assert_eq!(sys_pin.msg_type, "chat.system");
         assert_eq!(sys_pin.text, "Đtc đã ghim tin nhắn hi.");
+    }
+
+    #[test]
+    fn sync_v2_oa_list_action_and_webcontent_preserve_oa_card() {
+        let oa_list = decode_sync_v2_proto_message(
+            ParsedProtoMsg {
+                sender_id: "6091808854554923872".into(),
+                global_id: "oa1".into(),
+                msg_type: 15,
+                timestamp: 1_794_571_926_938,
+                content: String::new(),
+                attaches: vec![
+                    ParsedProtoAttach {
+                        attach_type: Some("l.a.header.full".into()),
+                        title: Some("⚡Siêu Ưu Đãi: Mua 1 Tặng 1".into()),
+                        description: Some("Ưu đãi độc quyền zStyle".into()),
+                        thumb: Some("https://cdn.zalo.me/zstyle_banner.jpg".into()),
+                        href: Some("https://zalo.me/zstyle/promo".into()),
+                        ..Default::default()
+                    },
+                    ParsedProtoAttach {
+                        attach_type: Some("l.a.child.full".into()),
+                        title: Some("Gói chủ đề mới".into()),
+                        description: Some("Áp dụng hôm nay".into()),
+                        thumb: Some("https://cdn.zalo.me/zstyle_item1.jpg".into()),
+                        href: Some("https://zalo.me/zstyle/theme".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            "6091808854554923872",
+            "me_99",
+            "Tôi",
+            "zStyle – Phong cách Zalo",
+        );
+        assert_eq!(oa_list.msg_type, "chat.list.action");
+        assert!(oa_list.raw_json.contains("oa_card"));
+        assert!(oa_list.raw_json.contains("Gói chủ đề mới"));
+        assert!(oa_list.raw_json.contains("https://cdn.zalo.me/zstyle_banner.jpg"));
+
+        let webcontent = decode_sync_v2_proto_message(
+            ParsedProtoMsg {
+                sender_id: "5128600805588494022".into(),
+                global_id: "wc1".into(),
+                msg_type: 53,
+                timestamp: 1_795_306_210_316,
+                content: "Chúc một ngày tốt lành, thời tiết TP. Hà Nội hôm nay 22/11: Nhiều mây.".into(),
+                attaches: vec![ParsedProtoAttach {
+                    thumb: Some("https://cdn.zalo.me/weather_banner.jpg".into()),
+                    title: Some("TP. Hà Nội 19° - 25°".into()),
+                    params: Some(r#"{"zinstant_msg":{"elements":[{"type":"article","title":"Tin ngày 22/11","thumb":"https://cdn.zalo.me/news1.jpg","href":"https://zalo.me/news1"}],"actions":[{"label":"LỊCH ÂM","href":"https://zalo.me/licham"}]}}"#.into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            "5128600805588494022",
+            "me_99",
+            "Tôi",
+            "Thời Tiết",
+        );
+        assert_eq!(webcontent.msg_type, "chat.webcontent.v2");
+        assert!(webcontent.raw_json.contains("oa_card"));
+        assert!(webcontent.raw_json.contains("https://cdn.zalo.me/weather_banner.jpg"));
+        assert!(webcontent.raw_json.contains("Tin ngày 22/11"));
+        assert!(webcontent.raw_json.contains("LỊCH ÂM"));
+    }
+
+    #[test]
+    fn sync_v2_out_of_order_last_batch_completes_when_inflight_drains() {
+        reset_sync_v2_imported_count();
+        assert!(!is_sync_v2_last_seen());
+        assert_eq!(sync_v2_inflight_count(), 0);
+
+        let batch_a = SyncV2InflightGuard::enter();
+        let batch_b = SyncV2InflightGuard::enter();
+        assert_eq!(sync_v2_inflight_count(), 2);
+
+        mark_sync_v2_last_seen();
+        drop(batch_a);
+        assert!(is_sync_v2_last_seen());
+        assert_eq!(sync_v2_inflight_count(), 1);
+
+        drop(batch_b);
+        assert!(is_sync_v2_last_seen());
+        assert_eq!(sync_v2_inflight_count(), 0);
+
+        reset_sync_v2_imported_count();
+        assert!(!is_sync_v2_last_seen());
+        assert_eq!(sync_v2_inflight_count(), 0);
     }
 }
