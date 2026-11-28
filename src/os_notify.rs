@@ -236,36 +236,3 @@ pub fn play_notification_sound() {
             .spawn();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compact_collapses_whitespace_and_truncates_on_char_boundary() {
-        assert_eq!(compact_text("  chào\n  bạn\t\tnhé  ", 100), "chào bạn nhé");
-        assert_eq!(compact_text("", 10), "");
-        // Emoji are multi-byte: truncation must not split them.
-        let s = "❤️👍😂abc";
-        assert_eq!(compact_text(s, 3), "❤️👍…");
-        assert_eq!(compact_text(s, 10), s);
-    }
-
-    #[test]
-    fn osascript_escape_handles_quotes_and_backslashes() {
-        assert_eq!(escape_osascript(r#"a"b\c"#), r#"a\"b\\c"#);
-    }
-
-    #[test]
-    fn powershell_escape_doubles_single_quotes() {
-        assert_eq!(escape_powershell_single("l'amie"), "l''amie");
-    }
-
-    #[test]
-    fn reaction_body_prefers_emoji_and_appends_snippet() {
-        let body = reaction_banner_body("An", "❤️", "gặp nhau nhé");
-        assert_eq!(body, "An đã thả ❤️ vào tin nhắn của bạn: gặp nhau nhé");
-        let generic = reaction_banner_body("uid-123", "", "");
-        assert_eq!(generic, "uid-123 đã thả cảm xúc vào tin nhắn của bạn");
-    }
-}

@@ -433,7 +433,6 @@ async fn call(s: &Session, uid: &str, video: bool, zrtp: bool, secs: f64) -> Res
     //      allocates the call record and returns the relay list,
     //   2. a second `requestcall` carrying the media description built from *that* relay
     //      (`{callId, calleeId, codec, extendData, rtcpAddress, rtpAddress, session}`),
-    //   3. `request` (416) with `subCommand:3`.
     // Only the media-carrying 401 upgrades the callee invite (`params.status=0` + full
     // `extendData`). A 401 carrying a relay cached from a previous call leaves the invite
     // degraded (`status=5`, empty `extendData`) and the callee's `answer` (402) fails `-101`.

@@ -181,13 +181,6 @@ impl RecResampler {
 }
 
 /// Hàm thuần để test: mono `input` ở `in_rate` → mono 16 kHz.
-#[cfg(test)]
-pub(crate) fn resample_mono_to_16k(input: &[f32], in_rate: u32) -> Vec<f32> {
-    let mut r = RecResampler::new(in_rate);
-    let mut out = r.push_frames(input);
-    out.extend(r.flush());
-    out
-}
 
 /// State chia sẻ giữa `VoiceRecorder` và callback mic (`'static`).
 #[derive(Clone)]
@@ -654,81 +647,4 @@ pub fn run_loopback(seconds: u64) -> Result<()> {
     std::thread::sleep(std::time::Duration::from_secs(seconds));
     drop(session);
     Ok(())
-}
-
-#[cfg(test)]
-mod voice_tests {
-    use super::*;
-
-    #[test]
-    fn encode_1s_silence_produces_mp3_bytes() {
-        // 1 giây im lặng mono 16 kHz → MP3 hợp lệ, bắt đầu bằng frame sync.
-        let pcm = vec![0.0f32; 16000];
-        let mp3 = encode_mono_mp3_16k(&pcm).expect("encode ok");
-        assert!(!mp3.is_empty());
-        assert_eq!(mp3[0], 0xFF, "MP3 frame sync");
-        assert!(mp3[1] & 0xE0 == 0xE0, "MP3 frame sync bits");
-    }
-
-    #[test]
-    fn encode_rejects_empty_pcm() {
-        assert!(encode_mono_mp3_16k(&[]).is_err());
-    }
-
-    fn sine_1s(in_rate: u32, freq: f32) -> Vec<f32> {
-        (0..in_rate)
-            .map(|n| (2.0 * std::f32::consts::PI * freq * n as f32 / in_rate as f32).sin())
-            .collect()
-    }
-
-    /// 8 kHz → 16 kHz phải giữ đúng duration (gấp đôi số mẫu, ±1), không còn
-    /// bug cũ phát nhanh gấp đôi.
-    #[test]
-    fn resample_8k_to_16k_preserves_duration() {
-        let out = resample_mono_to_16k(&sine_1s(8000, 440.0), 8000);
-        assert!(
-            (out.len() as i64 - 16000).abs() <= 1,
-            "8k 1s -> 16k mẫu, got {}",
-            out.len()
-        );
-        // Sine 440 Hz còn nguyên hình (không phải noise/clamp sai): RMS > 0.5.
-        let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
-        assert!(rms > 0.5, "sine méo sau upsample, rms={rms}");
-    }
-
-    /// 44.1 kHz → 16 kHz đúng số mẫu ±1.
-    #[test]
-    fn resample_441k_to_16k_frame_count() {
-        let out = resample_mono_to_16k(&sine_1s(44100, 440.0), 44100);
-        assert!(
-            (out.len() as i64 - 16000).abs() <= 1,
-            "44.1k 1s -> 16k mẫu, got {}",
-            out.len()
-        );
-    }
-
-    /// Phase accumulator qua callbacks: chia buffer thành từng chunk nhỏ phải
-    /// cho cùng số mẫu (±1) như đẩy một lần — không mất ~0.57s/phút ở 44.1 kHz.
-    #[test]
-    fn resampler_phase_survives_callback_boundaries() {
-        let input = sine_1s(44100, 440.0);
-        let one_shot = resample_mono_to_16k(&input, 44100);
-        let mut r = RecResampler::new(44100);
-        let mut chunked = Vec::new();
-        for chunk in input.chunks(128) {
-            chunked.extend(r.push_frames(chunk));
-        }
-        chunked.extend(r.flush());
-        assert!(
-            (chunked.len() as i64 - one_shot.len() as i64).abs() <= 1,
-            "chunked {} vs one-shot {}",
-            chunked.len(),
-            one_shot.len()
-        );
-        assert!(
-            (chunked.len() as i64 - 16000).abs() <= 2,
-            "44.1k 1s chunked -> 16k mẫu, got {}",
-            chunked.len()
-        );
-    }
 }

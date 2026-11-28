@@ -150,7 +150,6 @@ fn main() -> anyhow::Result<()> {
         println!("decrypt failed with enk={}", zalo_rust::session::redact_secret(&enk));
     }
 
-    // 3. Show what zcid encodes.
     if let Some(zcid) = f.get("zcid") {
         if let Some(pt) = aes_decrypt_hex(b"3FC4F0D2AB50057BCE0D90D9187A22B1", zcid) {
             println!("\n=== zcid plaintext ===\n{pt}");

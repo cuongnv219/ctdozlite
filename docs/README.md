@@ -13,6 +13,8 @@ Thư mục này chứa tài liệu chi tiết về cách sử dụng, cấu trú
 | [3. Kiến trúc hệ thống](KIEN_TRUC_HE_THONG.md) | Mô hình phân tách UI thread / Tokio worker, đồng bộ WebSocket + HTTP polling và lưu trữ SQLite. |
 | [4. Đặc tả giao thức Zalo](GIAO_THUC_ZALO.md) | Cấu trúc tham số `zpw_ver=694`, `ParamCipher v2`, `PasswordCipher`, `signkey` và cơ chế mã hóa AES. |
 | [5. Xử lý sự cố](KHAC_PHUC_SU_CO.md) | Bảng mã lỗi máy chủ Zalo (`18012`, `18060`, `18022`, `600`, `102`, `114`, `429`) và cách khắc phục. |
+| [6. Danh sách kiểm chứng](FEATURE_CHECKLIST.md) | Checklist cổng invariants (`R1`–`R8`), đăng nhập, media sizing, UI responsive & bảo mật. |
+| [7. Cầu nối Telegram ↔ Zalo](CAU_TELEGRAM_ZALO.md) | Hướng dẫn cấu hình đồng bộ tin nhắn hai chiều giữa Telegram Bot và Zalo. |
 
 ## Tiêu chuẩn kỹ thuật (Engineering Standards)
 
@@ -38,13 +40,13 @@ cd ctdozlite
 cargo build --release
 
 # Chạy giao diện đồ họa (mặc định)
-./target/release/zalo-rust --gui
+./target/release/ctdozlite --gui
 
 # Chạy giao diện terminal
-./target/release/zalo-rust --tui --qr
+./target/release/ctdozlite --tui --qr
 
 # Bật thêm bảng kiểm tra mạng (Dev Inspector)
-./target/release/zalo-rust --gui --dev
+./target/release/ctdozlite --gui --dev
 ```
 
 ## Xây dựng trang tài liệu

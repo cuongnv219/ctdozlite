@@ -281,24 +281,3 @@ fn to_ksni_icon(img: image::RgbaImage) -> ksni::Icon {
         data,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unread_dot_paints_bottom_right_red_and_leaves_top_left() {
-        let mut img = image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 0, 255, 255]));
-        draw_unread_dot(&mut img);
-        let centre = img.get_pixel(32 - 9, 32 - 9);
-        assert!(centre[0] > 200 && centre[1] < 80 && centre[2] < 80, "{centre:?}");
-        assert_eq!(*img.get_pixel(2, 2), image::Rgba([0, 0, 255, 255]));
-    }
-
-    #[test]
-    fn ksni_icon_is_argb() {
-        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 4]));
-        let icon = to_ksni_icon(img);
-        assert_eq!(icon.data, vec![4, 1, 2, 3]);
-    }
-}

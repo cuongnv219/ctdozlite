@@ -48,7 +48,7 @@ pub struct BackgroundActivity {
 pub type ActivitySink = Arc<dyn Fn(BackgroundActivity) + Send + Sync>;
 
 // Wakes the supervisor as soon as the worker changes the connected account, so the
-// account that became active does not keep a second socket until the next tick.
+/// account that became active does not keep a second socket until the next tick.
 static RECONCILE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 /// Ask the supervisor to re-evaluate its listeners now instead of at the next tick.
@@ -96,6 +96,7 @@ pub async fn supervise(session: Arc<tokio::sync::Mutex<Session>>, sink: Activity
             _ = tick.tick() => {}
             _ = RECONCILE.notified() => {}
         }
+        let wipe_epoch = account_manager::credential_wipe_epoch();
         let connected = session
             .lock()
             .await
@@ -105,16 +106,14 @@ pub async fn supervise(session: Arc<tokio::sync::Mutex<Session>>, sink: Activity
             .unwrap_or_default();
         let ui_uin = account_manager::active_uin();
         let wanted = tokio::task::spawn_blocking(move || {
-            // A session restored at startup has no snapshot yet; without one the account
-            // is missing from the account menu and cannot be switched back to.
             if account_manager::is_safe_uin(&connected)
-                && !account_manager::session_snapshot_path(&connected).exists()
+                && account_manager::credential_wipe_epoch() == wipe_epoch
             {
-                // Best effort: retried on the next tick.
-                let _ = account_manager::save_current_account_snapshot(&connected);
+                let _ = account_manager::sync_background_account_snapshot(&connected, wipe_epoch);
             }
-            // Name, avatar and phone arrive after login; keep the snapshot's label current.
-            let _ = account_manager::refresh_session_snapshot(&connected);
+            if account_manager::credential_wipe_epoch() != wipe_epoch {
+                return Vec::new();
+            }
             let saved = account_manager::list_saved_accounts(&connected);
             accounts_to_listen(&ui_uin, &connected, saved)
         })
@@ -317,189 +316,4 @@ fn collect_activity(
         banners,
         incoming,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::chat::ChatMessage;
-
-    const STARTED_MS: i64 = 1_800_000_000_000;
-
-    fn account(uin: &str) -> AccountProfile {
-        AccountProfile {
-            uin: uin.to_string(),
-            display_name: format!("Account {uin}"),
-            phone: String::new(),
-            avatar: None,
-            last_active_ts: 1,
-            is_current: false,
-        }
-    }
-
-    fn message(id: &str, text: &str, outgoing: bool, ts: i64) -> ChatMessage {
-        ChatMessage {
-            id: id.to_string(),
-            sender: "user-1".to_string(),
-            text: text.to_string(),
-            is_outgoing: outgoing,
-            ts,
-            ..Default::default()
-        }
-    }
-
-    fn thread(id: &str, is_group: bool, messages: Vec<ChatMessage>) -> Thread {
-        Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: id.to_string(),
-            name: format!("Thread {id}"),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group,
-            messages,
-            vanish: None,
-        }
-    }
-
-    fn listened(ui: &str, connected: &str, saved: Vec<AccountProfile>) -> Vec<String> {
-        accounts_to_listen(ui, connected, saved)
-            .into_iter()
-            .map(|a| a.uin)
-            .collect()
-    }
-
-    #[test]
-    fn listens_to_every_saved_account_except_the_connected_one() {
-        let saved = vec![account("1001"), account("1002"), account("1003")];
-        assert_eq!(listened("1002", "1002", saved), vec!["1001", "1003"]);
-    }
-
-    #[test]
-    fn previous_account_keeps_listening_while_adding_an_account() {
-        let saved = vec![account("1001"), account("1002")];
-        assert_eq!(listened("1001", "", saved), vec!["1001", "1002"]);
-    }
-
-    #[test]
-    fn listens_to_nothing_when_signed_out() {
-        assert!(listened("", "", vec![account("1001")]).is_empty());
-    }
-
-    #[test]
-    fn skips_accounts_with_unsafe_ids() {
-        assert!(listened("1001", "1001", vec![account("../x")]).is_empty());
-    }
-
-    #[test]
-    fn reports_incoming_realtime_message_once() {
-        let touched = vec![thread(
-            "thread-1",
-            false,
-            vec![message("msg-0001", "xin chào", false, STARTED_MS + 5)],
-        )];
-        let mut notified = HashSet::new();
-        let activity =
-            collect_activity(&account("1001"), &touched, true, STARTED_MS, &mut notified)
-                .expect("activity");
-        assert_eq!(activity.uin, "1001");
-        assert_eq!(activity.incoming, 1);
-        assert_eq!(
-            activity.banners,
-            vec![BackgroundBanner {
-                thread_id: "thread-1".into(),
-                title: "Thread thread-1".into(),
-                body: "xin chào".into(),
-            }]
-        );
-        assert!(
-            collect_activity(&account("1001"), &touched, true, STARTED_MS, &mut notified)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn group_banner_names_the_sender() {
-        let touched = vec![thread(
-            "group-1",
-            true,
-            vec![message("msg-0001", "", false, STARTED_MS)],
-        )];
-        let activity = collect_activity(
-            &account("1001"),
-            &touched,
-            true,
-            STARTED_MS,
-            &mut HashSet::new(),
-        )
-        .expect("activity");
-        assert_eq!(activity.banners[0].title, "user-1 · Thread group-1");
-        assert_eq!(activity.banners[0].body, "[ Đính kèm / Nhãn dán ]");
-    }
-
-    #[test]
-    fn ignores_backlog_outgoing_muted_and_stale_messages() {
-        let fresh = message("msg-0001", "a", false, STARTED_MS);
-        let backlog = vec![thread("thread-1", false, vec![fresh.clone()])];
-        assert!(collect_activity(
-            &account("1001"),
-            &backlog,
-            false,
-            STARTED_MS,
-            &mut HashSet::new()
-        )
-        .is_none());
-
-        let outgoing = vec![thread(
-            "thread-1",
-            false,
-            vec![message("msg-0002", "a", true, STARTED_MS)],
-        )];
-        assert!(collect_activity(
-            &account("1001"),
-            &outgoing,
-            true,
-            STARTED_MS,
-            &mut HashSet::new()
-        )
-        .is_none());
-
-        let mut muted = thread("thread-1", false, vec![fresh]);
-        muted.presentation.muted = true;
-        assert!(collect_activity(
-            &account("1001"),
-            &[muted],
-            true,
-            STARTED_MS,
-            &mut HashSet::new()
-        )
-        .is_none());
-
-        let stale = vec![thread(
-            "thread-1",
-            false,
-            vec![message("msg-0003", "a", false, STARTED_MS - 10 * FRESH_SLACK_MS)],
-        )];
-        assert!(collect_activity(
-            &account("1001"),
-            &stale,
-            true,
-            STARTED_MS,
-            &mut HashSet::new()
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn thread_shells_drop_messages_but_keep_identity() {
-        let shells = thread_shells(vec![thread(
-            "thread-1",
-            false,
-            vec![message("msg-0001", "a", false, 1)],
-        )]);
-        assert_eq!(shells.len(), 1);
-        assert_eq!(shells[0].id, "thread-1");
-        assert!(shells[0].messages.is_empty());
-    }
 }

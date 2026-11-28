@@ -491,7 +491,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag_name }}
-          name: ctdozlite ${{ needs.prepare.outputs.tag_name }} — Dual Sync iOS/Android (#155, #200), Tối ưu RAM & Cài đặt (#183, #196, #199), Linux Tray, Twemoji & Bình chọn nhóm
+          name: ctdozlite ${{ needs.prepare.outputs.tag_name }} — Khóa ứng dụng PIN4, Quản lý bộ nhớ, Windows Tray (#213), Media Sizing (#192), Thả tim nhanh & @Mention (#174)
           files: release_assets/*
           generate_release_notes: true
           body: |
@@ -499,14 +499,14 @@ jobs:
             >
             > Chọn đúng gói trong mục **Assets** bên dưới cho hệ điều hành của bạn (hỗ trợ Linux `.deb`/`.rpm`/`.AppImage`/`.tar.gz`, Windows `.exe`, và macOS `.dmg` cho cả **Apple Silicon M1/M2/M3/M4 `arm64`**, **Mac Intel `x86_64`** & **Universal**).
 
-            ### 🐛 Sửa lỗi & Đồng bộ di động trong ${{ needs.prepare.outputs.tag_name }}
-            - **Dual Sync iOS V2 + tự động chuyển Android V1 ([#155](https://github.com/ctdoteam1110/ctdozlite/issues/155), [#200](https://github.com/ctdoteam1110/ctdozlite/issues/200)):** Thử Sync V2 (`cmd 590`) trước 5,5 giây và tự động dọn phiên (`cmd 591`) chuyển sang Sync V1 (`pull_mobile_msg` `cmd 12000`) nếu điện thoại Android không phản hồi; đồng thời đệm các khung WebSocket gửi đi trước khi `authed` hoàn tất để khắc phục lỗi vừa mở app bấm đồng bộ bị kẹt ở `10%`, và loại bỏ lệnh HTTP `12888` cũ.
-            - **Tối ưu RAM, CPU & giảm luồng hệ thống ([#183](https://github.com/ctdoteam1110/ctdozlite/issues/183)):** Bảo vệ các texture đang hiển thị trên khung hình (`ResourceLru` 64 MB), giới hạn kích thước giải mã ảnh (`128px` avatar / `720px` thường / `2048px` HD) và đồng thời tải sticker (`Semaphore(4)`), loại bỏ Tokio runtime thừa ở chế độ GUI (-39% thread), và ghi stacktrace/`UNEXPECTED_EXIT` vào `crash.log`.
-            - **Mở Cài đặt tức thì không khựng:** Quét thiết bị micro/camera nền không chặn UI, bỏ chụp màn hình + làm mờ CPU đồng bộ khi mở Cài đặt và hiển thị đúng modal Cài đặt ngay cả khi đang ở tab Danh bạ.
-            - **Sửa lỗi tắt thông báo hội thoại ([#199](https://github.com/ctdoteam1110/ctdozlite/issues/199)), gửi ảnh trong Mini App ([#196](https://github.com/ctdoteam1110/ctdozlite/issues/196)), thu hồi tin nhắn gửi đi & cô lập snapshot đa tài khoản.**
+            ### ✨ Tính năng mới & Đóng góp cộng đồng trong ${{ needs.prepare.outputs.tag_name }}
+            - **Khóa ứng dụng bằng mã PIN 4 số (App Lock) ([#110](https://github.com/ctdoteam1110/ctdozlite/issues/110), [#211](https://github.com/ctdoteam1110/ctdozlite/issues/211)):** Bổ sung màn hình khóa PIN 4 số (`Ctrl+L`), modal thiết lập nhanh, tự khóa khi rảnh/ngủ máy, ẩn nội dung thông báo khi khóa, cách ly cuộc gọi đến và sửa con trỏ nhập nhanh 4 ô PIN.
+            - **Trình quản lý bộ nhớ 3 tầng (Storage Manager):** Quét và tách dung lượng dữ liệu gốc, media, bộ đệm và tệp hệ thống; hỗ trợ dọn dẹp an toàn và di chuyển thư mục lưu trữ (`relocate_storage_root`), đồng thời chuyển toàn bộ bộ kiểm thử vào `tests/`.
+            - **Windows Close-to-Tray ([PR #213](https://github.com/ctdoteam1110/ctdozlite/pull/213)):** Cho phép đóng cửa sổ thu gọn xuống khay hệ thống Windows kèm thông báo tray ẩn nội dung khi khóa và sửa lưu `app_settings.json` trước khi đăng nhập.
+            - **Nút thả tim nhanh (`❤️`) & `@mention` UTF-16 ([PR #174](https://github.com/ctdoteam1110/ctdozlite/pull/174)):** Thêm nút thả tim trực tiếp trên thanh hover tin nhắn, tô sáng chính xác `@mention` theo `pos`/`len` UTF-16 kèm kiểm tra ranh giới từ và fallback 5 từ tiếng Việt.
+            - **Single-Instance GUI theo thư mục dữ liệu ([PR #182](https://github.com/ctdoteam1110/ctdozlite/pull/182)):** Chặn mở trùng cửa sổ GUI trên Linux/macOS và tự bật lại cửa sổ đang chạy.
 
-            ### ✨ Tính năng & Đóng góp cộng đồng hợp nhất
-            - **Linux XDG Data Dir & System Tray Icon ([PR #168](https://github.com/ctdoteam1110/ctdozlite/pull/168), [PR #166](https://github.com/ctdoteam1110/ctdozlite/pull/166)):** Lưu dữ liệu tại `$XDG_DATA_HOME/ctdozlite` kèm di trú tự động; thêm icon khay hệ thống có chấm đỏ tin chưa đọc.
-            - **Thẻ bình chọn nhóm (Group Polls) ([PR #193](https://github.com/ctdoteam1110/ctdozlite/pull/193)), Emoji màu Twemoji ([PR #189](https://github.com/ctdoteam1110/ctdozlite/pull/189)) & Font Open Sans ([PR #180](https://github.com/ctdoteam1110/ctdozlite/pull/180)).**
-            - **Lưu ảnh/video về thư mục `Downloads` ([PR #167](https://github.com/ctdoteam1110/ctdozlite/pull/167)), Trình duyệt ảnh hội thoại ([PR #177](https://github.com/ctdoteam1110/ctdozlite/pull/177)), Dán ảnh `Ctrl+V` ([PR #165](https://github.com/ctdoteam1110/ctdozlite/pull/165)), Avatar khử răng cưa & emoticon `/-code` ([PR #169](https://github.com/ctdoteam1110/ctdozlite/pull/169)), Menu chuột phải không viền ([PR #173](https://github.com/ctdoteam1110/ctdozlite/pull/173)) & Báo đồng bộ chưa đầy đủ ([PR #162](https://github.com/ctdoteam1110/ctdozlite/pull/162)).**
-            - **Cải thiện độ ổn định Windows CI & bộ kiểm tra invariant tự động (`scripts/check_invariants.py`).**
+            ### 🐛 Sửa lỗi & Ổn định đa nền tảng
+            - **Giữ kích thước & tỷ lệ media + Vanish Tombstone ([PR #192](https://github.com/ctdoteam1110/ctdozlite/pull/192)):** Lưu `media_size` vào SQLite, giữ đúng tỷ lệ ảnh/video/sticker/link tránh nhảy thanh cuộn và gia cố `VANISH_TOMBSTONE_JSON`.
+            - **Tương thích Linux Wayland & macOS ([PR #207](https://github.com/ctdoteam1110/ctdozlite/pull/207), [PR #208](https://github.com/ctdoteam1110/ctdozlite/pull/208)):** Thoát sạch khi đóng cửa sổ trên Wayland và chỉ bật corner popup tùy chỉnh trên Windows để Linux/macOS dùng thông báo gốc OS.
+            - **Khắc phục deadlock, flicker & hiển thị ([#156](https://github.com/ctdoteam1110/ctdozlite/issues/156), [#203](https://github.com/ctdoteam1110/ctdozlite/issues/203), [#205](https://github.com/ctdoteam1110/ctdozlite/issues/205), [#206](https://github.com/ctdoteam1110/ctdozlite/issues/206)):** Sửa deadlock double-click reply, menu chuột phải, nhấp nháy cuộn & texture thrash; chuẩn hóa tỷ lệ ảnh + tác giả Feed, nhãn trích dẫn media, mute ID nhóm, FFmpeg Windows & texture video cuộc gọi.

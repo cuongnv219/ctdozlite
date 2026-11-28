@@ -545,6 +545,9 @@ pub enum WorkerCmd {
         expected_sha256: Option<String>,
     },
     Logout,
+    /// Clear active credentials, `app_lock.json`, and all multi-account session snapshots,
+    /// then sign out without preserving credentials (`Forgot passcode` flow).
+    ForgetLockAndSignOutAll,
     /// Delete local message data (`zalo_history.db` + `threads_cache.json`) without
     /// touching credentials. Separate from [`WorkerCmd::Logout`] by design (#21).
     WipeLocalData,
@@ -667,6 +670,31 @@ pub(super) static WORKER_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSen
 static QR_LOGIN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Cached idle auto-lock timeout in seconds (`0` suppresses non-wake watchdog repaints).
+static IDLE_LOCK_TIMEOUT_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Update the worker watchdog's cached idle auto-lock timeout (`0` disables idle ticks).
+pub(super) fn set_idle_lock_timeout_secs(secs: u64) {
+    IDLE_LOCK_TIMEOUT_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Monotonic generation counter bumped whenever poll cursors are reset or a new login starts.
+static POLL_RESET_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Increment and return the current poll-cursor reset generation.
+fn bump_poll_reset_epoch() -> u64 {
+    POLL_RESET_EPOCH
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1)
+}
+
+/// Return the current poll-cursor reset generation.
+fn current_poll_reset_epoch() -> u64 {
+    POLL_RESET_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 static QR_COOLDOWN_UNTIL: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
     std::sync::OnceLock::new();
 
@@ -749,8 +777,33 @@ pub(super) fn extract_msg_id(resp: &serde_json::Value) -> String {
 
 pub(super) fn resp_error_code(resp: &serde_json::Value) -> Option<i64> {
     resp.get("error_code")
-        .and_then(serde_json::Value::as_i64)
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
         .filter(|c| *c != 0)
+}
+
+/// Fetch `/api/social/profile/getmute`, merge into `threads`, and emit `MuteSnapshotSynced`
+/// only when `getmute` succeeds (`error_code == 0`) for the currently active account.
+pub(super) async fn sync_mute_snapshot_for_session(
+    s: &Session,
+    threads: &mut [crate::chat::Thread],
+    gui_tx: &GuiTx,
+) {
+    if let Ok(mute_resp) = crate::chat::get_mute_conversations(s).await {
+        if resp_error_code(&mute_resp).is_none() {
+            crate::unread::merge_mute_metadata(threads, &mute_resp);
+            if session_matches_active(s) {
+                if let Some(mute_map) = crate::unread::extract_mute_map(
+                    &mute_resp,
+                    crate::login::unix_now() as i64,
+                ) {
+                    let _ = gui_tx.send(GuiEvent::MuteSnapshotSynced(mute_map));
+                }
+            }
+        }
+    }
 }
 
 /// Immediately decode any disk-cached sticker thumbnails (`<media cache>/stk_{cid}_{sid}.png`)
@@ -839,9 +892,265 @@ async fn prefetch_missing_sticker_thumbnails(
     futures_util::future::join_all(futs).await;
 }
 
+/// Abort any in-flight QR or password login background task.
+fn abort_pending_login_tasks(
+    current_qr_task: &mut Option<tokio::task::JoinHandle<()>>,
+    current_password_task: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(task) = current_qr_task.take() {
+        task.abort();
+    }
+    if let Some(task) = current_password_task.take() {
+        task.abort();
+    }
+}
+
+/// Clear in-memory thread caches, history sync state, and legacy root caches under `data_dir`.
+fn clear_thread_and_legacy_caches_in(data_dir: &std::path::Path) {
+    if let Ok(mut kt) = KNOWN_THREADS.lock() {
+        kt.clear();
+    }
+    crate::history_sync::reset_for_account_switch();
+    crate::account_manager::remove_legacy_shared_caches_in(data_dir);
+}
+
+/// Clear in-memory thread caches, history sync state, legacy root caches, and poll cursors.
+async fn reset_poll_and_thread_caches(
+    poll_state: &tokio::sync::Mutex<crate::chat::PollState>,
+    ctrl_poll_state: &tokio::sync::Mutex<crate::call::CtrlPollState>,
+) {
+    clear_thread_and_legacy_caches_in(std::path::Path::new("."));
+    bump_poll_reset_epoch();
+    {
+        let mut ps = poll_state.lock().await;
+        *ps = crate::chat::PollState::default();
+    }
+    {
+        let mut cps = ctrl_poll_state.lock().await;
+        *cps = crate::call::CtrlPollState::default();
+    }
+}
+
+/// Reset worker session state, cached thread lists, legacy root caches, and poll cursors.
+async fn reset_worker_session_state(
+    session: &tokio::sync::Mutex<Session>,
+    poll_state: &tokio::sync::Mutex<crate::chat::PollState>,
+    ctrl_poll_state: &tokio::sync::Mutex<crate::call::CtrlPollState>,
+) {
+    {
+        let mut s = session.lock().await;
+        s.logout();
+    }
+    reset_poll_and_thread_caches(poll_state, ctrl_poll_state).await;
+}
+
+/// Clear call session, caches, active identity, memory session, and disk credentials under
+/// `data_dir`, then emit `GuiEvent::ForgotLockSignedOut` immediately without waiting on
+/// 35-second HTTP long-poll mutexes.
+#[allow(clippy::too_many_arguments)]
+async fn forget_lock_and_sign_out_all_in(
+    data_dir: &std::path::Path,
+    current_qr_task: &mut Option<tokio::task::JoinHandle<()>>,
+    current_password_task: &mut Option<tokio::task::JoinHandle<()>>,
+    call_bridge: &crate::call::CallBridge,
+    session: &tokio::sync::Mutex<Session>,
+    poll_state: &std::sync::Arc<tokio::sync::Mutex<crate::chat::PollState>>,
+    ctrl_poll_state: &std::sync::Arc<tokio::sync::Mutex<crate::call::CtrlPollState>>,
+    gui_tx: &GuiTx,
+    egui_ctx: &egui::Context,
+) {
+    QR_LOGIN_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    abort_pending_login_tasks(current_qr_task, current_password_task);
+    clear_thread_and_legacy_caches_in(data_dir);
+    call_bridge.end_call();
+    crate::account_manager::set_active_uin("");
+    {
+        let mut s = session.lock().await;
+        s.logout();
+    }
+    let _ = crate::account_manager::wipe_all_saved_session_credentials_in(data_dir);
+    crate::background_accounts::request_reconcile();
+
+    let reset_epoch = bump_poll_reset_epoch();
+    let poll_cleared = if let Ok(mut ps) = poll_state.try_lock() {
+        *ps = crate::chat::PollState::default();
+        true
+    } else {
+        false
+    };
+    let ctrl_cleared = if let Ok(mut cps) = ctrl_poll_state.try_lock() {
+        *cps = crate::call::CtrlPollState::default();
+        true
+    } else {
+        false
+    };
+    if !poll_cleared || !ctrl_cleared {
+        let poll_clone = std::sync::Arc::clone(poll_state);
+        let ctrl_clone = std::sync::Arc::clone(ctrl_poll_state);
+        tokio::spawn(async move {
+            if !poll_cleared {
+                let mut ps = poll_clone.lock().await;
+                if current_poll_reset_epoch() == reset_epoch {
+                    *ps = crate::chat::PollState::default();
+                }
+            }
+            if !ctrl_cleared {
+                let mut cps = ctrl_clone.lock().await;
+                if current_poll_reset_epoch() == reset_epoch {
+                    *cps = crate::call::CtrlPollState::default();
+                }
+            }
+        });
+    }
+
+    let _ = gui_tx.send(GuiEvent::ForgotLockSignedOut);
+    egui_ctx.request_repaint();
+}
+
+/// Clear active call, caches, identity, in-memory session, and disk credentials, then emit
+/// `GuiEvent::ForgotLockSignedOut` without blocking behind long-poll mutexes.
+#[allow(clippy::too_many_arguments)]
+async fn forget_lock_and_sign_out_all(
+    current_qr_task: &mut Option<tokio::task::JoinHandle<()>>,
+    current_password_task: &mut Option<tokio::task::JoinHandle<()>>,
+    call_bridge: &crate::call::CallBridge,
+    session: &tokio::sync::Mutex<Session>,
+    poll_state: &std::sync::Arc<tokio::sync::Mutex<crate::chat::PollState>>,
+    ctrl_poll_state: &std::sync::Arc<tokio::sync::Mutex<crate::call::CtrlPollState>>,
+    gui_tx: &GuiTx,
+    egui_ctx: &egui::Context,
+) {
+    forget_lock_and_sign_out_all_in(
+        std::path::Path::new("."),
+        current_qr_task,
+        current_password_task,
+        call_bridge,
+        session,
+        poll_state,
+        ctrl_poll_state,
+        gui_tx,
+        egui_ctx,
+    )
+    .await;
+}
+
+#[cfg(windows)]
+pub enum SettingsRequest {
+    Save(String),
+    Flush,
+}
+
+#[cfg(windows)]
+static SETTINGS_TX: std::sync::OnceLock<std::sync::mpsc::Sender<SettingsRequest>> =
+    std::sync::OnceLock::new();
+
+#[cfg(windows)]
+pub fn save_app_settings_with(
+    slot: &std::sync::OnceLock<std::sync::mpsc::Sender<SettingsRequest>>,
+    json: String,
+    fallback_path: &std::path::Path,
+) {
+    let mut unsent_json = Some(json);
+    if let Some(tx) = slot.get() {
+        if let Some(payload) = unsent_json.take() {
+            match tx.send(SettingsRequest::Save(payload)) {
+                Ok(()) => return,
+                Err(std::sync::mpsc::SendError(SettingsRequest::Save(returned))) => {
+                    unsent_json = Some(returned);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    if let Some(payload) = unsent_json {
+        if let Err(err) = crate::data_dir::write_private_atomic(fallback_path, payload.as_bytes()) {
+            crate::logger::log_error("gui::save_app_settings", &err.to_string());
+        }
+    }
+}
+
+/// Queue a complete settings snapshot for ordered persistence on Windows.
+#[cfg(windows)]
+pub(super) fn save_app_settings(json: String) {
+    save_app_settings_with(&SETTINGS_TX, json, std::path::Path::new("app_settings.json"));
+}
+
+#[cfg(windows)]
+pub fn flush_app_settings_with(
+    slot: &std::sync::OnceLock<std::sync::mpsc::Sender<SettingsRequest>>,
+) -> bool {
+    slot.get()
+        .is_some_and(|tx| tx.send(SettingsRequest::Flush).is_ok())
+}
+
+/// Request an acknowledgment after the settings writer drains its queued saves.
+#[cfg(windows)]
+pub(super) fn flush_app_settings() -> bool {
+    flush_app_settings_with(&SETTINGS_TX)
+}
+
+#[cfg(windows)]
+pub fn write_app_settings(
+    requests: std::sync::mpsc::Receiver<SettingsRequest>,
+    gui_tx: GuiTx,
+    path: &std::path::Path,
+) {
+    for request in requests {
+        match request {
+            SettingsRequest::Save(json) => {
+                if crate::data_dir::write_private_atomic(path, json.as_bytes()).is_err() {
+                    crate::logger::log_error("gui::save_app_settings", "Could not persist settings");
+                    let _ = gui_tx.send(GuiEvent::SettingsSaveFailed);
+                }
+            }
+            SettingsRequest::Flush => {
+                let _ = gui_tx.send(GuiEvent::SettingsFlushed);
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn start_settings_writer_with(
+    slot: &std::sync::OnceLock<std::sync::mpsc::Sender<SettingsRequest>>,
+    gui_tx: &GuiTx,
+    path: std::path::PathBuf,
+) {
+    if slot.get().is_some() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let writer_tx = gui_tx.clone();
+    match std::thread::Builder::new()
+        .name("zalo-settings".into())
+        .spawn(move || write_app_settings(rx, writer_tx, &path))
+    {
+        Ok(_) => {
+            let _ = slot.set(tx);
+        }
+        Err(err) => {
+            crate::logger::log_error("gui::start_settings_writer", &err.to_string());
+            let _ = gui_tx.send(GuiEvent::SettingsSaveFailed);
+        }
+    }
+}
+
+/// Start the Windows settings writer once at GUI startup; subsequent calls are no-ops.
+#[cfg(windows)]
+pub(super) fn start_settings_writer(gui_tx: &GuiTx) {
+    start_settings_writer_with(
+        &SETTINGS_TX,
+        gui_tx,
+        std::path::PathBuf::from("app_settings.json"),
+    );
+}
+
 pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: egui::Context) {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let _ = WORKER_TX.set(cmd_tx);
+    #[cfg(windows)]
+    start_settings_writer(&gui_tx);
 
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
     let poll_state =
@@ -1416,7 +1725,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 if !ws_threads.is_empty() && session_matches_active(&s_snap) {
                                                     // Deliver incoming messages to UI immediately (0ms network wait)
                                                     let _ = gui_tx_ws.send(
-                                                        GuiEvent::ThreadsUpdated(ws_threads.clone()),
+                                                        GuiEvent::LiveThreadsUpdated(ws_threads.clone()),
                                                     );
                                                     ctx_ws.request_repaint();
                                                     let needs_resolve = ws_threads.iter().any(|t| {
@@ -1475,7 +1784,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                     let ctx_ctrl = egui_ctx.clone();
                     tokio::spawn(async move {
                         let mut last_ctrl_uin = String::new();
+                        let mut last_ctrl_epoch = current_poll_reset_epoch();
                         loop {
+                            let cur_epoch = current_poll_reset_epoch();
+                            if cur_epoch != last_ctrl_epoch {
+                                last_ctrl_epoch = cur_epoch;
+                                last_ctrl_uin.clear();
+                            }
                             let s_snap = s_ctrl.lock().await.clone();
                             if s_snap.login.is_some() {
                                 let cur_uin = s_snap
@@ -1572,6 +1887,34 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                     tokio::spawn(crate::background_accounts::supervise(session.clone(), sink));
                 }
 
+                {
+                    let gui_tx_lock = gui_tx.clone();
+                    let ctx_lock = egui_ctx.clone();
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(Duration::from_secs(5));
+                        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        tick.tick().await;
+                        let mut last_wall = crate::login::unix_now();
+                        loop {
+                            tick.tick().await;
+                            let now_wall = crate::login::unix_now();
+                            if let Some(jump_secs) =
+                                crate::app_lock::classify_sleep_jump(last_wall, now_wall, true)
+                            {
+                                let _ = gui_tx_lock.send(GuiEvent::SystemWakeDetected { jump_secs });
+                                ctx_lock.request_repaint();
+                            } else if IDLE_LOCK_TIMEOUT_SECS
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                > 0
+                            {
+                                let _ = gui_tx_lock.send(GuiEvent::LockWatchdogTick);
+                                ctx_lock.request_repaint();
+                            }
+                            last_wall = now_wall;
+                        }
+                    });
+                }
+
                 let mut current_qr_task: Option<tokio::task::JoinHandle<()>> = None;
                 let mut current_password_task: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -1628,33 +1971,29 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 // Snapshot acc cũ vào accounts/ trước khi QR acc mới đè session.json (#1008).
                                 let _ = crate::account_manager::save_current_account_snapshot(&cur_uin);
                             }
-                            if let Some(task) = current_qr_task.take() {
-                                task.abort();
-                            }
-                            if let Some(task) = current_password_task.take() {
-                                task.abort();
-                            }
-                            if let Ok(mut kt) = KNOWN_THREADS.lock() {
-                                kt.clear();
-                            }
-                            crate::history_sync::reset_for_account_switch();
-                            crate::account_manager::remove_legacy_shared_caches();
+                            abort_pending_login_tasks(
+                                &mut current_qr_task,
+                                &mut current_password_task,
+                            );
                             let _ = std::fs::remove_file("session.json");
-                            {
-                                let mut s = session.lock().await;
-                                s.logout();
-                            }
-                            {
-                                let mut ps = poll_state.lock().await;
-                                *ps = crate::chat::PollState::default();
-                            }
-                            {
-                                let mut cps = ctrl_poll_state.lock().await;
-                                *cps = crate::call::CtrlPollState::default();
-                            }
+                            reset_worker_session_state(&session, &poll_state, &ctrl_poll_state)
+                                .await;
                             crate::account_manager::set_active_uin("");
                             let _ = gui_tx.send(GuiEvent::LoggedOut);
                             egui_ctx.request_repaint();
+                        }
+                        WorkerCmd::ForgetLockAndSignOutAll => {
+                            forget_lock_and_sign_out_all(
+                                &mut current_qr_task,
+                                &mut current_password_task,
+                                &call_bridge,
+                                &session,
+                                &poll_state,
+                                &ctrl_poll_state,
+                                &gui_tx,
+                                &egui_ctx,
+                            )
+                            .await;
                         }
                         WorkerCmd::SwitchAccount { target_uin } => {
                             // A login left pending by "add account" must not sign in
@@ -1692,6 +2031,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     // An in-flight poll holds `poll_state` across a request;
                                     // release the session first so it cannot stall behind us.
                                     drop(s);
+                                    bump_poll_reset_epoch();
                                     // Long-poll cursors belong to the previous account.
                                     *poll_state.lock().await = crate::chat::PollState::default();
                                     *ctrl_poll_state.lock().await = crate::call::CtrlPollState::default();
@@ -1902,7 +2242,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
-                                match crate::chat::set_mute_conversation(
+                                let action_now = crate::login::unix_now() as i64;
+                                let set_ok = match crate::chat::set_mute_conversation(
                                     &s,
                                     &thread_id,
                                     is_group,
@@ -1920,6 +2261,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             let _ = gui_tx_clone
                                                 .send(GuiEvent::StatusUpdate(msg));
                                             ctx_clone.request_repaint();
+                                            false
+                                        } else {
+                                            true
                                         }
                                     }
                                     Err(err) => {
@@ -1927,17 +2271,31 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         crate::logger::log_error("gui::mute", &msg);
                                         let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(msg));
                                         ctx_clone.request_repaint();
+                                        false
                                     }
-                                }
+                                };
                                 if let Ok(mute_resp) = crate::chat::get_mute_conversations(&s).await
                                 {
-                                    if let Some(mute_map) = crate::unread::extract_mute_map(
-                                        &mute_resp,
-                                        crate::login::unix_now() as i64,
-                                    ) {
-                                        let _ = gui_tx_clone
-                                            .send(GuiEvent::MuteSnapshotSynced(mute_map));
-                                        ctx_clone.request_repaint();
+                                    if resp_error_code(&mute_resp).is_none() && session_matches_active(&s) {
+                                        let sync_now = crate::login::unix_now() as i64;
+                                        if let Some(mut mute_map) = crate::unread::extract_mute_map(
+                                            &mute_resp,
+                                            sync_now,
+                                        ) {
+                                            if set_ok {
+                                                crate::unread::reconcile_post_setmute_snapshot(
+                                                    &mut mute_map,
+                                                    &thread_id,
+                                                    is_group,
+                                                    mute,
+                                                    duration_sec,
+                                                    action_now,
+                                                );
+                                            }
+                                            let _ = gui_tx_clone
+                                                .send(GuiEvent::MuteSnapshotSynced(mute_map));
+                                            ctx_clone.request_repaint();
+                                        }
                                     }
                                 }
                             });
@@ -2125,6 +2483,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 match crate::qr::confirm(&s_snap, &q).await {
                                                     Ok(resp) => {
                                                         QR_LOGIN_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                        bump_poll_reset_epoch();
                                                         let mut s = session_clone.lock().await;
                                                         if let Some(sek) =
                                                             crate::qr::extract_zpw_sek(&resp)
@@ -2149,7 +2508,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             }
                                                         }
                                                         let _ = s.sync_profile_me().await;
-                                                        // The profile call can fail or omit the
                                                         // name; the scan result already named the
                                                         // account, so keep it rather than leaving
                                                         // the account labelled by its id.
@@ -2260,26 +2618,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             )
                                                             .await;
                                                         }
-                                                        if let Ok(mute_resp) =
-                                                            crate::chat::get_mute_conversations(&s)
-                                                                .await
-                                                        {
-                                                            crate::unread::merge_mute_metadata(
-                                                                &mut list, &mute_resp,
-                                                            );
-                                                            if let Some(mute_map) =
-                                                                crate::unread::extract_mute_map(
-                                                                    &mute_resp,
-                                                                    crate::login::unix_now() as i64,
-                                                                )
-                                                            {
-                                                                let _ = gui_tx_clone.send(
-                                                                    GuiEvent::MuteSnapshotSynced(
-                                                                        mute_map,
-                                                                    ),
-                                                                );
-                                                            }
-                                                        }
+                                                        sync_mute_snapshot_for_session(
+                                                            &s,
+                                                            &mut list,
+                                                            &gui_tx_clone,
+                                                        )
+                                                        .await;
                                                         if let Ok(pinned_resp) = crate::chat::get_pinned(&s).await {
                                                             let pids = crate::chat::parse_pinned_conversations(&pinned_resp);
                                                             crate::chat::apply_pinned_threads(&mut list, &pids);
@@ -2537,18 +2881,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         let mut ps = poll_clone.lock().await;
                                         *ps = fresh_ps;
                                     }
-                                    if let Ok(mute_resp) =
-                                        crate::chat::get_mute_conversations(&s).await
-                                    {
-                                        crate::unread::merge_mute_metadata(&mut list, &mute_resp);
-                                        if let Some(mute_map) = crate::unread::extract_mute_map(
-                                            &mute_resp,
-                                            crate::login::unix_now() as i64,
-                                        ) {
-                                            let _ = gui_tx_clone
-                                                .send(GuiEvent::MuteSnapshotSynced(mute_map));
-                                        }
-                                    }
+                                    sync_mute_snapshot_for_session(
+                                        &s,
+                                        &mut list,
+                                        &gui_tx_clone,
+                                    )
+                                    .await;
                                     if let Ok(pinned_resp) = crate::chat::get_pinned(&s).await {
                                         let pids = crate::chat::parse_pinned_conversations(&pinned_resp);
                                         crate::chat::apply_pinned_threads(&mut list, &pids);
@@ -2603,6 +2941,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
 
                                     let mut poll_err: Option<anyhow::Error> = None;
                                     for _ in 0..3 {
+                                        if !session_matches_active(&s)
+                                            || crate::account_manager::account_epoch() != poll_epoch
+                                        {
+                                            break;
+                                        }
                                         let poll_res = {
                                             let mut ps = poll_clone.lock().await;
                                             crate::chat::get_chat_from_polling(&s, &mut ps).await
@@ -2716,7 +3059,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             temp_threads.retain(|t| !t.messages.is_empty());
                                             if !temp_threads.is_empty() {
                                                 // Skip UI churn when nothing actually changed (#135:
-                                                // 1.2s poll used to relayout the whole message list
                                                 // every tick even with zero new messages).
                                                 let fingerprint = |ts: &[Thread]| -> u64 {
                                                     use std::hash::{Hash, Hasher};
@@ -2753,7 +3095,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 if is_fresh && session_matches_active(&s) {
                                                     // Deliver polled messages to UI immediately without blocking on profile HTTP
                                                     let _ = gui_tx_clone
-                                                        .send(GuiEvent::ThreadsUpdated(temp_threads.clone()));
+                                                        .send(GuiEvent::LiveThreadsUpdated(temp_threads.clone()));
                                                     ctx_clone.request_repaint();
                                                 }
                                                 let needs_resolve = temp_threads.iter().any(|t| {
@@ -3545,7 +3887,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         crate::chat::recall_message(&s, &to_id, is_group, &old_msg)
                                             .await;
                                 }
-                                // 2. Gửi tin mới với text đã sửa.
                                 let client_id = crate::chat::next_client_message_id();
                                 let res = if is_group {
                                     crate::chat::send_group_message_with_client_id(
@@ -3784,8 +4125,14 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 let Ok(_permit) = decode_sem.acquire_owned().await else {
                                     return;
                                 };
-                                let cache_dir =
-                                    crate::account_manager::ensure_media_cache_dir();
+                                let cache_dir = if key.starts_with("hd_") {
+                                    crate::storage_manager::ensure_media_category_dir(
+                                        &crate::account_manager::active_uin(),
+                                        crate::storage_manager::MediaCategory::Photos,
+                                    )
+                                } else {
+                                    crate::account_manager::ensure_media_cache_dir()
+                                };
                                 let cache_path = cache_dir.join(format!("{key}.png"));
 
                                 // Bytes come from the disk cache, a local file or the network. They
@@ -4541,6 +4888,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 {
                                     Ok(_) => {
                                         QR_LOGIN_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        bump_poll_reset_epoch();
                                         if let Ok(info) = crate::login::get_login_info(&s).await {
                                             if let Some(cfg) = info.get("data") {
                                                 crate::login::apply_login_config(&mut s, cfg);
@@ -4642,23 +4990,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     )
                                                     .await;
                                                 }
-                                                if let Ok(mute_resp) =
-                                                    crate::chat::get_mute_conversations(&s).await
-                                                {
-                                                    crate::unread::merge_mute_metadata(
-                                                        &mut list, &mute_resp,
-                                                    );
-                                                    if let Some(mute_map) =
-                                                        crate::unread::extract_mute_map(
-                                                            &mute_resp,
-                                                            crate::login::unix_now() as i64,
-                                                        )
-                                                    {
-                                                        let _ = gui_tx_clone.send(
-                                                            GuiEvent::MuteSnapshotSynced(mute_map),
-                                                        );
-                                                    }
-                                                }
+                                                sync_mute_snapshot_for_session(
+                                                    &s,
+                                                    &mut list,
+                                                    &gui_tx_clone,
+                                                )
+                                                .await;
                                                 let sync_snapshot = list.clone();
                                                 if session_matches_active(&s) {
                                                     let _ = gui_tx_clone
@@ -5408,27 +5745,9 @@ async fn download_attachment_with_original_name(
         .await
         .map_err(|e| format!("Lỗi đọc dữ liệu tập tin: {e}"))?;
 
-    let target_dir = if !download_dir.trim().is_empty() {
-        std::path::PathBuf::from(download_dir.trim())
-    } else {
-        std::env::var("USERPROFILE")
-            .ok()
-            .map(|p| {
-                std::path::PathBuf::from(p)
-                    .join("Downloads")
-                    .join("Zalo Received Files")
-            })
-            .or_else(|| {
-                std::env::var("HOME").ok().map(|h| {
-                    std::path::PathBuf::from(h)
-                        .join("Downloads")
-                        .join("Zalo Received Files")
-                })
-            })
-            .unwrap_or_else(|| std::path::PathBuf::from("Downloads"))
-    };
-    // Each account saves into its own subfolder so received files never mix.
-    let target_dir = crate::account_manager::account_download_dir(&target_dir, account_uin);
+    let _ = download_dir;
+    let category = crate::storage_manager::MediaCategory::from_filename(&clean_name);
+    let target_dir = crate::storage_manager::ensure_media_category_dir(account_uin, category);
 
     tokio::task::spawn_blocking(move || write_unique_file(&target_dir, &clean_name, &bytes))
         .await
@@ -5494,10 +5813,19 @@ async fn save_media_to_downloads(
         .await
         .map_err(|e| format!("Lỗi đọc dữ liệu tập tin: {e}"))?;
     let name = media_file_name(hint, url, &content_type, crate::login::unix_now());
+    let uin = crate::account_manager::active_uin();
+    let category = crate::storage_manager::MediaCategory::from_filename(&name);
+    let media_dir = crate::storage_manager::ensure_media_category_dir(&uin, category);
     let target_dir = crate::account_manager::os_downloads_dir();
-    tokio::task::spawn_blocking(move || write_unique_file(&target_dir, &name, &bytes))
-        .await
-        .map_err(|e| format!("Lỗi tác vụ lưu file: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        let media_copy = media_dir.join(&name);
+        if !media_copy.exists() {
+            let _ = std::fs::write(&media_copy, &bytes);
+        }
+        write_unique_file(&target_dir, &name, &bytes)
+    })
+    .await
+    .map_err(|e| format!("Lỗi tác vụ lưu file: {e}"))?
 }
 
 const MEDIA_EXTENSIONS: [&str; 12] = [
@@ -5554,55 +5882,6 @@ fn media_file_name(hint: &str, url: &str, content_type: &str, ts: i64) -> String
     format!("zalo_{ts}.{ext}")
 }
 
-#[cfg(test)]
-mod save_media_tests {
-    use super::*;
-
-    #[test]
-    fn media_name_prefers_hint_then_url_segment() {
-        assert_eq!(
-            media_file_name("beach.png", "https://x/a.jpg", "", 1),
-            "beach.png"
-        );
-        assert_eq!(
-            media_file_name("Hình ảnh", "https://f1.zdn.vn/jpg/9/abc.jpg?x=1", "", 1),
-            "abc.jpg"
-        );
-    }
-
-    #[test]
-    fn media_name_falls_back_to_timestamp_with_mime_extension() {
-        assert_eq!(
-            media_file_name("Hình ảnh", "https://x/renewMedia", "image/png", 42),
-            "zalo_42.png"
-        );
-        assert_eq!(
-            media_file_name("", "https://x/v", "video/mp4; codecs=avc1", 7),
-            "zalo_7.mp4"
-        );
-        assert_eq!(media_file_name("", "https://x/", "", 3), "zalo_3.jpg");
-    }
-
-    #[test]
-    fn media_name_strips_path_separators() {
-        assert_eq!(
-            media_file_name("../../etc/a.jpg", "https://x/", "", 1),
-            "_.._etc_a.jpg"
-        );
-    }
-
-    #[test]
-    fn unique_file_appends_counter_instead_of_overwriting() {
-        let dir = std::env::temp_dir().join(format!("ctdoz_save_media_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let (first, _) = write_unique_file(&dir, "a.jpg", b"1").unwrap();
-        let (second, path) = write_unique_file(&dir, "a.jpg", b"2").unwrap();
-        assert_eq!(first, "a.jpg");
-        assert_eq!(second, "a (1).jpg");
-        assert_eq!(std::fs::read(path).unwrap(), b"2");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
 /// Download attachment bytes for in-app preview, bounded at 10 MiB (no disk write).
 async fn download_preview_bytes(
     client: &reqwest::Client,
@@ -5680,7 +5959,7 @@ fn decode_image_with_fallback(
 
 /// Transcode stdin media bytes to PNG via `ffmpeg` without flashing a console window on Windows.
 fn transcode_pipe_to_png_with_ffmpeg(bytes: &[u8], vf: Option<&str>) -> Option<Vec<u8>> {
-    let mut cmd = std::process::Command::new("ffmpeg");
+    let mut cmd = crate::media::ffmpeg_command();
     cmd.args(["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vframes", "1"]);
     if let Some(filter) = vf {
         cmd.args(["-vf", filter]);
@@ -5689,11 +5968,6 @@ fn transcode_pipe_to_png_with_ffmpeg(bytes: &[u8], vf: Option<&str>) -> Option<V
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
     let mut child = cmd.spawn().ok()?;
     use std::io::Write;
     if let Some(mut stdin) = child.stdin.take() {

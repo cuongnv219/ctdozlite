@@ -6,22 +6,19 @@ Runner: `cargo test --locked` (CI runs it on Linux, Windows and macOS). Tests li
 
 ## 1. Test Hierarchy
 
+All active tests live in **`tests/`** as integration test suites — **do NOT place `#[cfg(test)]` test modules or mock fixtures inside `src/`** (enforced by project structure and `scripts/check_invariants.py` comment/layer hygiene).
+
 | Level | Location | Naming |
 | :--- | :--- | :--- |
-| **Unit** | `#[cfg(test)] mod tests` at the bottom of the module | `mod tests` + descriptive `fn` names |
-| **Module integration** | `tests/` directory when multiple modules must cooperate | `tests/<area>_integration.rs` |
-| **Protocol fixture** | `tests/` + `re-notes/` fixtures | `tests/protocol_<topic>.rs` |
+| **Module / Regression Integration** | `tests/` directory (`tests/<area>_regressions.rs` or `tests/<area>_integration.rs`) | Descriptive `fn` names testing public APIs of `zalo_rust::*` |
+| **Protocol Fixture** | `tests/` + sanitized `re-notes/` / `tests/fixtures/` | `tests/protocol_<topic>.rs` |
 
 Naming pattern: `fn <behaviour>_when_<condition>()`.
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upsert_is_idempotent_for_same_msg_id() { /* INV-4 */ }
-}
+// tests/store_integration.rs
+#[test]
+fn upsert_is_idempotent_for_same_msg_id() { /* INV-4 */ }
 ```
 
 Rules:

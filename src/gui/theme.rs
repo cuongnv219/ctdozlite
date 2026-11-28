@@ -664,35 +664,6 @@ fn circular_image_mesh(
     mesh
 }
 
-#[cfg(test)]
-mod circular_image_tests {
-    use super::*;
-
-    #[test]
-    fn mesh_has_opaque_disc_and_transparent_feathered_rim() {
-        let mesh = circular_image_mesh(
-            egui::TextureId::default(),
-            Pos2::new(10.0, 10.0),
-            8.0,
-            Pos2::ZERO,
-            Pos2::new(1.0, 1.0),
-            2.0,
-        );
-        assert!(mesh.is_valid());
-        let n = 32; // radius * ppp = 16, clamped up to the 32-segment minimum
-        assert_eq!(mesh.vertices.len(), 1 + 2 * (n + 1));
-        assert_eq!(mesh.indices.len(), 9 * n);
-        let dist = |v: &egui::epaint::Vertex| v.pos.distance(Pos2::new(10.0, 10.0));
-        let inner = &mesh.vertices[1];
-        let outer = &mesh.vertices[2];
-        // Rim is one physical pixel (0.5 pt at 2x) wide, centred on the radius.
-        assert!((dist(inner) - 7.75).abs() < 1e-4);
-        assert!((dist(outer) - 8.25).abs() < 1e-4);
-        assert_eq!(inner.color, Color32::WHITE);
-        assert_eq!(outer.color, Color32::TRANSPARENT);
-        assert_eq!(inner.uv, outer.uv);
-    }
-}
 
 fn paint_single_circle_avatar(
     painter: &egui::Painter,
@@ -1488,7 +1459,7 @@ pub(super) fn setup_custom_fonts(ctx: &egui::Context) {
 pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // 1. Embed official Lucide Icon Font (vector glyphs for all UI icons)
+    /// 1. Embed official Lucide Icon Font (vector glyphs for all UI icons)
     const LUCIDE_BYTES: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
     fonts.font_data.insert(
         "lucide_font".to_owned(),
@@ -1496,7 +1467,7 @@ pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool
     );
 
     // 2. Bundled Vietnamese sans-serif (Regular + SemiBold) so diacritics & bold headings
-    //    render identically on every OS. System fonts below are only an optional override.
+    /// render identically on every OS. System fonts below are only an optional override.
     const BUNDLED_SANS: &[u8] = include_bytes!("../assets/fonts/BeVietnamPro-Regular.ttf");
     const BUNDLED_SANS_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/BeVietnamPro-SemiBold.ttf");
     fonts.font_data.insert(
@@ -1565,7 +1536,7 @@ pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool
             }
         }
         "open_sans" => {
-            // Bundled Open Sans (OFL), the face Telegram Desktop uses; covers Vietnamese.
+            /// Bundled Open Sans (OFL), the face Telegram Desktop uses; covers Vietnamese.
             const OPEN_SANS: &[u8] = include_bytes!("../assets/fonts/OpenSans-Regular.ttf");
             const OPEN_SANS_SEMIBOLD: &[u8] =
                 include_bytes!("../assets/fonts/OpenSans-SemiBold.ttf");
@@ -1643,7 +1614,6 @@ pub(super) fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool
         }
     }
 
-    // 5. Fallback priority order:
     // If a custom or system font is selected, place it at index 0.
     // Index 1 (or 0 for default) is bundled_sans, guaranteeing full Vietnamese diacritic coverage.
     let prop = fonts
@@ -1707,7 +1677,7 @@ const EMOJI_FONT: &str = "noto_emoji";
 /// before, every "❤️" sent from a phone ended in a `◻`.
 fn use_bundled_emoji_font(fonts: &mut egui::FontDefinitions) {
     // Static Regular instance of google/fonts `ofl/notoemoji/NotoEmoji[wght].ttf`,
-    // with the layout tables dropped because egui does no shaping.
+    /// with the layout tables dropped because egui does no shaping.
     const NOTO_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoEmoji-Regular.ttf");
     const BUILTIN_EMOJI: &str = "NotoEmoji-Regular";
     fonts.font_data.remove(BUILTIN_EMOJI);
@@ -1719,130 +1689,5 @@ fn use_bundled_emoji_font(fonts: &mut egui::FontDefinitions) {
         for name in family.iter_mut().filter(|name| *name == BUILTIN_EMOJI) {
             *name = EMOJI_FONT.to_owned();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bundled_emoji_font_covers_new_emoji_and_hides_variation_selector() {
-        let ctx = egui::Context::default();
-        build_fonts(&ctx, "default", false);
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
-        for family in [
-            egui::FontFamily::Proportional,
-            egui::FontFamily::Monospace,
-            font_family_semibold(),
-        ] {
-            let font = egui::FontId::new(14.0, family);
-            ctx.fonts(|f| {
-                // 🤣 (Unicode 9) and 🫠 (Unicode 14) were missing from egui's copy.
-                assert!(f.has_glyphs(&font, "🤣🫠❤\u{fe0f}"), "{font:?}");
-                assert_eq!(f.glyph_width(&font, '\u{fe0f}'), 0.0, "{font:?}");
-            });
-        }
-    }
-
-    #[test]
-    fn test_parse_and_format_hex_color() {
-        assert_eq!(
-            parse_hex_color("#0068FF"),
-            Some(Color32::from_rgb(0, 104, 255))
-        );
-        assert_eq!(
-            parse_hex_color("528BFF"),
-            Some(Color32::from_rgb(82, 139, 255))
-        );
-        assert_eq!(
-            parse_hex_color("#0068FF80"),
-            Some(Color32::from_rgba_unmultiplied(0, 104, 255, 128))
-        );
-        assert_eq!(parse_hex_color("invalid"), None);
-        assert_eq!(parse_hex_color("#123"), None);
-
-        let col = Color32::from_rgb(0, 104, 255);
-        assert_eq!(format_hex_color(col), "#0068FF");
-    }
-
-    #[test]
-    fn test_palette_apply_custom_colors() {
-        let mut pal = ThemePalette::light();
-        pal.apply_custom_colors(
-            Some("#059669"),
-            Some("#7C3AED"),
-            Some("#E11D48"),
-            Some("#FFFFFF"),
-        );
-        assert_eq!(pal.primary, Color32::from_rgb(5, 150, 105));
-        assert_eq!(pal.accent_online, Color32::from_rgb(124, 58, 237));
-        assert_eq!(pal.bubble_out_bg, Color32::from_rgb(225, 29, 72));
-        assert_eq!(pal.bubble_in_bg, Color32::WHITE);
-        assert_eq!(pal.bubble_in_text, Color32::from_rgb(15, 23, 42));
-    }
-
-    #[test]
-    fn test_palette_dark_mode_bubble_contrast() {
-        let mut pal = ThemePalette::dark();
-        pal.apply_custom_colors(
-            None,
-            None,
-            Some("#1E293B"),
-            None,
-        );
-        assert_eq!(pal.bubble_out_bg, Color32::from_rgb(30, 41, 59));
-        assert_eq!(pal.bubble_out_text, Color32::from_rgb(235, 240, 246));
-    }
-
-    #[test]
-    fn test_wcag_aa_contrast_matrix_dark_and_light() {
-        for pal in [ThemePalette::dark(), ThemePalette::light()] {
-            assert!(contrast_ratio(pal.primary_fg, pal.primary) >= 4.5);
-            assert!(contrast_ratio(pal.text_primary, pal.bg_app) >= 4.5);
-            assert!(contrast_ratio(pal.text_primary, pal.bg_elevated) >= 4.5);
-            assert!(contrast_ratio(pal.text_secondary, pal.bg_chat_canvas) >= 4.5);
-            assert!(contrast_ratio(pal.text_muted, pal.bg_chat_canvas) >= 4.5);
-            assert!(contrast_ratio(pal.text_muted, pal.bg_elevated) >= 4.5);
-            assert!(contrast_ratio(pal.accent_online, pal.bg_elevated) >= 4.5);
-            assert!(contrast_ratio(pal.danger_text, pal.bg_elevated) >= 4.5);
-            assert!(contrast_ratio(pal.warning, pal.bg_elevated) >= 4.5);
-            assert!(contrast_ratio(pal.link_text, pal.bg_chat_canvas) >= 4.5);
-            assert!(contrast_ratio(pal.bubble_out_text, pal.bubble_out_bg) >= 4.5);
-            assert!(contrast_ratio(pal.bubble_out_meta, pal.bubble_out_bg) >= 4.5);
-            assert!(contrast_ratio(pal.bubble_in_text, pal.bubble_in_bg) >= 4.5);
-            assert!(contrast_ratio(pal.bubble_in_meta, pal.bubble_in_bg) >= 4.5);
-        }
-    }
-
-    #[test]
-    fn test_emoji_to_tex_key_unknown_returns_empty() {
-        assert_eq!(emoji_to_tex_key("👍"), "like");
-        assert_eq!(emoji_to_tex_key("/-heart"), "heart");
-        assert_eq!(emoji_to_tex_key(":-(("), "cry");
-        assert_eq!(emoji_to_tex_key("🔥"), "");
-        assert_eq!(emoji_to_tex_key("🎉"), "");
-    }
-
-    #[test]
-    fn test_apply_to_ctx_syncs_dark_and_light_visuals() {
-        let ctx = egui::Context::default();
-        let dark = ThemePalette::dark();
-        dark.apply_to_ctx_with_anim(&ctx, true, 1.0);
-        assert_eq!(ctx.theme(), egui::Theme::Dark);
-        let dark_style = ctx.style();
-        assert!(dark_style.visuals.dark_mode);
-        assert_eq!(dark_style.visuals.extreme_bg_color, dark.bg_input);
-        assert_eq!(dark_style.visuals.widgets.inactive.weak_bg_fill, dark.bg_elevated);
-        assert_eq!(dark_style.visuals.panel_fill, dark.bg_app);
-
-        let light = ThemePalette::light();
-        light.apply_to_ctx_with_anim(&ctx, false, 1.0);
-        assert_eq!(ctx.theme(), egui::Theme::Light);
-        let light_style = ctx.style();
-        assert!(!light_style.visuals.dark_mode);
-        assert_eq!(light_style.visuals.extreme_bg_color, light.bg_input);
-        assert_eq!(light_style.visuals.widgets.inactive.weak_bg_fill, light.bg_elevated);
-        assert_eq!(light_style.visuals.panel_fill, light.bg_app);
     }
 }

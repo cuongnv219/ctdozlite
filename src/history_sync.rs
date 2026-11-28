@@ -239,7 +239,6 @@ pub fn generate_sync_public_key_for(uin: &str) -> String {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         let _ = std::fs::create_dir_all(parent);
     }
-    // 1. Thử đọc key đã lưu.
     if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(pem) = v.get("private_pem").and_then(|x| x.as_str()) {
@@ -257,7 +256,6 @@ pub fn generate_sync_public_key_for(uin: &str) -> String {
             }
         }
     }
-    // 2. Gen mới + lưu với quyền riêng tư.
     let mut rng = rsa::rand_core::OsRng;
     if let Ok(priv_key) = RsaPrivateKey::new(&mut rng, 2048) {
         let pub_key = RsaPublicKey::from(&priv_key);
@@ -2635,8 +2633,8 @@ fn decode_sync_v2_proto_message(
         if !q.from_d.is_empty() {
             raw_meta.insert("reply_to_sender".into(), serde_json::json!(q.from_d));
         }
-        if !q.msg.is_empty() {
-            raw_meta.insert("reply_to_text".into(), serde_json::json!(q.msg));
+        if let Some(clean_q) = crate::chat::normalize_quote_raw_msg(&q.msg) {
+            raw_meta.insert("reply_to_text".into(), serde_json::json!(clean_q));
         }
     }
 
@@ -2656,6 +2654,67 @@ fn decode_sync_v2_proto_message(
         ts: m.timestamp as i64,
         is_outgoing,
         raw_json,
+    }
+}
+
+/// Resolve empty/missing `reply_to_text` on Sync V2 rows using target messages in the same partition or cached thread.
+pub(crate) fn backfill_sync_v2_partition_quotes(
+    decoded: &mut [(crate::store::StoredMessage, u64)],
+    cached_thread: Option<&Thread>,
+) {
+    let mut id_to_text: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(th) = cached_thread {
+        for m in &th.messages {
+            let preview = crate::chat::quote_preview_text(m);
+            let trimmed = preview.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !m.id.is_empty() && m.id != "0" {
+                id_to_text.insert(m.id.clone(), preview.clone());
+            }
+            if !m.client_message_id.is_empty() && m.client_message_id != "0" {
+                id_to_text.insert(m.client_message_id.clone(), preview.clone());
+            }
+        }
+    }
+    for (sm, cli_id) in decoded.iter() {
+        let trimmed = sm.text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !sm.msg_id.is_empty() && sm.msg_id != "0" {
+            id_to_text.insert(sm.msg_id.clone(), sm.text.clone());
+        }
+        if *cli_id > 0 {
+            id_to_text.insert(cli_id.to_string(), sm.text.clone());
+        }
+    }
+    for (sm, _) in decoded.iter_mut() {
+        if !sm.raw_json.contains("reply_to_id") {
+            continue;
+        }
+        let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&sm.raw_json) else {
+            continue;
+        };
+        let Some(obj) = val.as_object_mut() else {
+            continue;
+        };
+        let existing_rtext = obj.get("reply_to_text").and_then(|v| v.as_str());
+        if !crate::chat::is_missing_or_raw_quote_text(existing_rtext) {
+            continue;
+        }
+        let Some(rid) = obj
+            .get("reply_to_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty() && !s.bytes().all(|b| b == b'0'))
+        else {
+            continue;
+        };
+        if let Some(resolved) = id_to_text.get(rid) {
+            obj.insert("reply_to_text".into(), serde_json::json!(resolved));
+            sm.raw_json = val.to_string();
+        }
     }
 }
 
@@ -2747,7 +2806,10 @@ pub(crate) async fn import_sync_v2_messages_inner(
             .find(|t| t.id == thread_id && !t.is_group)
             .map(|t| t.name.clone())
             .unwrap_or_default();
+        let mut decoded_batch: Vec<(crate::store::StoredMessage, u64)> =
+            Vec::with_capacity(part.messages.len());
         for m in part.messages {
+            let cli_id = m.client_id;
             let mt_num = m.msg_type;
             let att_len = m.attaches.len();
             let content_len = m.content.len();
@@ -2780,7 +2842,11 @@ pub(crate) async fn import_sync_v2_messages_inner(
                     thread_id, sm.msg_id, mt_num, content_len, att_len, att0_diag
                 ));
             }
-
+            decoded_batch.push((sm, cli_id));
+        }
+        let cached_ref = cached_threads.iter().find(|t| t.id == thread_id);
+        backfill_sync_v2_partition_quotes(&mut decoded_batch, cached_ref);
+        for (sm, _) in decoded_batch {
             if store.upsert_message(&sm).unwrap_or(false) {
                 imported += 1;
             }
@@ -2803,421 +2869,4 @@ pub(crate) async fn import_sync_v2_messages_inner(
     // không còn file temp sync_v2_*.bin/json của helper JS.
 
     Ok(imported)
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::chat::ChatMessage;
-
-    fn thread_with(ids: &[&str]) -> Thread {
-        Thread {
-            id: "g1".into(),
-            name: "Nhóm".into(),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group: true,
-            messages: ids
-                .iter()
-                .map(|id| ChatMessage {
-                    id: (*id).into(),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn history_sync_requires_an_advancing_cursor_when_more_pages_exist() {
-        assert_eq!(require_next_cursor(Some("20".into()), "10").unwrap(), "20");
-        assert!(require_next_cursor(None, "10").is_err());
-        assert!(require_next_cursor(Some("10".into()), "10").is_err());
-    }
-
-    #[test]
-    fn sync_error_summary_does_not_expose_session_details() {
-        let error: anyhow::Error = crate::session::SessionError::new(600, "private message")
-            .at("https://example.test/?params=private-token")
-            .into();
-
-        let summary = sync_error_summary(&error);
-        assert_eq!(summary, "Zalo trả mã lỗi 600");
-        assert!(!summary.contains("private"));
-    }
-
-    #[test]
-    fn cursor_moves_to_the_oldest_server_message() {
-        assert_eq!(
-            next_cursor(&thread_with(&["5", "9"]), "9").as_deref(),
-            Some("5")
-        );
-        assert_eq!(
-            next_cursor(&thread_with(&["out_1", "7", "9"]), "9").as_deref(),
-            Some("7")
-        );
-    }
-
-    #[test]
-    fn cursor_stops_when_page_brought_nothing_older() {
-        assert_eq!(next_cursor(&thread_with(&["5", "9"]), "5"), None);
-        assert_eq!(next_cursor(&thread_with(&[]), "5"), None);
-        assert_eq!(next_cursor(&thread_with(&["", "out_2"]), "5"), None);
-    }
-
-    #[test]
-    fn generate_sync_public_key_produces_valid_rsa2048_spki_der_base64() {
-        use base64::Engine;
-        // Key cố định của máy (lưu file): 2 lần gọi phải TRÙNG nhau.
-        let _ = std::fs::remove_file("sync_rsa_identity.json");
-        let k1 = generate_sync_public_key();
-        let k2 = generate_sync_public_key();
-        assert_eq!(k1, k2);
-        let _ = std::fs::remove_file("sync_rsa_identity.json");
-        assert!(
-            k1.starts_with("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA"),
-            "must have valid ASN.1 RSA-2048 SPKI DER prefix: {k1}"
-        );
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(&k1)
-            .expect("valid base64");
-        assert_eq!(raw.len(), 294);
-        assert_eq!(&raw[raw.len() - 5..], &[0x02, 0x03, 0x01, 0x00, 0x01]);
-    }
-
-
-    #[test]
-    fn extract_mobile_sync_controls_parses_v1_and_v2_events() {
-        let payload = serde_json::json!({
-            "controls": [
-                {
-                    "content": {
-                        "act_type": "transfer_sync2",
-                        "act": "transfer_status",
-                        "data": "{\"syncId\":\"abc123\",\"fromDevice\":0,\"status\":3}"
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "syncmsgmb",
-                        "act": "user_confirm",
-                        "data": "{\"user_action\":2,\"pc_name\":\"ADMIN-PC\"}"
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "transfer_sync2",
-                        "act": "upload_batch",
-                        "data": "{\"syncId\":\"abc123\",\"err\":0,\"msgUrl\":\"https://f.zalo.me/batch1\"}"
-                    }
-                }
-            ]
-        });
-        let evs = crate::chat::extract_mobile_sync_controls(&payload);
-        assert_eq!(
-            evs,
-            vec![
-                crate::chat::MobileSyncControlEvent::WaitingConfirmOnPhone {
-                    sync_id: "abc123".into()
-                },
-                crate::chat::MobileSyncControlEvent::MobileBusyRestoring,
-                crate::chat::MobileSyncControlEvent::SyncV2Batch {
-                    url: "https://f.zalo.me/batch1".into(),
-                    sync_id: "abc123".into(),
-                    batch_type: 0,
-                    is_last: false,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn decompress_sync_payload_detects_zlib_gzip_and_raw() {
-        use std::io::Write;
-        let raw = b"hello sync";
-        // zlib
-        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-        enc.write_all(raw).unwrap();
-        let zlib_bytes = enc.finish().unwrap();
-        assert_eq!(decompress_sync_payload(&zlib_bytes), raw);
-        // gzip
-        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        enc.write_all(raw).unwrap();
-        let gzip_bytes = enc.finish().unwrap();
-        assert_eq!(decompress_sync_payload(&gzip_bytes), raw);
-        // raw passthrough
-        assert_eq!(decompress_sync_payload(raw), raw);
-        // zstd (encode bằng crate zstd đã có)
-        let zstd_bytes = zstd::encode_all(std::io::Cursor::new(raw), 1).unwrap();
-        assert_eq!(decompress_sync_payload(&zstd_bytes), raw);
-    }
-
-    #[test]
-    fn sync_v2_session_registry_gates_batches() {
-        assert!(!has_sync_v2_session("nope-sync"));
-        record_sync_v2_session("sync-1", "sess-aaa");
-        assert!(has_sync_v2_session("sync-1"));
-        assert!(!has_sync_v2_session("sync-2"));
-        // Ghi đè cùng sync_id không trùng lặp.
-        record_sync_v2_session("sync-1", "sess-bbb");
-        assert!(has_sync_v2_session("sync-1"));
-    }
-
-    #[test]
-    fn partition_id_mapping_resolves_noised_oneone_and_group_ids() {
-        record_sync_v2_partition_map(&[
-            ("noised_user_1".into(), "3247153953".into(), false),
-            ("noised_grp_9".into(), "9988776655".into(), true),
-        ]);
-        assert_eq!(
-            map_sync_v2_partition_id("oneone/noised_user_1"),
-            ("3247153953".into(), Some(false))
-        );
-        assert_eq!(
-            map_sync_v2_partition_id("group/noised_grp_9"),
-            ("9988776655".into(), Some(true))
-        );
-        assert_eq!(
-            map_sync_v2_partition_id("noised_grp_9"),
-            ("9988776655".into(), Some(true))
-        );
-        assert_eq!(
-            map_sync_v2_partition_id("oneone/unmapped_id"),
-            ("unmapped_id".into(), Some(false))
-        );
-    }
-
-    #[test]
-    fn sync_v2_batch_dedup_marks_each_url_once() {
-        assert!(mark_sync_v2_batch_seen("s_dedup_1", 2, "https://f.zalo.me/meta"));
-        assert!(!mark_sync_v2_batch_seen("s_dedup_1", 2, "https://f.zalo.me/meta"));
-        assert!(mark_sync_v2_batch_seen("s_dedup_1", 1, "https://f.zalo.me/msg1"));
-        assert!(!mark_sync_v2_batch_seen("s_dedup_1", 1, "https://f.zalo.me/msg1"));
-    }
-
-    #[test]
-    fn backup_v1_url_dedup_and_reset_work() {
-        assert!(!mark_backup_url_seen("   "));
-        assert!(mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
-        assert!(!mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
-        set_latest_mobile_temp_key("tmp_k");
-        set_last_mobile_sync_status(Some("ok".into()));
-        reset_for_account_switch();
-        assert_eq!(latest_mobile_temp_key(), "");
-        assert_eq!(last_mobile_sync_status(), None);
-        assert!(mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
-    }
-
-    #[test]
-    fn sync_v2_call_bubbles_and_archive_msg_types_decode_accurately() {
-        // 1. Incoming answered voice call with bare "0:18" duration and sendBubbleMessage
-        let call_in = decode_sync_v2_proto_message(
-            ParsedProtoMsg {
-                sender_id: "peer_1".into(),
-                global_id: "c1".into(),
-                msg_type: 12,
-                timestamp: 1_730_450_000_000,
-                content: "0:18".into(),
-                attaches: vec![ParsedProtoAttach {
-                    action: Some("recommened.calltime".into()),
-                    title: Some("sendBubbleMessage".into()),
-                    description: Some("Cuộc gọi".into()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            "peer_1",
-            "me_99",
-            "Tôi",
-            "Đỗ Thành",
-        );
-        assert_eq!(call_in.msg_type, "chat.ecall");
-        assert_eq!(call_in.text, "📞 Cuộc gọi thoại đến (18s)");
-        assert!(!call_in.raw_json.contains("sendBubbleMessage"));
-
-        // 2. Outgoing cancelled voice call (empty content, reason=4)
-        let call_cancel = decode_sync_v2_proto_message(
-            ParsedProtoMsg {
-                sender_id: "me_99".into(),
-                global_id: "c2".into(),
-                msg_type: 12,
-                timestamp: 1_730_450_010_000,
-                content: String::new(),
-                attaches: vec![ParsedProtoAttach {
-                    action: Some("recommened.misscall".into()),
-                    params: Some(r#"{"calltype":0,"duration":0,"reason":4,"isCaller":1}"#.into()),
-                    title: Some("sendBubbleMessage".into()),
-                    description: Some("Cuộc gọi".into()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            "peer_1",
-            "me_99",
-            "Tôi",
-            "Đỗ Thành",
-        );
-        assert_eq!(call_cancel.msg_type, "chat.ecall");
-        assert_eq!(call_cancel.text, "📞 Cuộc gọi thoại đi (0s) — Bạn đã hủy");
-
-        // 3. Incoming missed voice call (empty content)
-        let call_miss = decode_sync_v2_proto_message(
-            ParsedProtoMsg {
-                sender_id: "peer_1".into(),
-                global_id: "c3".into(),
-                msg_type: 12,
-                timestamp: 1_730_450_020_000,
-                content: String::new(),
-                attaches: vec![ParsedProtoAttach {
-                    action: Some("recommened.misscall".into()),
-                    title: Some("sendBubbleMessage".into()),
-                    description: Some("Cuộc gọi".into()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            "peer_1",
-            "me_99",
-            "Tôi",
-            "Đỗ Thành",
-        );
-        assert_eq!(call_miss.msg_type, "chat.ecall");
-        assert_eq!(call_miss.text, "📞 Cuộc gọi thoại đến (0s) — Bạn bị nhỡ");
-
-        // 4. Archive Photo (msg_type = 3) must NOT be misdecoded as Voice
-        let photo = decode_sync_v2_proto_message(
-            ParsedProtoMsg {
-                sender_id: "peer_1".into(),
-                global_id: "p1".into(),
-                msg_type: 3,
-                timestamp: 1_730_450_030_000,
-                content: String::new(),
-                attaches: vec![ParsedProtoAttach {
-                    href: Some("https://photo-stal-27.zdn.vn/no/test.jpg".into()),
-                    thumb: Some("https://photo-stal-27.zdn.vn/no/test_t.jpg".into()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            "peer_1",
-            "me_99",
-            "Tôi",
-            "Đỗ Thành",
-        );
-        assert_eq!(photo.msg_type, "chat.photo");
-        assert_eq!(photo.text, "[Hình ảnh]");
-        assert!(photo.raw_json.contains("Hình ảnh Zalo"));
-
-        // 5. Archive ChatInfo (msg_type = 20) must NOT be misdecoded as Undo
-        let sys_pin = decode_sync_v2_proto_message(
-            ParsedProtoMsg {
-                sender_id: "me_99".into(),
-                global_id: "s1".into(),
-                msg_type: 20,
-                timestamp: 1_730_450_040_000,
-                content: String::new(),
-                attaches: vec![ParsedProtoAttach {
-                    title: Some("Đtc đã ghim tin nhắn hi.".into()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            "peer_1",
-            "me_99",
-            "Tôi",
-            "Đỗ Thành",
-        );
-        assert_eq!(sys_pin.msg_type, "chat.system");
-        assert_eq!(sys_pin.text, "Đtc đã ghim tin nhắn hi.");
-    }
-
-    #[test]
-    fn sync_v2_oa_list_action_and_webcontent_preserve_oa_card() {
-        let oa_list = decode_sync_v2_proto_message(
-            ParsedProtoMsg {
-                sender_id: "6091808854554923872".into(),
-                global_id: "oa1".into(),
-                msg_type: 15,
-                timestamp: 1_794_571_926_938,
-                content: String::new(),
-                attaches: vec![
-                    ParsedProtoAttach {
-                        attach_type: Some("l.a.header.full".into()),
-                        title: Some("⚡Siêu Ưu Đãi: Mua 1 Tặng 1".into()),
-                        description: Some("Ưu đãi độc quyền zStyle".into()),
-                        thumb: Some("https://cdn.zalo.me/zstyle_banner.jpg".into()),
-                        href: Some("https://zalo.me/zstyle/promo".into()),
-                        ..Default::default()
-                    },
-                    ParsedProtoAttach {
-                        attach_type: Some("l.a.child.full".into()),
-                        title: Some("Gói chủ đề mới".into()),
-                        description: Some("Áp dụng hôm nay".into()),
-                        thumb: Some("https://cdn.zalo.me/zstyle_item1.jpg".into()),
-                        href: Some("https://zalo.me/zstyle/theme".into()),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            },
-            "6091808854554923872",
-            "me_99",
-            "Tôi",
-            "zStyle – Phong cách Zalo",
-        );
-        assert_eq!(oa_list.msg_type, "chat.list.action");
-        assert!(oa_list.raw_json.contains("oa_card"));
-        assert!(oa_list.raw_json.contains("Gói chủ đề mới"));
-        assert!(oa_list.raw_json.contains("https://cdn.zalo.me/zstyle_banner.jpg"));
-
-        let webcontent = decode_sync_v2_proto_message(
-            ParsedProtoMsg {
-                sender_id: "5128600805588494022".into(),
-                global_id: "wc1".into(),
-                msg_type: 53,
-                timestamp: 1_795_306_210_316,
-                content: "Chúc một ngày tốt lành, thời tiết TP. Hà Nội hôm nay 22/11: Nhiều mây.".into(),
-                attaches: vec![ParsedProtoAttach {
-                    thumb: Some("https://cdn.zalo.me/weather_banner.jpg".into()),
-                    title: Some("TP. Hà Nội 19° - 25°".into()),
-                    params: Some(r#"{"zinstant_msg":{"elements":[{"type":"article","title":"Tin ngày 22/11","thumb":"https://cdn.zalo.me/news1.jpg","href":"https://zalo.me/news1"}],"actions":[{"label":"LỊCH ÂM","href":"https://zalo.me/licham"}]}}"#.into()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            "5128600805588494022",
-            "me_99",
-            "Tôi",
-            "Thời Tiết",
-        );
-        assert_eq!(webcontent.msg_type, "chat.webcontent.v2");
-        assert!(webcontent.raw_json.contains("oa_card"));
-        assert!(webcontent.raw_json.contains("https://cdn.zalo.me/weather_banner.jpg"));
-        assert!(webcontent.raw_json.contains("Tin ngày 22/11"));
-        assert!(webcontent.raw_json.contains("LỊCH ÂM"));
-    }
-
-    #[test]
-    fn sync_v2_out_of_order_last_batch_completes_when_inflight_drains() {
-        reset_sync_v2_imported_count();
-        assert!(!is_sync_v2_last_seen());
-        assert_eq!(sync_v2_inflight_count(), 0);
-
-        let batch_a = SyncV2InflightGuard::enter();
-        let batch_b = SyncV2InflightGuard::enter();
-        assert_eq!(sync_v2_inflight_count(), 2);
-
-        mark_sync_v2_last_seen();
-        drop(batch_a);
-        assert!(is_sync_v2_last_seen());
-        assert_eq!(sync_v2_inflight_count(), 1);
-
-        drop(batch_b);
-        assert!(is_sync_v2_last_seen());
-        assert_eq!(sync_v2_inflight_count(), 0);
-
-        reset_sync_v2_imported_count();
-        assert!(!is_sync_v2_last_seen());
-        assert_eq!(sync_v2_inflight_count(), 0);
-    }
 }

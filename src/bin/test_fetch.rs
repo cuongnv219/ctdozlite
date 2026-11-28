@@ -27,7 +27,6 @@ async fn main() -> Result<()> {
     println!("  Convers Host: {}", s.domains.convers_api);
     println!("  Chat Host:    {}", s.domains.chat);
 
-    // 1. Test getfriends
     println!("\n--- [1] Thử gọi /api/social/friend/getfriends ---");
     let mut friends = match zalo_rust::chat::get_friends(&s).await {
         Ok(f) => {
@@ -70,7 +69,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // 2. Test get-last-msgs
     println!("\n--- [2] Thử gọi poll_new_messages (lp_chat + get-last-msgs + Cloud của tôi) ---");
     let mut ps = zalo_rust::chat::PollState::default();
     if let Err(e) = zalo_rust::chat::poll_new_messages(&s, &mut ps, &mut friends).await {
@@ -84,7 +82,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 3. Test get_groups
     println!("\n--- [3] Thử gọi /api/group/getlg/v4 (danh sách nhóm) ---");
     match zalo_rust::chat::get_groups(&s).await {
         Ok(groups) => {
@@ -92,7 +89,6 @@ async fn main() -> Result<()> {
             for (i, g) in groups.iter().enumerate() {
                 println!("  [{i}] Group ID: {:<20} Tên: {}", g.id, g.name);
             }
-            // 4. Test get_group_history on first group if available
             if let Some(first_g) = groups.first() {
                 println!("\n--- [4] Thử gọi /api/group/history cho nhóm {} ---", first_g.id);
                 match zalo_rust::chat::get_group_history(&s, &first_g.id, 10).await {
@@ -114,13 +110,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 5. Cache persistence test
     println!("\n--- [5] Kiểm tra lưu và đọc threads_cache.json ---");
     zalo_rust::chat::save_threads_cache(&friends);
     let reloaded = zalo_rust::chat::load_threads_cache();
     println!("✓ threads_cache.json: Đã lưu và nạp lại thành công {} hội thoại.", reloaded.len());
 
-    // 6. Optional send test (1-1 or group)
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(pos) = args.iter().position(|a| a == "--send") {
         if let (Some(to_id), Some(text)) = (args.get(pos + 1), args.get(pos + 2)) {

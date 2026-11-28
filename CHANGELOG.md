@@ -5,6 +5,25 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-28
+
+### Added (Tính năng mới & Đóng góp cộng đồng)
+- **Khóa ứng dụng bằng mã PIN 4 số (App Lock) (`src/app_lock.rs`, `src/gui/app_lock_ui.rs`, [#110](https://github.com/ctdoteam1110/ctdozlite/issues/110), [#211](https://github.com/ctdoteam1110/ctdozlite/issues/211)):** Bổ sung màn hình khóa PIN 4 số, modal thiết lập nhanh, nút khóa nhanh trên thanh tiêu đề (`Ctrl+L`), tự khóa khi rảnh/ngủ máy, ẩn nội dung thông báo khi khóa, cách ly cuộc gọi đến và sửa con trỏ nhập nhanh 4 ô PIN.
+- **Trình quản lý bộ nhớ 3 tầng (Storage Manager) (`src/storage_manager.rs`, `src/gui/modals.rs`):** Quét và phân tách dung lượng dữ liệu gốc, media, bộ đệm và tệp hệ thống; hỗ trợ dọn dẹp an toàn và di chuyển thư mục lưu trữ (`relocate_storage_root`), đồng thời chuyển toàn bộ bộ kiểm thử ra khỏi `src/` vào thư mục `tests/`.
+- **Chế độ thu gọn xuống khay hệ thống Windows (Close-to-Tray) ([PR #213](https://github.com/ctdoteam1110/ctdozlite/pull/213) bởi @Leoaxo098):** Cho phép đóng cửa sổ thu gọn xuống khay hệ thống Windows kèm thông báo tray tuân thủ chế độ ẩn nội dung, đồng thời sửa lỗi lưu `app_settings.json` trước khi đăng nhập.
+- **Nút thả tim nhanh (`❤️`) & Tô sáng `@mention` chính xác theo UTF-16 ([PR #174](https://github.com/ctdoteam1110/ctdozlite/pull/174) bởi @minhngoc2512):** Thêm nút thả tim nhanh trực tiếp trên thanh hover tin nhắn; đọc chính xác vị trí `pos`/`len` UTF-16 từ metadata kèm kiểm tra ranh giới từ (`@An` không tô nhầm `@Anh`) và giữ fallback 5 từ tiếng Việt.
+- **Chặn mở trùng cửa sổ theo thư mục dữ liệu ([PR #182](https://github.com/ctdoteam1110/ctdozlite/pull/182) bởi @minhngoc2512):** Đảm bảo mỗi thư mục dữ liệu chỉ chạy một tiến trình GUI duy nhất trên Linux/macOS và tự bật lại cửa sổ đang mở.
+
+### Fixed (Sửa lỗi & Ổn định giao diện / đa nền tảng)
+- **Giữ nguyên kích thước & tỷ lệ media khi đang tải + Vanish Tombstone ([PR #192](https://github.com/ctdoteam1110/ctdozlite/pull/192) bởi @minhngoc2512):** Lưu `media_size` vào SQLite, giữ chỗ đúng tỷ lệ cho ảnh/video/sticker/link để triệt tiêu nhảy thanh cuộn khi tải ảnh, và gia cố `VANISH_TOMBSTONE_JSON` cho tin nhắn tự xóa.
+- **Sửa lỗi đa nền tảng Linux/macOS ([PR #207](https://github.com/ctdoteam1110/ctdozlite/pull/207), [PR #208](https://github.com/ctdoteam1110/ctdozlite/pull/208) bởi @ziq3):** Thoát ứng dụng sạch khi đóng cửa sổ trên Linux Wayland thay vì ẩn mất cửa sổ; chỉ hiển thị corner popup tùy chỉnh trên Windows để Linux/macOS dùng thông báo gốc hệ điều hành.
+- **Triệt tiêu treo/giật giao diện & sửa lỗi hiển thị ([#156](https://github.com/ctdoteam1110/ctdozlite/issues/156), [#203](https://github.com/ctdoteam1110/ctdozlite/issues/203), [#205](https://github.com/ctdoteam1110/ctdozlite/issues/205), [#206](https://github.com/ctdoteam1110/ctdozlite/issues/206)):** Khắc phục deadlock khi double-click trả lời tin nhắn, lỗi menu chuột phải, nhấp nháy cuộn khung chat & texture thrashing; giữ đúng tỷ lệ ảnh và tên tác giả ở Nhật ký/Feed; hiển thị rõ nhãn trích dẫn ảnh/media; chuẩn hóa ID tắt thông báo nhóm; sửa tìm FFmpeg Windows & bảo vệ texture video cuộc gọi.
+
+### Vinh danh đóng góp mới trong v0.1.4
+- **@minhngoc2512:** [PR #192](https://github.com/ctdoteam1110/ctdozlite/pull/192) (giữ kích thước media & vanish tombstone), [PR #174](https://github.com/ctdoteam1110/ctdozlite/pull/174) (nút thả tim nhanh & `@mention` UTF-16), [PR #182](https://github.com/ctdoteam1110/ctdozlite/pull/182) (single-instance GUI).
+- **@Leoaxo098:** [PR #213](https://github.com/ctdoteam1110/ctdozlite/pull/213) (Windows close-to-tray & pre-login settings), [PR #212](https://github.com/ctdoteam1110/ctdozlite/pull/212) (báo cáo & đề xuất sửa nhảy cuộn ảnh).
+- **@ziq3:** [PR #207](https://github.com/ctdoteam1110/ctdozlite/pull/207) (Wayland quit-on-close), [PR #208](https://github.com/ctdoteam1110/ctdozlite/pull/208) (corner popup Windows-only), [PR #209](https://github.com/ctdoteam1110/ctdozlite/pull/209) (phát hiện deadlock double-click reply).
+
 ## [0.1.3] - 2026-11-23
 
 ### Added (Tính năng mới & Cộng đồng PRs)

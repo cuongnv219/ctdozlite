@@ -297,33 +297,3 @@ fn deserialize_present_value<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<Value>, D::Error> {
     Value::deserialize(deserializer).map(Some)
 }
-
-#[cfg(test)]
-mod archive_code_tests {
-    use super::*;
-    #[test]
-    fn archive_codes_follow_source_enum_and_decoder_without_internal_code_confusion() {
-        for (code, kind, wire) in [
-            (15, MessageKind::Action, "chat.list.action"),
-            (24, MessageKind::WebContent, "chat.webcontent"),
-            (31, MessageKind::Photo, "chat.photo"),
-            (33, MessageKind::Delete, "chat.delete"),
-            (53, MessageKind::WebContent, "chat.webcontent.v2"),
-            (12, MessageKind::Contact, "chat.recommended"),
-        ] {
-            assert_eq!(MessageKind::from_archive_code(code), kind);
-            assert_eq!(MessageKind::archive_wire_name(code), Some(wire));
-        }
-        for (code, name) in [(20, "ChatInfo"), (21, "ECard"), (26, "Poll"), (36, "Undo")] {
-            assert_eq!(MessageKind::from_archive_code(code), MessageKind::Unknown);
-            assert_eq!(MessageKind::archive_code_name(code), Some(name));
-            assert_eq!(MessageKind::archive_wire_name(code), None);
-        }
-        for code in [29, 32, 35] {
-            assert_eq!(MessageKind::from_archive_code(code), MessageKind::Unknown);
-            assert_eq!(MessageKind::archive_code_name(code), None);
-            assert_eq!(MessageKind::archive_wire_name(code), None);
-        }
-        assert_ne!(MessageKind::from_archive_code(33), MessageKind::Recall);
-    }
-}

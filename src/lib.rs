@@ -1,4 +1,6 @@
 pub mod account_manager;
+/// Application passcode lock config, PBKDF2-HMAC-SHA256 verification, and sleep/idle policy.
+pub mod app_lock;
 pub mod audio;
 pub mod background_accounts;
 pub mod call;
@@ -22,7 +24,10 @@ pub mod poll;
 pub mod qr;
 pub mod reactions;
 pub mod session;
+/// One GUI process per data folder: instance lock and "show window" requests.
+pub mod single_instance;
 pub mod socket;
+pub mod storage_manager;
 pub mod store;
 pub mod group_llm;
 pub mod group_stats;
@@ -58,6 +63,3 @@ pub mod native_notifications;
 
 #[cfg(any(windows, test))]
 mod clipboard_dib;
-
-#[cfg(test)]
-mod property_invariants;

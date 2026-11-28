@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "ctdozlite"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
@@ -1180,6 +1180,7 @@ dependencies = [
  "getrandom 0.3.4",
  "image",
  "ksni",
+ "libc",
  "lzma-rs",
  "md-5",
  "opus",
@@ -1198,6 +1199,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "wasmtime",
+ "windows-sys 0.61.2",
  "zip",
  "zstd",
 ]

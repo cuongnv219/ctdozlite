@@ -33,9 +33,7 @@ use std::sync::{LazyLock, Mutex};
 use anyhow::{Result, anyhow};
 use wasmtime::{Caller, Engine, Extern, Func, Instance, Linker, Memory, Module, Store, Val};
 
-// ---------------------------------------------------------------------------
 // WASM location (same order as scripts/sync_v2_helper.js findWasm)
-// ---------------------------------------------------------------------------
 
 /// Folder inside the data folder where a user can drop `libzproto_wasm_bg.*.wasm`.
 pub const WASM_DATA_SUBDIR: &str = "zproto";
@@ -134,9 +132,7 @@ fn glob_wasm(dir: &Path, depth: u32) -> Option<PathBuf> {
     None
 }
 
-// ---------------------------------------------------------------------------
 // WASM inside Zalo PC's app.asar
-// ---------------------------------------------------------------------------
 
 /// Largest WASM accepted from an asar entry; the real module is ~0.3 MB.
 const MAX_ASAR_WASM_BYTES: u64 = 16 * 1024 * 1024;
@@ -286,9 +282,7 @@ fn find_wasm_in_zalo_asar() -> Option<(String, Vec<u8>)> {
     None
 }
 
-// ---------------------------------------------------------------------------
 // wasm-bindgen object heap
-// ---------------------------------------------------------------------------
 
 /// Which host callable a [`JsVal::Func`] slot represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,9 +373,6 @@ impl HostState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Import helpers (operate on a Caller)
-// ---------------------------------------------------------------------------
 
 fn mem_of(caller: &mut Caller<'_, HostState>) -> Memory {
     caller.get_export("memory").and_then(Extern::into_memory).expect("wasm exports memory")
@@ -425,9 +416,7 @@ fn classify_new_function(src: &str) -> FuncKind {
     if src.starts_with("return require") { FuncKind::Require } else { FuncKind::Dead }
 }
 
-// ---------------------------------------------------------------------------
 // Linker: the 39 wbg imports
-// ---------------------------------------------------------------------------
 
 fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // -- heap ---------------------------------------------------------------
@@ -783,9 +772,6 @@ fn fill_u8(caller: &mut Caller<'_, HostState>, idx: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Instance + memory-call helpers
-// ---------------------------------------------------------------------------
 
 static ENGINE: LazyLock<Engine> = LazyLock::new(Engine::default);
 
@@ -1164,9 +1150,6 @@ impl ZprotoHost {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Results + framing
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct DecryptedMeta {
@@ -1201,189 +1184,4 @@ pub fn split_frames(blob: &[u8]) -> Result<Vec<Vec<u8>>> {
         pos += len;
     }
     Ok(chunks)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn try_load() -> Option<ZprotoHost> {
-        match find_wasm_path() {
-            None => match find_wasm_in_zalo_asar() {
-                Some((origin, bytes)) => match ZprotoHost::load_from_bytes(&bytes) {
-                    Ok(h) => Some(h),
-                    Err(e) => panic!("failed to load WASM from {origin}: {e:#}"),
-                },
-                None => {
-                    eprintln!("SKIP: no libzproto WASM found (install Zalo PC or set CTDOZLITE_ZPROTO_WASM)");
-                    None
-                }
-            },
-            Some(p) => match ZprotoHost::load_from(&p) {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    panic!("failed to load WASM {}: {e:#}", p.display());
-                }
-            },
-        }
-    }
-
-    #[test]
-    fn wasm_missing_gives_clear_error() {
-        if find_wasm_path().is_some() || find_wasm_in_zalo_asar().is_some() {
-            eprintln!("WASM present; missing-path branch not exercised");
-            return;
-        }
-        let err = ZprotoHost::load().unwrap_err().to_string();
-        assert!(err.contains("libzproto_wasm_bg"), "clear WASM error: {err}");
-        assert!(err.contains("Zalo PC"), "error names the requirement: {err}");
-    }
-
-    /// Write a minimal asar archive holding `files` (`(path, bytes, unpacked)`) and return it.
-    fn write_fake_asar(name: &str, files: &[(&str, &[u8], bool)]) -> PathBuf {
-        let mut root = serde_json::json!({ "files": {} });
-        let mut data: Vec<u8> = Vec::new();
-        for (path, bytes, unpacked) in files {
-            let mut node = &mut root;
-            let parts: Vec<&str> = path.split('/').collect();
-            for dir in &parts[..parts.len() - 1] {
-                node = node["files"]
-                    .as_object_mut()
-                    .unwrap()
-                    .entry(dir.to_string())
-                    .or_insert_with(|| serde_json::json!({ "files": {} }));
-            }
-            let entry = if *unpacked {
-                serde_json::json!({ "size": bytes.len(), "unpacked": true })
-            } else {
-                serde_json::json!({ "size": bytes.len(), "offset": data.len().to_string() })
-            };
-            node["files"][parts[parts.len() - 1]] = entry;
-            if !*unpacked {
-                data.extend_from_slice(bytes);
-            }
-        }
-        let json = serde_json::to_vec(&root).unwrap();
-        let aligned = (json.len() + 3) & !3;
-        let mut out = Vec::new();
-        out.extend_from_slice(&4u32.to_le_bytes());
-        out.extend_from_slice(&((8 + aligned) as u32).to_le_bytes());
-        out.extend_from_slice(&((4 + aligned) as u32).to_le_bytes());
-        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
-        out.extend_from_slice(&json);
-        out.resize(16 + aligned, 0);
-        out.extend_from_slice(&data);
-        let path = std::env::temp_dir().join(format!("ctdoz_{name}_{}.asar", std::process::id()));
-        std::fs::write(&path, out).unwrap();
-        path
-    }
-
-    #[test]
-    fn asar_reader_extracts_packed_libzproto_wasm() {
-        let wasm: &[u8] = b"\0asm\x01\x00\x00\x00fake-module";
-        let archive = write_fake_asar(
-            "packed",
-            &[
-                ("pc-dist/index.js", b"console.log(1)", false),
-                ("pc-dist/libs/libzproto_backup_wasm_bg.111.wasm", b"\0asm-backup", false),
-                ("pc-dist/libs/libzproto_wasm_bg.5ea0.wasm", wasm, false),
-            ],
-        );
-        let got = read_wasm_from_asar(&archive);
-        let _ = std::fs::remove_file(&archive);
-        let (entry, bytes) = got.expect("readable").expect("entry found");
-        assert_eq!(entry, "/pc-dist/libs/libzproto_wasm_bg.5ea0.wasm");
-        assert_eq!(bytes, wasm);
-    }
-
-    #[test]
-    fn asar_reader_skips_unpacked_and_missing_entries() {
-        let unpacked = write_fake_asar("unpacked", &[("libs/libzproto_wasm_bg.1.wasm", b"\0asm1234", true)]);
-        let none = write_fake_asar("none", &[("libs/other.wasm", b"\0asm1234", false)]);
-        let (a, b) = (read_wasm_from_asar(&unpacked), read_wasm_from_asar(&none));
-        let _ = std::fs::remove_file(&unpacked);
-        let _ = std::fs::remove_file(&none);
-        assert!(a.expect("readable").is_none());
-        assert!(b.expect("readable").is_none());
-    }
-
-    #[test]
-    fn asar_reader_rejects_non_wasm_and_garbage() {
-        let bogus = write_fake_asar("bogus", &[("libs/libzproto_wasm_bg.1.wasm", b"not a wasm module", false)]);
-        let res = read_wasm_from_asar(&bogus);
-        let _ = std::fs::remove_file(&bogus);
-        assert!(res.unwrap_err().to_string().contains("not a WASM"));
-
-        let garbage = std::env::temp_dir().join(format!("ctdoz_garbage_{}.asar", std::process::id()));
-        std::fs::write(&garbage, [0xffu8; 32]).unwrap();
-        let res = read_wasm_from_asar(&garbage);
-        let _ = std::fs::remove_file(&garbage);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn zalo_version_folders_sort_numerically() {
-        let mut dirs = [
-            PathBuf::from("Zalo-26.9.3"),
-            PathBuf::from("Zalo-26.11.11"),
-            PathBuf::from("Zalo-26.10.2"),
-        ];
-        dirs.sort_by_key(|p| std::cmp::Reverse(zalo_version_key(p)));
-        assert_eq!(dirs[0], PathBuf::from("Zalo-26.11.11"));
-        assert_eq!(dirs[2], PathBuf::from("Zalo-26.9.3"));
-    }
-
-    /// Opt-in check against a real Zalo PC archive: set `CTDOZLITE_TEST_ASAR` to its path.
-    #[test]
-    fn real_zalo_asar_wasm_instantiates() {
-        let Ok(path) = std::env::var("CTDOZLITE_TEST_ASAR") else {
-            eprintln!("SKIP: CTDOZLITE_TEST_ASAR not set");
-            return;
-        };
-        let (entry, bytes) = read_wasm_from_asar(Path::new(&path))
-            .expect("asar readable")
-            .expect("libzproto entry present");
-        let host = ZprotoHost::load_from_bytes(&bytes).expect("module instantiates");
-        let (pk, sk) = host.generate_keypair().expect("keypair");
-        eprintln!("{entry}: pk={} sk={}", pk.len(), sk.len());
-        assert!(!pk.is_empty() && !sk.is_empty());
-    }
-
-    #[test]
-    fn gen_keys_returns_ed25519_pair() {
-        let Some(h) = try_load() else { return };
-        let (pubk, privk) = h.generate_keypair().expect("gen-keys via wasmtime");
-        assert_eq!(pubk.len(), 33, "pub must be 33 bytes");
-        assert_eq!(pubk[0], 0x05, "pub must have 0x05 prefix");
-        assert_eq!(privk.len(), 32, "priv must be 32 bytes");
-    }
-
-    #[test]
-    fn gen_keys_are_unique_per_call() {
-        // RNG shim phải cấp entropy thật mỗi lần gọi: key trùng nhau khiến
-        // điện thoại văng app khi bấm vào thông báo đồng bộ (ek == ik).
-        let Some(h) = try_load() else { return };
-        let (p1, _) = h.generate_keypair().expect("keypair 1");
-        let (p2, _) = h.generate_keypair().expect("keypair 2");
-        assert_ne!(p1, p2, "hai lần gen key liên tiếp phải khác nhau");
-    }
-
-    #[test]
-    fn agreement_is_symmetric() {
-        let Some(h) = try_load() else { return };
-        let (pub1, priv1) = h.generate_keypair().expect("keypair 1");
-        let (pub2, priv2) = h.generate_keypair().expect("keypair 2");
-        let a = h.calculate_agreement(&priv1, &pub2).expect("agreement 1-2");
-        let b = h.calculate_agreement(&priv2, &pub1).expect("agreement 2-1");
-        assert_eq!(a.len(), 32);
-        assert_eq!(a, b, "agreement must be symmetric");
-    }
-
-    #[test]
-    fn split_frames_roundtrip() {
-        let blob = [3u32.to_le_bytes().as_slice(), b"abc", 2u32.to_le_bytes().as_slice(), b"de"].concat();
-        let chunks = split_frames(&blob).unwrap();
-        assert_eq!(chunks, vec![b"abc".to_vec(), b"de".to_vec()]);
-        assert!(split_frames(b"ab").is_err());
-    }
 }

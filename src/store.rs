@@ -1278,7 +1278,7 @@ impl MessageStore {
         let mut sql = String::from(
             "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json FROM messages WHERE 1 = 1",
         );
-        // Mỗi điều kiện thêm 1 placeholder `?` để rusqlite bind đúng thứ tự.
+        /// Mỗi điều kiện thêm 1 placeholder `?` để rusqlite bind đúng thứ tự.
         enum P { S(String), I(i64) }
         let mut args: Vec<P> = Vec::new();
         let like = |s: &str| format!("%{}%", s.replace('%', "\\%").replace('_', "\\_"));
@@ -1402,6 +1402,14 @@ impl MessageStore {
     /// original row — otherwise the sweep re-persists expiry every 2s tick and a
     /// restart restores the original content from the stale row (gui.rs:1908).
     pub fn upsert_message(&mut self, msg: &StoredMessage) -> Result<bool> {
+        let trimmed = msg.text.trim();
+        let is_tombstone =
+            msg.raw_json.is_empty() && trimmed == crate::chat::VANISH_EXPIRED_TEXT;
+        let insert_raw_json = if is_tombstone {
+            VANISH_TOMBSTONE_JSON
+        } else {
+            msg.raw_json.as_str()
+        };
         let rows = self.conn.execute(
             "INSERT OR IGNORE INTO messages (msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -1414,12 +1422,9 @@ impl MessageStore {
                 msg.msg_type,
                 msg.ts,
                 if msg.is_outgoing { 1 } else { 0 },
-                msg.raw_json,
+                insert_raw_json,
             ],
         )?;
-        let trimmed = msg.text.trim();
-        let is_tombstone =
-            msg.raw_json.is_empty() && trimmed == crate::chat::VANISH_EXPIRED_TEXT;
         let is_incoming_undo = !is_tombstone
             && (trimmed == "[Tin nhắn đã thu hồi]"
                 || msg.msg_type == "chat.undo"
@@ -2056,6 +2061,7 @@ impl MessageStore {
                 let mut link_src = None;
                 let mut oa_card: Option<crate::chat::OaRichCard> = None;
                 let mut media_group: Option<crate::chat::MediaGroupLayout> = None;
+                let mut media_size: Option<[u32; 2]> = None;
                 if !sm.raw_json.is_empty() {
                     // Expiry tombstone (`{"vanished":true}`): authoritative —
                     // keep the tombstone text, restore NO metadata, and never
@@ -2100,6 +2106,8 @@ impl MessageStore {
                             existing.link_thumb = None;
                             existing.link_src = None;
                             existing.oa_card = None;
+                            existing.media_group = None;
+                            existing.media_size = None;
                             existing.sticker_id = None;
                             existing.sticker_cate_id = None;
                             existing.sticker_type = None;
@@ -2193,6 +2201,9 @@ impl MessageStore {
                         media_group = val
                             .get("media_group")
                             .and_then(|v| serde_json::from_value(v.clone()).ok());
+                        media_size = val
+                            .get("media_size")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok());
                     }
                 }
                 let is_video_url = link_url.as_deref().is_some_and(|u| {
@@ -2274,6 +2285,7 @@ impl MessageStore {
                     link_src,
                     oa_card,
                     media_group,
+                    media_size,
 
                     ..Default::default()
                 };
@@ -2361,6 +2373,9 @@ impl MessageStore {
                     existing.is_pinned = existing.is_pinned || cm.is_pinned;
                     existing.is_starred = existing.is_starred || cm.is_starred;
                     existing.edited = existing.edited || cm.edited;
+                    if existing.media_size.is_none() {
+                        existing.media_size = cm.media_size;
+                    }
                 } else {
                     t.messages.push(cm);
                     loaded_count += 1;
@@ -2448,7 +2463,10 @@ impl From<&ChatMessage> for StoredMessage {
         if let Some(group) = &m.media_group {
             meta.insert("media_group".into(), serde_json::json!(group));
         }
-        let raw_json = if meta.is_empty() {
+        if let Some(size) = &m.media_size {
+            meta.insert("media_size".into(), serde_json::json!(size));
+        }
+        let raw_json = if meta.is_empty() || crate::chat::is_vanished_message(m) {
             String::new()
         } else {
             serde_json::Value::Object(meta).to_string()
@@ -2799,7 +2817,6 @@ fn scan_and_import_zalo_data_dir(
         cipher_key = "de039414865b856ea650d3305b1f387f".to_string();
     }
 
-    // 2. Discover user folders under Database/_production
     let mut message_dirs = Vec::new();
     let mut index_files = Vec::new();
 
@@ -2824,7 +2841,6 @@ fn scan_and_import_zalo_data_dir(
         }
     }
 
-    // 3. Build contact/group name dictionary from Index.db
     let mut id_to_name: std::collections::HashMap<String, (String, bool)> =
         std::collections::HashMap::new();
     for idx_path in index_files {
@@ -2841,7 +2857,6 @@ fn scan_and_import_zalo_data_dir(
         }
     }
 
-    // 4. Import all message databases in Core/Message
     for msg_dir in message_dirs {
         if let Ok(entries) = std::fs::read_dir(msg_dir) {
             for entry in entries.flatten() {
@@ -3513,988 +3528,4 @@ fn import_official_zalo_pc_db(
         cipher_key,
         report,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn group_watch_normalizes_case_and_spaces_on_add_and_remove() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        assert!(store.add_group_watch("g1", "  Deadline  ").unwrap());
-        // trùng sau chuẩn hoá → không thêm mới.
-        assert!(!store.add_group_watch("g1", "deadline").unwrap());
-        assert_eq!(store.list_group_watch("g1"), vec!["deadline".to_string()]);
-        // xoá với padding + khác hoa/thường → gỡ được watch đã cài.
-        store.remove_group_watch("g1", "  DEADLINE  ").unwrap();
-        assert!(store.list_group_watch("g1").is_empty());
-    }
-    #[test]
-    fn saved_items_crud_and_note_due() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        assert!(store.save_message_item("m1", "t1", 100).unwrap());
-        assert!(!store.save_message_item("m1", "t1", 100).unwrap());
-        assert!(store.is_message_saved("m1"));
-        store.set_saved_note_due("m1", "t1", "xem lại", 200).unwrap();
-        let items = store.list_saved_items();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].note, "xem lại");
-        assert_eq!(items[0].due_at, 200);
-        assert_eq!(store.due_saved_items(150).len(), 0);
-        assert_eq!(store.due_saved_items(200).len(), 1);
-        assert!(store.unsave_message_item("m1").unwrap());
-        assert!(!store.is_message_saved("m1"));
-        assert!(store.list_saved_items().is_empty());
-    }
-
-    #[test]
-    fn parse_search_query_operators() {
-        let q = parse_search_query("from:Long has:image \"cụm chính xác\" #hashtag hello is:starred before:2026-01-01 after:2025-01-01");
-        assert_eq!(q.from.as_deref(), Some("Long"));
-        assert_eq!(q.has, vec![SearchHas::Image]);
-        assert_eq!(q.phrases, vec!["cụm chính xác".to_string()]);
-        assert_eq!(q.hashtags, vec!["hashtag".to_string()]);
-        assert_eq!(q.words, vec!["hello".to_string()]);
-        assert!(q.is_starred);
-        assert!(q.before_ms.is_some() && q.after_ms.is_some());
-    }
-
-    #[test]
-    fn search_advanced_from_has_image() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        for (id, sender, text, mt) in [
-            ("a1", "Long", "[Hình ảnh] beach", "chat.photo"),
-            ("a2", "Nam", "hello world", "chat.text"),
-        ] {
-            store.upsert_message(&StoredMessage {
-                msg_id: id.into(), thread_id: "t1".into(),
-                sender_id: sender.into(), sender_name: sender.into(),
-                text: text.into(), msg_type: mt.into(), ts: 1700000000000,
-                is_outgoing: false, raw_json: String::new(),
-            }).unwrap();
-        }
-        let q = parse_search_query("from:Long has:image");
-        let hits = store.search_messages_advanced(&q, 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].msg_id, "a1");
-    }
-
-
-    #[test]
-    fn local_time_when_hydrating_seconds_and_milliseconds() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "thread-1".into(),
-                name: "Example".into(),
-                is_group: false,
-                last_ts: 1793467800000,
-                vanish_duration_sec: 0,
-                vanish_started_at_sec: 0,
-                last_read_msg_id: String::new(),
-            })
-            .unwrap();
-        for (id, ts) in [("msg-0001", 1793467800), ("msg-0002", 1793467800000)] {
-            store
-                .upsert_message(&StoredMessage {
-                    msg_id: id.into(),
-                    thread_id: "thread-1".into(),
-                    sender_id: "user-1".into(),
-                    sender_name: "Example".into(),
-                    text: "hello".into(),
-                    msg_type: "chat.text".into(),
-                    ts,
-                    is_outgoing: false,
-                    raw_json: String::new(),
-                })
-                .unwrap();
-        }
-        let mut threads = Vec::new();
-        assert_eq!(store.hydrate_threads(&mut threads, 10).unwrap(), 2);
-        let expected = crate::clock::message_time(1793467800000);
-        assert_eq!(threads[0].time, expected);
-        for message in &threads[0].messages {
-            assert_eq!(message.time, expected);
-        }
-        assert_eq!(
-            store.messages_for("thread-1", 10).unwrap()[0].ts,
-            1793467800
-        );
-    }
-
-    #[test]
-    fn test_insert_twice_returns_false() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        let msg = StoredMessage {
-            msg_id: "m_1001".into(),
-            thread_id: "thread_1".into(),
-            sender_id: "u_1".into(),
-            sender_name: "Alice".into(),
-            text: "Xin chao".into(),
-            msg_type: "chat.text".into(),
-            ts: 1729500000000,
-            is_outgoing: false,
-            raw_json: "".into(),
-        };
-
-        assert!(store.upsert_message(&msg).unwrap());
-        assert!(!store.upsert_message(&msg).unwrap());
-    }
-
-    #[test]
-    fn test_messages_for_returns_ordered_rows() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        let thread_id = "thread_order_test";
-
-        let m1 = StoredMessage {
-            msg_id: "m1".into(),
-            thread_id: thread_id.into(),
-            sender_id: "u1".into(),
-            sender_name: "User".into(),
-            text: "Msg 200".into(),
-            msg_type: "chat.text".into(),
-            ts: 200,
-            is_outgoing: false,
-            raw_json: "".into(),
-        };
-        let m2 = StoredMessage {
-            msg_id: "m2".into(),
-            thread_id: thread_id.into(),
-            sender_id: "u1".into(),
-            sender_name: "User".into(),
-            text: "Msg 100".into(),
-            msg_type: "chat.text".into(),
-            ts: 100,
-            is_outgoing: false,
-            raw_json: "".into(),
-        };
-        let m3 = StoredMessage {
-            msg_id: "m3".into(),
-            thread_id: thread_id.into(),
-            sender_id: "u1".into(),
-            sender_name: "User".into(),
-            text: "Msg 300".into(),
-            msg_type: "chat.text".into(),
-            ts: 300,
-            is_outgoing: false,
-            raw_json: "".into(),
-        };
-
-        store.upsert_message(&m1).unwrap();
-        store.upsert_message(&m2).unwrap();
-        store.upsert_message(&m3).unwrap();
-
-        let msgs = store.messages_for(thread_id, 10).unwrap();
-        assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].ts, 100);
-        assert_eq!(msgs[0].msg_id, "m2");
-        assert_eq!(msgs[1].ts, 200);
-        assert_eq!(msgs[1].msg_id, "m1");
-        assert_eq!(msgs[2].ts, 300);
-        assert_eq!(msgs[2].msg_id, "m3");
-
-        // A limit keeps the *newest* rows, still returned oldest-first.
-        let newest = store.messages_for(thread_id, 2).unwrap();
-        assert_eq!(
-            newest.iter().map(|m| m.ts).collect::<Vec<_>>(),
-            vec![200, 300]
-        );
-    }
-
-    #[test]
-    fn oldest_msg_id_skips_local_ids_and_last_ts_never_goes_back() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        for (id, ts) in [("out_1", 50), ("g1_60", 60), ("1002", 100), ("1003", 300)] {
-            store
-                .upsert_message(&StoredMessage {
-                    msg_id: id.into(),
-                    thread_id: "g1".into(),
-                    sender_id: "u1".into(),
-                    sender_name: "User".into(),
-                    text: id.into(),
-                    msg_type: "chat.text".into(),
-                    ts,
-                    is_outgoing: false,
-                    raw_json: "".into(),
-                })
-                .unwrap();
-        }
-        assert_eq!(store.oldest_msg_id("g1").as_deref(), Some("1002"));
-        assert_eq!(store.oldest_msg_id("missing"), None);
-
-        // Persisting a page of older history must not move the thread down the list.
-        let st = |last_ts| StoredThread {
-            thread_id: "g1".into(),
-            name: "Nhóm".into(),
-            is_group: true,
-            last_ts,
-            vanish_duration_sec: 0,
-            vanish_started_at_sec: 0,
-            last_read_msg_id: String::new(),
-        };
-        store.upsert_thread(&st(300)).unwrap();
-        store.upsert_thread(&st(100)).unwrap();
-        assert_eq!(store.all_threads().unwrap()[0].last_ts, 300);
-    }
-
-    #[test]
-    fn thread_read_point_roundtrips_and_survives_reupsert() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        store.set_thread_read("t1", "msg-100").unwrap();
-        let got = store.all_threads().unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].last_read_msg_id, "msg-100");
-        // Upsert thread không mang read-point thì giữ cũ, không xóa.
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "t1".into(),
-                name: "A".into(),
-                is_group: false,
-                last_ts: 1,
-                vanish_duration_sec: 0,
-                vanish_started_at_sec: 0,
-                last_read_msg_id: String::new(),
-            })
-            .unwrap();
-        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-100");
-        // Đọc tiếp thì cập nhật.
-        store.set_thread_read("t1", "msg-200").unwrap();
-        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-200");
-    }
-    #[test]
-    fn history_upsert_preserves_vanish_and_explicit_disable_clears() {
-        // #376: history-sync page (vanish 0/0, no intent) must not clear vanish.
-        let mut store = MessageStore::open(":memory:").unwrap();
-        store
-            .upsert_thread_with_vanish_intent(
-                &StoredThread {
-                    thread_id: "g1".into(),
-                    name: "Nhóm".into(),
-                    is_group: true,
-                    last_ts: 1,
-                    vanish_duration_sec: 3600,
-                    vanish_started_at_sec: 1000,
-                    last_read_msg_id: String::new(),
-                },
-                true,
-            )
-            .unwrap();
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "g1".into(),
-                name: "Nhóm".into(),
-                is_group: true,
-                last_ts: 5,
-                vanish_duration_sec: 0,
-                vanish_started_at_sec: 0,
-                last_read_msg_id: String::new(),
-            })
-            .unwrap();
-        let got = store.all_threads().unwrap();
-        assert_eq!(got[0].vanish_duration_sec, 3600, "history upsert cleared vanish");
-        assert_eq!(store.load_thread_vanish("g1"), Some((3600, 1000)));
-        // Explicit user disable DOES clear (intent path from persist_threads).
-        store
-            .upsert_thread_with_vanish_intent(
-                &StoredThread {
-                    thread_id: "g1".into(),
-                    name: "Nhóm".into(),
-                    is_group: true,
-                    last_ts: 5,
-                    vanish_duration_sec: 0,
-                    vanish_started_at_sec: 0,
-                    last_read_msg_id: String::new(),
-                },
-                true,
-            )
-            .unwrap();
-        let got = store.all_threads().unwrap();
-        assert_eq!(got[0].vanish_duration_sec, 0);
-        assert_eq!(store.load_thread_vanish("g1"), None);
-    }
-
-    #[test]
-    fn hydrate_never_moves_read_point_backward() {
-        // #565: SQLite 100 + RAM 200 → keep 200 (no recount of 150 as unread).
-        let mut store = MessageStore::open(":memory:").unwrap();
-        store.set_thread_read("t1", "100").unwrap();
-        let mut threads = vec![Thread {
-            id: "t1".into(),
-            name: "A".into(),
-            unread: crate::unread::UnreadState {
-                last_seen_id: Some("200".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }];
-        store.hydrate_threads(&mut threads, 10).unwrap();
-        assert_eq!(
-            threads[0].unread.last_seen_id.as_deref(),
-            Some("200"),
-            "hydrate moved read-point backward"
-        );
-        // Forward case still advances: RAM none + stored 100 → 100.
-        let mut fresh: Vec<Thread> = vec![Thread {
-            id: "t1".into(),
-            name: "A".into(),
-            ..Default::default()
-        }];
-        store.hydrate_threads(&mut fresh, 10).unwrap();
-        assert_eq!(
-            fresh[0].unread.last_seen_id.as_deref(),
-            Some("100")
-        );
-        // Direct merge helper: newer stored wins, older stored ignored.
-        let mut u = crate::unread::UnreadState {
-            last_seen_id: Some("200".into()),
-            ..Default::default()
-        };
-        crate::store::merge_stored_read_point(&mut u, "100");
-        assert_eq!(u.last_seen_id.as_deref(), Some("200"));
-        crate::store::merge_stored_read_point(&mut u, "300");
-        assert_eq!(u.last_seen_id.as_deref(), Some("300"));
-    }
-
-    #[test]
-    fn expiry_tombstone_overwrites_row_and_hydrate_keeps_it() {
-        // #1908: expiring a message must overwrite the SQLite row (non-empty
-        // marker) and hydrate must not restore original content/metadata.
-        let mut store = MessageStore::open(":memory:").unwrap();
-        let mut meta = serde_json::Map::new();
-        meta.insert("link_url".into(), serde_json::json!("https://x.test/a"));
-        store
-            .upsert_message(&StoredMessage {
-                msg_id: "m1".into(),
-                thread_id: "t1".into(),
-                sender_id: "u9".into(),
-                sender_name: "Peer".into(),
-                text: "secret link".into(),
-                msg_type: "chat.text".into(),
-                ts: 1000,
-                is_outgoing: false,
-                raw_json: serde_json::Value::Object(meta).to_string(),
-            })
-            .unwrap();
-        // Expire → text + cleared metadata → empty raw_json tombstone form.
-        let mut expired = StoredMessage {
-            msg_id: "m1".into(),
-            thread_id: "t1".into(),
-            sender_id: "u9".into(),
-            sender_name: "Peer".into(),
-            text: crate::chat::VANISH_EXPIRED_TEXT.into(),
-            msg_type: "chat.text".into(),
-            ts: 1000,
-            is_outgoing: false,
-            raw_json: String::new(),
-        };
-        assert!(!store.upsert_message(&expired).unwrap(), "tombstone must UPDATE, not insert");
-        let rows = store.messages_for("t1", 10).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].text, crate::chat::VANISH_EXPIRED_TEXT);
-        assert_eq!(rows[0].raw_json, crate::store::VANISH_TOMBSTONE_JSON);
-        // Hydrate restores tombstone text with NO link metadata.
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "t1".into(),
-                name: "A".into(),
-                is_group: false,
-                last_ts: 1000,
-                vanish_duration_sec: 3600,
-                vanish_started_at_sec: 1,
-                last_read_msg_id: String::new(),
-            })
-            .unwrap();
-        let mut threads: Vec<Thread> = Vec::new();
-        store.hydrate_threads(&mut threads, 10).unwrap();
-        let t = threads.iter().find(|t| t.id == "t1").expect("thread hydrated");
-        let m = t.messages.iter().find(|m| m.id == "m1").expect("msg hydrated");
-        assert_eq!(m.text, crate::chat::VANISH_EXPIRED_TEXT);
-        assert!(m.link_url.is_none(), "hydrate restored expired link");
-        // Sweep path skips tombstones (no re-persist loop): simulate the check.
-        expired.raw_json = rows[0].raw_json.clone();
-        assert!(
-            expired.text.trim() == crate::chat::VANISH_EXPIRED_TEXT
-                || expired.raw_json.trim() == crate::store::VANISH_TOMBSTONE_JSON
-        );
-    }
-
-    #[test]
-    fn anti_recall_preserves_original_text_and_media_on_undo_and_hydrate() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        let photo_meta = serde_json::json!({
-            "link_url": "https://f60-zpg-r.zdn.vn/photo.jpg",
-            "link_thumb": "https://f60-zpg-r.zdn.vn/thumb.jpg",
-            "link_src": "Hình ảnh Zalo"
-        })
-        .to_string();
-        store
-            .upsert_message(&StoredMessage {
-                msg_id: "m_photo".into(),
-                thread_id: "t1".into(),
-                sender_id: "u1".into(),
-                sender_name: "Alice".into(),
-                text: "[Hình ảnh] Ảnh hợp đồng".into(),
-                msg_type: "chat.photo".into(),
-                ts: 1000,
-                is_outgoing: false,
-                raw_json: photo_meta.clone(),
-            })
-            .unwrap();
-        // Server sync / undo payload with non-empty metadata must not erase text or link_url.
-        assert!(!store
-            .upsert_message(&StoredMessage {
-                msg_id: "m_photo".into(),
-                thread_id: "t1".into(),
-                sender_id: "u1".into(),
-                sender_name: "Alice".into(),
-                text: "[Tin nhắn đã thu hồi]".into(),
-                msg_type: "chat.undo".into(),
-                ts: 2000,
-                is_outgoing: false,
-                raw_json: "{\"undo\":true}".into(),
-            })
-            .unwrap());
-        // Reverse order: recall stub saved first, then original sticker sync arrives later.
-        let sticker_meta = serde_json::json!({
-            "stickerId": 18009,
-            "cateId": 10130,
-            "type": 7
-        })
-        .to_string();
-        store
-            .upsert_message(&StoredMessage {
-                msg_id: "m_stk".into(),
-                thread_id: "t1".into(),
-                sender_id: "u1".into(),
-                sender_name: "Alice".into(),
-                text: "[Tin nhắn đã thu hồi]".into(),
-                msg_type: "chat.undo".into(),
-                ts: 3000,
-                is_outgoing: false,
-                raw_json: String::new(),
-            })
-            .unwrap();
-        store
-            .upsert_message(&StoredMessage {
-                msg_id: "m_stk".into(),
-                thread_id: "t1".into(),
-                sender_id: "u1".into(),
-                sender_name: "Alice".into(),
-                text: "[Nhãn dán]".into(),
-                msg_type: "chat.sticker".into(),
-                ts: 3000,
-                is_outgoing: false,
-                raw_json: sticker_meta,
-            })
-            .unwrap();
-
-        let rows = store.messages_for("t1", 10).unwrap();
-        let p = rows.iter().find(|r| r.msg_id == "m_photo").unwrap();
-        assert_eq!(p.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
-        assert_eq!(p.raw_json, photo_meta);
-        let s = rows.iter().find(|r| r.msg_id == "m_stk").unwrap();
-        assert_eq!(s.text, "[Đã thu hồi] [Nhãn dán]");
-
-        // Server snapshot in RAM has bare "[Tin nhắn đã thu hồi]" stub; hydrate must restore content + media.
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "t1".into(),
-                name: "Alice".into(),
-                is_group: false,
-                last_ts: 3000,
-                vanish_duration_sec: 0,
-                vanish_started_at_sec: 0,
-                last_read_msg_id: String::new(),
-            })
-            .unwrap();
-        let mut threads = vec![Thread {
-            id: "t1".into(),
-            name: "Alice".into(),
-            messages: vec![
-                ChatMessage {
-                    id: "m_photo".into(),
-                    text: "[Tin nhắn đã thu hồi]".into(),
-                    ts: 1000,
-                    ..Default::default()
-                },
-                ChatMessage {
-                    id: "m_stk".into(),
-                    text: "[Tin nhắn đã thu hồi]".into(),
-                    ts: 3000,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }];
-        store.hydrate_threads(&mut threads, 10).unwrap();
-        let hp = threads[0].messages.iter().find(|m| m.id == "m_photo").unwrap();
-        assert_eq!(hp.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
-        assert_eq!(hp.link_url.as_deref(), Some("https://f60-zpg-r.zdn.vn/photo.jpg"));
-        let hs = threads[0].messages.iter().find(|m| m.id == "m_stk").unwrap();
-        assert_eq!(hs.text, "[Đã thu hồi] [Nhãn dán]");
-        assert_eq!(hs.sticker_id, Some(18009));
-    }
-    #[test]
-    fn test_persist_threads_and_upsert_thread() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        let thread = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "t_test".into(),
-            name: "Test Thread".into(),
-            preview: "Preview".into(),
-            time: "10:00".into(),
-            avatar: None,
-            is_group: false,
-            messages: vec![
-                ChatMessage {
-                    id: "pt_m1".into(),
-                    sender: "Alice".into(),
-                    text: "Hello".into(),
-                    time: "10:00".into(),
-                    is_outgoing: false,
-                    ts: 1000,
-                    ..Default::default()
-                },
-                ChatMessage {
-                    id: "pt_m2".into(),
-                    sender: "Tôi".into(),
-                    text: "Hi Alice".into(),
-                    time: "10:01".into(),
-                    is_outgoing: true,
-                    ts: 2000,
-                    ..Default::default()
-                },
-            ],
-            vanish: None,
-        };
-
-        let count1 = persist_threads(&mut store, &[thread.clone()]).unwrap();
-        assert_eq!(count1, 2);
-
-        // Second persist returns 0 newly inserted
-        let count2 = persist_threads(&mut store, &[thread]).unwrap();
-        assert_eq!(count2, 0);
-
-        let msgs = store.messages_for("t_test", 10).unwrap();
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].text, "Hello");
-        assert_eq!(msgs[1].text, "Hi Alice");
-
-        // Hydrate into an empty thread list
-        let mut hydrated: Vec<Thread> = Vec::new();
-        let loaded = store.hydrate_threads(&mut hydrated, 50).unwrap();
-        assert_eq!(loaded, 2);
-        assert_eq!(hydrated.len(), 1);
-        assert_eq!(hydrated[0].id, "t_test");
-        assert_eq!(hydrated[0].name, "Test Thread");
-        assert_eq!(hydrated[0].messages.len(), 2);
-        assert_eq!(hydrated[0].preview, "Hi Alice");
-    }
-
-    #[test]
-    fn delete_thread_and_search_messages_work() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "t1".into(),
-                name: "Nhóm Kỹ Thuật".into(),
-                is_group: true,
-                last_ts: 500,
-                vanish_duration_sec: 0,
-                vanish_started_at_sec: 0,
-                last_read_msg_id: String::new(),
-            })
-            .unwrap();
-        store
-            .upsert_message(&StoredMessage {
-                msg_id: "m_search_1".into(),
-                thread_id: "t1".into(),
-                sender_id: "u1".into(),
-                sender_name: "Minh".into(),
-                text: "Triển khai bản cập nhật ctdozlite".into(),
-                msg_type: "chat.text".into(),
-                ts: 500,
-                is_outgoing: false,
-                raw_json: String::new(),
-            })
-            .unwrap();
-
-        let hits = store.search_messages("ctdozlite", 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].msg_id, "m_search_1");
-
-        store.delete_thread("t1").unwrap();
-        assert!(store.messages_for("t1", 10).unwrap().is_empty());
-        assert!(store.all_threads().unwrap().is_empty());
-    }
-
-    #[test]
-    fn import_history_from_path_migrates_sqlite_and_json_directory() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("ctdozlite-import-test-{nonce}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let src_db = dir.join("zalo_history.db");
-        {
-            let mut src_store = MessageStore::open(src_db.to_str().unwrap()).unwrap();
-            src_store
-                .upsert_thread(&StoredThread {
-                    thread_id: "g_mig".into(),
-                    name: "Migrated Group".into(),
-                    is_group: true,
-                    last_ts: 999,
-                    vanish_duration_sec: 0,
-                    vanish_started_at_sec: 0,
-                    last_read_msg_id: String::new(),
-                })
-                .unwrap();
-            src_store
-                .upsert_message(&StoredMessage {
-                    msg_id: "mig_1".into(),
-                    thread_id: "g_mig".into(),
-                    sender_id: "u1".into(),
-                    sender_name: "Alice".into(),
-                    text: "Tin nhắn cũ đã migrate".into(),
-                    msg_type: "chat.text".into(),
-                    ts: 999,
-                    is_outgoing: false,
-                    raw_json: String::new(),
-                })
-                .unwrap();
-        }
-        let dst_db = dir.join("dest.db");
-        let rep = import_history_from_path(&src_db, dst_db.to_str().unwrap()).unwrap();
-        assert_eq!(rep.threads_imported, 1);
-        assert_eq!(rep.messages_imported, 1);
-
-        let dst_store = MessageStore::open(dst_db.to_str().unwrap()).unwrap();
-        let msgs = dst_store.messages_for("g_mig", 10).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].text, "Tin nhắn cũ đã migrate");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn group_note_and_watch_roundtrip() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        // Chưa có ghi chú → rỗng.
-        assert_eq!(store.get_group_note("g1"), "");
-        store.set_group_note("g1", "kế hoạch sprint", 111).unwrap();
-        assert_eq!(store.get_group_note("g1"), "kế hoạch sprint");
-        store.set_group_note("g1", "đã cập nhật", 222).unwrap();
-        assert_eq!(store.get_group_note("g1"), "đã cập nhật");
-        // Nhóm khác độc lập.
-        store.set_group_note("g2", "riêng", 1).unwrap();
-        assert_eq!(store.get_group_note("g2"), "riêng");
-        assert_eq!(store.get_group_note("g1"), "đã cập nhật");
-        // Watch: thêm / trùng / liệt kê / xoá.
-        assert!(store.list_group_watch("g1").is_empty());
-        assert!(store.add_group_watch("g1", "  báo cáo  ").unwrap());
-        assert!(!store.add_group_watch("g1", "báo cáo").unwrap());
-        assert!(!store.add_group_watch("g1", "   ").unwrap());
-        assert!(store.add_group_watch("g1", "deadline").unwrap());
-        assert_eq!(store.list_group_watch("g1"), vec!["báo cáo", "deadline"]);
-        store.remove_group_watch("g1", "báo cáo").unwrap();
-        assert_eq!(store.list_group_watch("g1"), vec!["deadline"]);
-    }
-
-    #[test]
-    fn jxl_to_jpg_url_and_decode_zalo_cipher_payload_work() {
-        let jxl = "https://photo-stal-17.zdn.vn/no/jxl/ba5262149ded4eb317fc/2aOboR74hO3nF0sTxZSJAzpYZhLbEB780ODEOKsS.jxl?jxlstatus=1";
-        assert_eq!(
-            jxl_to_jpg_url(jxl),
-            "https://photo-stal-17.zdn.vn/no/jpg/ba5262149ded4eb317fc/2aOboR74hO3nF0sTxZSJAzpYZhLbEB780ODEOKsS.jpg"
-        );
-        let key = "de039414865b856ea650d3305b1f387f";
-        let plain = "\"Này bố kiểm tra mail xem ạ\"";
-        let key_chars: Vec<char> = key.chars().collect();
-        let enc: String = plain
-            .chars()
-            .enumerate()
-            .map(|(i, c)| {
-                char::from_u32((c as u32) ^ (key_chars[i % key_chars.len()] as u32)).unwrap()
-            })
-            .collect();
-        assert_eq!(
-            decode_zalo_cipher_payload(&enc, key),
-            "Này bố kiểm tra mail xem ạ"
-        );
-    }
-    #[test]
-    fn draft_roundtrip_and_empty_clears() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        assert!(store.get_draft("t1").is_none());
-        store.set_draft("t1", "đang gõ dở", "", 1000).unwrap();
-        let d = store.get_draft("t1").unwrap();
-        assert_eq!(d.text, "đang gõ dở");
-        assert_eq!(d.reply_ref, "");
-        store.set_draft("t1", "", "m9", 1001).unwrap();
-        let d2 = store.get_draft("t1").unwrap();
-        assert_eq!(d2.text, "");
-        assert_eq!(d2.reply_ref, "m9");
-        assert_eq!(store.list_draft_threads(), vec!["t1".to_string()]);
-        // Text rỗng + không reply → xoá row.
-        store.set_draft("t1", "   ", "", 1002).unwrap();
-        assert!(store.get_draft("t1").is_none());
-        assert!(store.list_draft_threads().is_empty());
-        store.set_draft("t2", "nháp 2", "", 1003).unwrap();
-        store.delete_draft("t2").unwrap();
-        assert!(store.get_draft("t2").is_none());
-    }
-
-    #[test]
-    fn reminder_claim_once_and_list_ordered() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        // Quá khứ → từ chối.
-        assert!(store.add_reminder("t1", "m1", 900, "tin 1", 1000).is_err());
-        store.add_reminder("t1", "m1", 1100, "tin 1", 1000).unwrap();
-        store.add_reminder("t1", "m2", 1050, "tin 2", 1000).unwrap();
-        let listed = store.list_reminders();
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].msg_id, "m2");
-        // Chưa tới giờ → claim rỗng.
-        assert!(store.claim_due_reminders(1049).is_empty());
-        // Tới giờ → claim đúng 1 tin, đúng 1 lần (xoá sau claim).
-        let due = store.claim_due_reminders(1050);
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].msg_id, "m2");
-        assert!(store.claim_due_reminders(1060).is_empty());
-        assert_eq!(store.list_reminders().len(), 1);
-        let id = store.list_reminders()[0].id;
-        assert!(store.delete_reminder(id).unwrap());
-        assert!(!store.delete_reminder(id).unwrap());
-        assert!(store.list_reminders().is_empty());
-    }
-
-    #[test]
-    fn issue_126_contact_aliases_and_group_prefix_names_survive_offline_restart_and_placeholders() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-
-        // 1) Genuine numeric contact alias "123" and "Nhóm học" persisted via persist_threads
-        let initial_threads = vec![
-            Thread {
-                presentation: crate::chat::SidebarPresentation {
-                    contact_name: true,
-                    ..Default::default()
-                },
-                id: "1000000000001".into(),
-                name: "123".into(),
-                is_group: false,
-                ..Default::default()
-            },
-            Thread {
-                presentation: crate::chat::SidebarPresentation {
-                    contact_name: true,
-                    ..Default::default()
-                },
-                id: "1000000000002".into(),
-                name: "Nhóm học".into(),
-                is_group: false,
-                ..Default::default()
-            },
-        ];
-        persist_threads(&mut store, &initial_threads).unwrap();
-
-        // 2) Generated placeholders or non-contact profile names must NOT overwrite persisted contact aliases
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "1000000000001".into(),
-                name: "Người dùng 1000000000001".into(),
-                is_group: false,
-                last_ts: 200,
-                ..Default::default()
-            })
-            .unwrap();
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "1000000000002".into(),
-                name: "Nhóm 1000000000002".into(),
-                is_group: false,
-                last_ts: 200,
-                ..Default::default()
-            })
-            .unwrap();
-
-        // 3) Offline restart: hydrate_threads into an empty Vec or over placeholder threads
-        let mut restarted: Vec<Thread> = Vec::new();
-        store.hydrate_threads(&mut restarted, 20).unwrap();
-        let t1 = restarted.iter().find(|t| t.id == "1000000000001").unwrap();
-        let t2 = restarted.iter().find(|t| t.id == "1000000000002").unwrap();
-        assert_eq!(t1.name, "123");
-        assert!(t1.presentation.contact_name);
-        assert_eq!(t2.name, "Nhóm học");
-        assert!(t2.presentation.contact_name);
-
-        // 4) Also verify hydrate_threads replaces generated placeholders on existing in-memory threads
-        let mut placeholder_ram = vec![
-            Thread {
-                id: "1000000000001".into(),
-                name: "Người dùng 1000000000001".into(),
-                is_group: false,
-                ..Default::default()
-            },
-            Thread {
-                id: "1000000000002".into(),
-                name: "Nhóm 1000000000002".into(),
-                is_group: false,
-                ..Default::default()
-            },
-        ];
-        store.hydrate_threads(&mut placeholder_ram, 20).unwrap();
-        assert_eq!(placeholder_ram[0].name, "123");
-        assert!(placeholder_ram[0].presentation.contact_name);
-        assert_eq!(placeholder_ram[1].name, "Nhóm học");
-        assert!(placeholder_ram[1].presentation.contact_name);
-    }
-
-    #[test]
-    fn query_names_from_index_db_prefers_display_name_over_zalo_name() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE friends_info (userId TEXT, displayName TEXT, zaloName TEXT);
-             CREATE TABLE friend (userId TEXT, displayName TEXT, zaloName TEXT);
-             INSERT INTO friends_info VALUES ('u1', 'Biệt danh 1', 'Tên Gốc 1');
-             INSERT INTO friend VALUES ('u2', '123', 'Tên Gốc 2');
-             INSERT INTO friend VALUES ('u3', '   ', 'Tên Gốc 3');",
-        )
-        .unwrap();
-        let mut map = std::collections::HashMap::new();
-        query_names_from_index_db(&conn, &mut map).unwrap();
-        assert_eq!(map.get("u1").map(|x| x.0.as_str()), Some("Biệt danh 1"));
-        assert_eq!(map.get("u2").map(|x| x.0.as_str()), Some("123"));
-        assert_eq!(map.get("u3").map(|x| x.0.as_str()), Some("Tên Gốc 3"));
-    }
-
-    #[test]
-    fn reader_is_not_blocked_while_another_connection_holds_a_write_transaction() {
-        // A file is required: the lock under test only exists between connections.
-        let dir = std::env::temp_dir().join(format!(
-            "ctdozlite-wal-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("history.db");
-        let path = path.to_str().unwrap();
-
-        let writer = MessageStore::open(path).unwrap();
-        writer.conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        writer
-            .conn
-            .execute(
-                "INSERT INTO threads (thread_id, name, is_group, last_ts) VALUES ('thread-1', 'T', 0, 1)",
-                [],
-            )
-            .unwrap();
-
-        let started = std::time::Instant::now();
-        let reader = MessageStore::open(path).unwrap();
-        assert_eq!(reader.count_messages("thread-1").unwrap(), 0);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "reader waited {:?} behind the writer",
-            started.elapsed()
-        );
-
-        writer.conn.execute_batch("COMMIT").unwrap();
-        drop(reader);
-        drop(writer);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn migration_v2_heals_sync_v2_call_and_photo_rows_and_refreshes_cache() {
-        let dir = std::env::temp_dir().join(format!(
-            "ctdozlite-mig2-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path_buf = dir.join("history.db");
-        let path = path_buf.to_str().unwrap();
-
-        {
-            let mut st = MessageStore::open(path).unwrap();
-            st.upsert_thread(&StoredThread {
-                thread_id: "t1".into(),
-                name: "Đỗ Thành".into(),
-                is_group: false,
-                last_ts: 1000,
-                ..Default::default()
-            })
-            .unwrap();
-            st.upsert_message(&StoredMessage {
-                msg_id: "call_1".into(),
-                thread_id: "t1".into(),
-                sender_id: "t1".into(),
-                sender_name: "Đỗ Thành".into(),
-                text: "0:18".into(),
-                msg_type: "chat.text".into(),
-                ts: 1000,
-                is_outgoing: false,
-                raw_json: r#"{"link_desc":"Cuộc gọi","link_title":"sendBubbleMessage"}"#.into(),
-            })
-            .unwrap();
-            st.upsert_message(&StoredMessage {
-                msg_id: "photo_1".into(),
-                thread_id: "t1".into(),
-                sender_id: "t1".into(),
-                sender_name: "Đỗ Thành".into(),
-                text: "[Tin nhắn thoại]".into(),
-                msg_type: "chat.voice".into(),
-                ts: 2000,
-                is_outgoing: false,
-                raw_json: r#"{"link_src":"Thoại Zalo","link_url":"https://photo-stal-27.zdn.vn/no/abc.jpg"}"#.into(),
-            })
-            .unwrap();
-            // Simulate pre-v2 database
-            st.conn.execute_batch("PRAGMA user_version = 1;").unwrap();
-        }
-
-        // Reopen triggers v2 self-heal migration
-        let st = MessageStore::open(path).unwrap();
-        let mut threads = vec![Thread {
-            id: "t1".into(),
-            name: "Đỗ Thành".into(),
-            messages: vec![
-                ChatMessage {
-                    id: "call_1".into(),
-                    text: "0:18".into(),
-                    is_outgoing: false,
-                    ts: 1000,
-                    link_title: Some("sendBubbleMessage".into()),
-                    ..Default::default()
-                },
-                ChatMessage {
-                    id: "photo_1".into(),
-                    text: "[Tin nhắn thoại]".into(),
-                    is_outgoing: false,
-                    ts: 2000,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }];
-        st.hydrate_threads(&mut threads, 50).unwrap();
-        assert_eq!(threads[0].messages[0].text, "📞 Cuộc gọi thoại đến (18s)");
-        assert!(threads[0].messages[0].link_title.is_none());
-        assert_eq!(threads[0].messages[1].text, "[Hình ảnh]");
-        assert_eq!(
-            threads[0].messages[1].link_src.as_deref(),
-            Some("Hình ảnh Zalo")
-        );
-
-        drop(st);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

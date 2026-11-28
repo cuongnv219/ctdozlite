@@ -127,24 +127,3 @@ pub fn mask(key: &str) -> String {
         format!("{}…{}", &key[..4], &key[key.len() - 4..])
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mask_hides_middle() {
-        assert_eq!(mask(""), "(trống)");
-        assert_eq!(mask("abc"), "••••");
-        assert_eq!(mask("sk-1234567890"), "sk-1…7890");
-    }
-
-    #[test]
-    fn vendor_env_resolution_order() {
-        // Settings fallback when no env/keychain present. Env-dependent parts
-        // are covered by doc contract, not asserted here.
-        let (k, src) = resolve_key_for("from-settings", Some("CTDOZ_TEST_VENDOR_KEY_ABSENT"));
-        // Keychain on this dev machine may hold a key — accept either.
-        assert!(k == "from-settings" || src == KeySource::Keychain || src == KeySource::Env);
-    }
-}

@@ -59,84 +59,120 @@ Bản Zalo PC chính thức đóng gói trên Electron thường chiếm 350–6
   - Tự động gợi ý nhãn dán ngay trên thanh soạn thảo khi gõ từ khóa, cụm từ tiếng Việt hoặc biểu tượng cảm xúc (tương tự `chat.zalo.me`).
   - Truy vấn song song hai endpoint `/api/message/sticker/suggest/stickers` (`cmd 11741`) và `/api/message/sticker/search` (`cmd 11747`), tự động đối chiếu cả biến thể tiếng Việt có dấu, không dấu và từ viết tắt phổ biến (`tks`, `hpbd`, `g9`, `met qua` ↔ `mệt quá`, `co len` ↔ `cố lên`...).
   - Hỗ trợ tìm kiếm theo cụm từ cuối câu và tải trước (prefetch) ảnh sticker song song ở luồng nền, lưu cache tại `stickers_cache/`.
-- **Lưu trữ cục bộ 2 tầng (`src/store.rs`)**
-  - `threads_cache.json`: Snapshot danh sách hội thoại giúp hiển thị giao diện ngay khi mở app.
-  - `zalo_history.db` (SQLite): Lưu trữ lịch sử tin nhắn cục bộ trên máy, khử trùng lặp theo `msg_id` và mốc thời gian. Mặc định dữ liệu không gửi ra ngoài hệ thống Zalo; chỉ khi bạn chủ động bật trợ lý AI / cầu nối Telegram, dữ liệu liên quan mới tới dịch vụ bạn chọn — xem mục **Về quyền riêng tư dữ liệu**. Khuyến nghị bật mã hóa ổ đĩa hệ điều hành (BitLocker / FileVault / LUKS) nếu dùng trên máy chung.
-- **Đồng bộ dữ liệu (`src/history_sync.rs`)**
-  - **Đồng bộ dữ liệu cơ bản:** Đã hoàn thiện tính năng kéo dữ liệu và giải mã tin nhắn. Hiện tại hoạt động tốt và ổn định với Android (qua container `.db.crypt` mã hóa RSA 2048 + AES-256-CBC + LZMA2).
-  - **Tương thích iOS:** Đã hoàn thiện giao thức bắt tay Sync v2 (Curve25519 / X25519 Double-Ratchet), tuy nhiên quy trình nén đa lô của Zalo iOS vẫn đang tiếp tục được hoàn thiện trong các bản cập nhật tiếp theo.
+- **Lưu trữ cục bộ & Quản lý bộ nhớ 3 tầng (`src/store.rs`, `src/storage_manager.rs`)**
+  - `threads_cache.json`: Snapshot danh sách hội thoại cô lập theo tài khoản giúp hiển thị giao diện ngay khi mở app.
+  - `accounts/<uin>_history.db` (SQLite WAL): Lưu trữ lịch sử tin nhắn cục bộ trên máy, khử trùng lặp theo `msg_id`/identity, lưu kích thước media (`media_size`) và `VANISH_TOMBSTONE_JSON`. Khuyến nghị bật mã hóa ổ đĩa hệ điều hành (BitLocker / FileVault / LUKS) nếu dùng trên máy chung.
+  - **Storage Manager 3 tầng:** Phân tách dung lượng dữ liệu gốc, media, bộ đệm và tệp hệ thống; hỗ trợ dọn dẹp an toàn và di chuyển thư mục lưu trữ (`relocate_storage_root`).
+- **Đồng bộ dữ liệu Dual Sync V2/V1 (`src/history_sync.rs`, `src/zproto_host.rs`)**
+  - Thử iOS Sync V2 (`cmd 590`, Curve25519 / X25519 Double-Ratchet chạy `libzproto_wasm` trực tiếp bằng **Wasmtime**) trong 5,5 giây; nếu điện thoại Android không phản hồi sẽ tự dọn phiên (`cmd 591`) và chuyển sang Android Sync V1 (`cmd 12000`, container `.db.crypt` RSA 2048 + AES-256-CBC + LZMA2), kèm đệm khung WebSocket trước khi `authed`.
+- **Bảo mật & Khóa ứng dụng PIN 4 số (`src/app_lock.rs`, `src/gui/app_lock_ui.rs`)**
+  - Hỗ trợ đặt mã PIN 4 số, khóa nhanh qua thanh tiêu đề / `Ctrl+L`, tự khóa theo thời gian rảnh hoặc khi máy ngủ, ẩn nội dung thông báo và cách ly cuộc gọi đến khi đang khóa.
+- **Trải nghiệm chat & Media hiện đại (`src/gui/messages.rs`, `src/gui/poll_card.rs`, `src/gui/color_emoji.rs`, `src/doc_preview.rs`)**
+  - Giữ đúng kích thước & tỷ lệ thật của ảnh/video/sticker trong lúc chờ tải; nút thả tim nhanh `❤️` trên hover bar; highlight `@mention` chính xác theo UTF-16 `pos`/`len` kèm word-boundary & fallback 5 từ tiếng Việt.
+  - Bình chọn nhóm (Group Polls), emoji màu **Twemoji** (`twemoji72.pack`) & font `Open Sans`, dán ảnh `Ctrl+V`/`Cmd+V` (`vendor/egui-winit`, `clipboard_dib.rs`), xem trước tài liệu văn phòng (PDF, Word, Excel, PowerPoint, CSV) và lưu media về `Downloads`.
+- **Tích hợp hệ điều hành & Cổng kiểm tra chất lượng (`src/gui/windows_tray.rs`, `src/gui/tray.rs`, `src/single_instance.rs`, `src/media_resources.rs`, `scripts/check_invariants.py`)**
+  - Windows Close-to-Tray (`windows-sys`), Linux System Tray (`ksni`) + XDG Data Dir + Wayland quit-on-close, Single-Instance GUI theo thư mục dữ liệu (Linux/macOS), corner notification Windows-only và OS notification gốc trên Linux/macOS.
+  - Quản lý bộ nhớ texture bằng `ResourceLru` (64 MB bảo vệ `FRAME_TOUCHED_TEXTURES`) kết hợp giới hạn giải mã ảnh (`128px`/`720px`/`2048px`) và cổng kiểm tra 8 invariant tự động (`R1`–`R8`).
+- **Tự động hóa, Đa tài khoản & AI (`src/api_mcp.rs`, `src/thread_script.rs`, `src/tg_bridge.rs`, `src/llm.rs`, `src/agent.rs`, `src/background_accounts.rs`)**
+  - Local HTTP REST API & MCP Server (JSON-RPC 2.0), kịch bản hội thoại bằng ngôn ngữ **Rhai**, cầu nối 2 chiều Telegram ↔ Zalo, Multi-Account Switcher và TUI LLM Agent loop.
 - **Gọi thoại & Gọi video 1-1 (`src/call.rs`, `src/media.rs`, `src/audio.rs`)**
   - Triển khai trực tiếp luồng báo hiệu cuộc gọi (`401`/`416`/`407`/`402`/`408`/`409`) và bắt tay ZRTP relay bằng Rust, không phụ thuộc `ZaloCall.exe`.
   - Audio hai chiều qua `cpal` + `opus`; video H.264 đóng gói theo khung relay của Zalo (RTP PT 97/98, RTCP SR/PLI/REMB) kết hợp `ffmpeg` để thu webcam và giải mã khung hình.
 - **Hai chế độ giao diện (`src/gui/`, `src/tui.rs`)**
   - **GUI (`eframe`/`egui`)**: Giao diện desktop native, hỗ trợ Dark/Light theme, điều hướng sticker bằng phím mũi tên, thông báo tin nhắn chưa đọc và khay Dev Inspector (`--dev`).
-  - **TUI (`ratatui`/`crossterm`)**: Giao diện terminal gọn nhẹ cho môi trường CLI/SSH.
+  - **TUI (`ratatui`/`crossterm`)**: Giao diện terminal gọn nhẹ cho môi trường CLI/SSH tích hợp AI Agent.
 
 ---
 
-## Cấu trúc & Quy mô mã nguồn (Codebase LoC — Kết quả đo mới nhất `v0.1.1`)
+## Cấu trúc & Quy mô mã nguồn (Codebase LoC — Kết quả đo mới nhất `v0.1.4`)
 
 | Hạng mục | Số tệp | Tổng số dòng |
 | :--- | :---: | :---: |
-| **Rust Source (`src/**/*.rs`)** | 56 | **80,962** |
-| **Integration Tests (`tests/*.rs`)** | 5 | **1,803** |
-| **Tài liệu & Kiến trúc (`docs/*.md`, `README*`)** | 29 | **2,125** |
-| **Đóng gói & CI/CD (`packaging/`, `.github/`)** | 22 | **1,161** |
+| **Rust Source (`src/**/*.rs`)** | 71 | **106,425** |
+| **Integration Tests (`tests/*.rs`)** | 7 | **3,115** |
+| **Tài liệu & Kiến trúc (`docs/**/*.md` trừ `superpowers/`, `README.md`, `CHANGELOG.md`)** | 32 | **3,311** |
+| **Đóng gói, CI/CD, Invariants & Native (`packaging/`, `.github/`, `scripts/`, `native/`)** | 53 | **4,409** |
 
-> Số liệu đo thực tế mới nhất tại phiên bản `v0.1.1` (tổng cộng hơn **86,050+** dòng mã nguồn, bài kiểm thử, tài liệu và quy trình CI/CD).
+> Số liệu đo thực tế mới nhất tại phiên bản `v0.1.4` (**109,540** dòng Rust trên **78** tệp; tổng cộng **117,260+** dòng mã nguồn, bài kiểm thử, tài liệu và quy trình CI/CD).
 
 ```text
-src/ (80,962 lines across 56 files)
-├── main.rs            # (369 lines)    Điểm vào CLI, phân tích tham số (--gui, --tui, --dev, --profile, --proxy)
-├── lib.rs             # (50 lines)     Khai báo các module thư viện
-├── chat.rs            # (10,068 lines) API hội thoại, tin nhắn, nhóm, RTF/Markdown, link preview & tìm kiếm sticker
-├── call.rs            # (5,254 lines)  Báo hiệu VoIP, điều khiển phiên gọi 1-1 và bắt tay ZRTP
-├── gui.rs             # (4,432 lines)  Khởi tạo trạng thái ZaloGuiApp, bộ lọc, đồng bộ & vòng lặp sự kiện
-├── store.rs           # (3,618 lines)  Lưu trữ SQLite theo từng tài khoản (accounts/<uin>_history.db)
-├── media.rs           # (3,238 lines)  Đóng gói/giải mã RTP/RTCP, H.264 FU-A và luồng webcam/video
-├── tui.rs             # (2,689 lines)  Giao diện dòng lệnh (ratatui)
-├── session.rs         # (1,888 lines)  Quản lý phiên, cookie jar (zpw_sek), khóa (zpw_enk), proxy & multi-profile
-├── history_sync.rs    # (1,287 lines)  Đồng bộ lịch sử, giải mã RSA 2048 + AES-256 + LZMA2 & Sync v2 Curve25519
-├── feed.rs            # (1,153 lines)  Hồ sơ mạng xã hội & đọc Nhật ký từ SQLite cục bộ
-├── reactions.rs       # (1,097 lines)  Quản lý trạng thái thả cảm xúc (reaction) tin nhắn
-├── zproto_host.rs     # (1,022 lines)  Wasmtime host chạy module libzproto_wasm giải mã Sync v2 di động
-├── updater.rs         # (917 lines)    Tự động kiểm tra, tải và xác thực chữ ký/SHA-256 bản cập nhật GitHub
-├── api_mcp.rs         # (911 lines)    Máy chủ HTTP REST API cục bộ & giao thức MCP (JSON-RPC 2.0)
-├── audio.rs           # (692 lines)    Thu/phát âm thanh thời gian thực (cpal + libopus)
-├── thread_script.rs   # (629 lines)    Engine kịch bản tự động hóa hội thoại (Rhai scripting)
-├── unread.rs          # (627 lines)    Theo dõi bộ đếm tin nhắn chưa đọc và trạng thái tắt thông báo (mute)
-├── voip_log.rs        # (625 lines)    Ghi nhận chẩn đoán luồng gói tin RTP/RTCP (voip.log)
-├── socket.rs          # (624 lines)    Kết nối WebSocket thời gian thực (zpw_ws)
-├── scheduler.rs       # (539 lines)    Bộ lập lịch gửi tin nhắn hẹn giờ & nhắc hẹn cục bộ
-├── media_resources.rs # (447 lines)    Quản lý bộ nhớ đệm tài nguyên đa phương tiện & ảnh
-├── doc_preview.rs     # (Xem trước trực tiếp tài liệu PDF, Word DOC/DOCX, Excel XLS/XLSX/XLSB/ODS, PowerPoint PPT/PPTX, CSV/TSV/RTF)
-├── group_stats.rs     # (442 lines)    Thống kê hoạt động và tương tác trong nhóm chat
-├── qr.rs              # (436 lines)    Luồng sinh mã QR, long-polling chờ quét và xác nhận đăng nhập
-├── data_dir.rs        # (379 lines)    Phân giải thư mục dữ liệu đa nền tảng (--data-dir / --profile)
-├── login.rs           # (367 lines)    Đăng nhập mật khẩu (PasswordCipher), getServerInfo, getLoginInfo
-├── native_notifications.rs # (361 lines) Thông báo native desktop (Windows toast, macOS, Linux notify)
-├── message_model.rs   # (321 lines)    Mô hình định danh và hợp nhất trạng thái tin nhắn
-├── clipboard_dib.rs   # (292 lines)    Đọc ảnh bitmap trực tiếp từ Windows clipboard (CF_DIB)
-├── logger.rs          # (254 lines)    Bộ thu thập log mạng và quét mã lỗi cho chế độ --dev
-├── os_notify.rs       # (248 lines)    Điều phối thông báo hệ điều hành đa nền tảng
-├── group_llm.rs       # (241 lines)    Tóm tắt và hỗ trợ phân tích nội dung nhóm
-├── param_cipher.rs    # (222 lines)    Mã hóa tham số xác thực ParamCipher v2 (zcid, zcid_ext, encrypt_key)
-├── message_navigation.rs # (142 lines) Điều hướng nhanh tới tin nhắn trích dẫn trong hội thoại
-├── crypto.rs          # (132 lines)    AES-128/256-CBC, PKCS7, MD5 và hàm tạo chữ ký signkey
-├── account_manager.rs # (131 lines)    Quản lý đa tài khoản, lưu và chuyển đổi profile tức thì
-├── group_watch.rs     # (119 lines)    Theo dõi sự kiện và từ khóa trong nhóm
-├── clock.rs           # (109 lines)    Đồng hồ hiển thị thời gian và trạng thái hệ thống
-├── ui.rs              # (97 lines)     Thành phần UI chia sẻ giữa các giao diện
-├── endpoints.rs       # (47 lines)     Bảng định tuyến các domain máy chủ Zalo (Service Map)
-├── bin/               # (1,851 lines across 8 diagnostic/CLI probe binaries)
-└── gui/               # Giao diện đồ họa native (eframe/egui — 32,148 lines)
-    ├── modals.rs      # (9,899 lines)  Trang Danh bạ, Nhật ký, Hẹn giờ, Cài đặt, Quản lý tài khoản & Cuộc gọi
-    ├── workspace.rs   # (9,399 lines)  Bố cục thanh điều hướng, cột chat, auto-scroll & khung chat chính
-    ├── worker.rs      # (4,758 lines)  Luồng nền Tokio xử lý lệnh mạng, đồng bộ và prefetch ảnh/sticker
-    ├── messages.rs    # (4,755 lines)  Render bong bóng tin nhắn, Markdown/RTF, reaction, quote, ảnh clipboard
-    ├── stickers.rs    # (1,779 lines)  Sticker picker, auto-suggest & bộ lọc nhãn dán
-    ├── theme.rs       # (1,330 lines)  Bảng màu Dark/Light, vector icon Lucide, nạp font hệ thống
-    └── reactions_dialog.rs # (228 lines) Hộp thoại hiển thị chi tiết danh sách người thả cảm xúc
+src/ (106,425 lines across 71 files)
+├── main.rs            # (643 lines)    Điểm vào CLI, phân tích tham số (--gui, --tui, --dev, --profile, --api-port, --mcp)
+├── lib.rs             # (65 lines)     Khai báo các module thư viện
+├── chat.rs            # (11,903 lines) API hội thoại, tin nhắn, nhóm, RTF/Markdown, media dimensions, vanish & sticker
+├── gui.rs             # (7,969 lines)  ZaloGuiApp, bộ lọc, close-to-tray, app lock gate & vòng lặp sự kiện GuiEvent
+├── call.rs            # (4,736 lines)  Báo hiệu VoIP, điều khiển phiên gọi 1-1 và bắt tay ZRTP
+├── tui.rs             # (4,066 lines)  Giao diện dòng lệnh (ratatui) tích hợp LLM Agent workspace
+├── store.rs           # (3,531 lines)  Lưu trữ SQLite WAL theo tài khoản (accounts/<uin>_history.db), media_size & tombstone
+├── media.rs           # (3,200 lines)  Đóng gói/giải mã RTP/RTCP, H.264 FU-A và luồng webcam/video
+├── history_sync.rs    # (2,872 lines)  Dual Sync iOS V2 + Android V1 fallback, giải mã RSA 2048 + AES-256 + LZMA2
+├── session.rs         # (1,671 lines)  Quản lý phiên, cookie jar (zpw_sek), khóa (zpw_enk), proxy & multi-profile
+├── feed.rs            # (1,609 lines)  Hồ sơ mạng xã hội & đọc Nhật ký từ SQLite cục bộ
+├── zproto_host.rs     # (1,187 lines)  Wasmtime host chạy module libzproto_wasm giải mã Sync v2 di động
+├── reactions.rs       # (1,069 lines)  Quản lý trạng thái thả cảm xúc (reaction) tin nhắn
+├── doc_preview.rs     # (985 lines)    Xem trước trực tiếp tài liệu PDF, Word, Excel, PowerPoint, CSV/TSV/RTF
+├── api_mcp.rs         # (939 lines)    Máy chủ HTTP REST API cục bộ & giao thức MCP (JSON-RPC 2.0)
+├── unread.rs          # (867 lines)    Theo dõi bộ đếm tin nhắn chưa đọc và trạng thái tắt thông báo (mute)
+├── tg_bridge.rs       # (803 lines)    Cầu nối 2 chiều Telegram ↔ Zalo kèm LRU echo-guard
+├── updater.rs         # (797 lines)    Tự động kiểm tra, tải và xác thực SHA-256 bản cập nhật GitHub
+├── socket.rs          # (684 lines)    Kết nối WebSocket thời gian thực (zpw_ws) kèm hàng đợi pre-auth
+├── audio.rs           # (650 lines)    Thu/phát âm thanh thời gian thực (cpal + libopus)
+├── account_manager.rs # (599 lines)    Quản lý đa tài khoản, cô lập dữ liệu & chuyển đổi profile tức thì
+├── voip_log.rs        # (550 lines)    Ghi nhận chẩn đoán luồng gói tin RTP/RTCP (voip.log)
+├── llm.rs             # (535 lines)    Client giao tiếp mô hình ngôn ngữ (LLM) cho TUI & tóm tắt nhóm
+├── storage_manager.rs # (534 lines)    Quản lý bộ nhớ 3 tầng (root/media/cache/system) & di chuyển thư mục dữ liệu
+├── thread_script.rs   # (520 lines)    Engine kịch bản tự động hóa hội thoại (Rhai scripting)
+├── scheduler.rs       # (476 lines)    Bộ lập lịch gửi tin nhắn hẹn giờ & nhắc hẹn cục bộ
+├── app_lock.rs        # (463 lines)    Logic khóa ứng dụng PIN 4 số, idle/sleep watchdog & xóa phiên an toàn
+├── media_resources.rs # (442 lines)    Quản lý bộ đệm ResourceLru (64 MB) bảo vệ texture khung hình
+├── agent.rs           # (410 lines)    Vòng lặp AI Agent tự động hóa tác vụ trong TUI workspace
+├── qr.rs              # (402 lines)    Luồng sinh mã QR, long-polling chờ quét và xác nhận đăng nhập
+├── data_dir.rs        # (400 lines)    Phân giải thư mục dữ liệu đa nền tảng (--data-dir / --profile / XDG)
+├── login.rs           # (352 lines)    Đăng nhập mật khẩu (PasswordCipher), getServerInfo, getLoginInfo
+├── background_accounts.rs # (319 lines) Đồng bộ nền & thông báo cho các tài khoản phụ
+├── poll.rs            # (317 lines)    Mô hình & API bình chọn nhóm (Group Polls)
+├── message_model.rs   # (299 lines)    Mô hình định danh và hợp nhất trạng thái tin nhắn
+├── logger.rs          # (264 lines)    Bộ thu thập log mạng, crash.log & quét mã lỗi cho chế độ --dev
+├── group_stats.rs     # (250 lines)    Thống kê hoạt động và tương tác trong nhóm chat
+├── single_instance.rs # (241 lines)    Chặn mở trùng cửa sổ GUI theo thư mục dữ liệu (Unix flock + socket)
+├── os_notify.rs       # (238 lines)    Điều phối thông báo hệ điều hành đa nền tảng (Windows / Linux / macOS)
+├── native_notifications.rs # (209 lines) Thông báo native desktop (macOS UserNotifications, Windows, Linux notify)
+├── clipboard_dib.rs   # (190 lines)    Đọc ảnh bitmap trực tiếp từ Windows clipboard (CF_DIB)
+├── group_llm.rs       # (184 lines)    Tóm tắt và hỗ trợ phân tích nội dung nhóm
+├── param_cipher.rs    # (171 lines)    Mã hóa tham số xác thực ParamCipher v2 (zcid, zcid_ext, encrypt_key)
+├── ui.rs              # (164 lines)    Thành phần UI chia sẻ giữa các giao diện
+├── auth.rs            # (129 lines)    Xác thực API cục bộ & quản lý thông tin phiên
+├── crypto.rs          # (93 lines)     AES-128/256-CBC, PKCS7, MD5 và hàm tạo chữ ký signkey
+├── group_watch.rs     # (89 lines)     Theo dõi sự kiện và từ khóa trong nhóm
+├── message_navigation.rs # (83 lines)  Điều hướng nhanh tới tin nhắn trích dẫn trong hội thoại
+├── clock.rs           # (72 lines)     Đồng hồ hiển thị thời gian và chuẩn hóa epoch ms
+├── endpoints.rs       # (56 lines)     Bảng định tuyến các domain máy chủ Zalo (Service Map)
+├── bin/               # (1,966 lines across 8 diagnostic/CLI probe binaries)
+└── gui/               # Giao diện đồ họa native (eframe/egui — 45,162 lines across 13 files)
+    ├── modals.rs      # (12,505 lines) Danh bạ, Nhật ký, Hẹn giờ, Cài đặt, Quản lý bộ nhớ 3 tầng & Cuộc gọi
+    ├── workspace.rs   # (10,974 lines) Bố cục thanh điều hướng, cột chat, auto-scroll & khung chat chính
+    ├── messages.rs    # (6,913 lines)  Bong bóng tin nhắn, media sizing (#192), quick heart & @mention UTF-16 (#174)
+    ├── worker.rs      # (6,071 lines)  Luồng nền Tokio dùng chung, lưu settings async & prefetch ảnh/sticker
+    ├── app_lock_ui.rs # (2,709 lines)  Màn hình khóa PIN4, modal thiết lập nhanh & thao tác khóa UI
+    ├── stickers.rs    # (1,887 lines)  Sticker picker, auto-suggest & bộ lọc nhãn dán
+    ├── theme.rs       # (1,693 lines)  Bảng màu Dark/Light, icon vector Lucide, khử răng cưa & font hệ thống
+    ├── attachments.rs # (759 lines)    Quản lý hàng chờ đa tệp, dán clipboard & kéo thả tệp
+    ├── poll_card.rs   # (433 lines)    Thẻ bình chọn nhóm tương tác trực tiếp trong luồng chat
+    ├── windows_tray.rs # (349 lines)   Icon & popup khay hệ thống thuần Win32 (windows-sys, Close-to-Tray)
+    ├── color_emoji.rs # (318 lines)    Giải mã và hiển thị bộ emoji màu Twemoji (twemoji72.pack)
+    ├── tray.rs        # (283 lines)    Icon khay hệ thống Linux via D-Bus StatusNotifierItem (ksni)
+    └── reactions_dialog.rs # (268 lines) Hộp thoại hiển thị chi tiết danh sách người thả cảm xúc
+```
+
+```text
+tests/ (3,115 lines across 7 integration suites — 72 tests)
+├── test_message_forward.rs          # (792 lines) Chuyển tiếp tin nhắn, rich link & media payload
+├── qa_cross_platform_regression.rs  # (786 lines) Kiểm thử hồi quy đa nền tảng, app lock, feed & giao diện
+├── updater_regressions.rs           # (410 lines) Chọn asset OS/Arch & kiểm chứng cập nhật SHA-256
+├── wave1_pr_regressions.rs          # (320 lines) Hồi quy #213 Windows tray/settings, #192 media sizing & #174 @mention
+├── data_directory_cli.rs            # (288 lines) Phân giải --data-dir, --profile & XDG trên Unix/Windows
+├── message_identity_integration.rs  # (282 lines) Khử trùng lặp tin nhắn & hợp nhất client/server ID
+└── media_resources_regressions.rs   # (237 lines) ResourceLru 64 MB, giải phóng texture & giới hạn giải mã
 ```
 ---
 
@@ -299,13 +335,16 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 
 | Contributor | GitHub | Đóng góp chính | Khối lượng |
 | :--- | :--- | :--- | :---: |
-| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 – v0.1.3 | **> 75,600+ lines** |
-| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & đồng phát hành v0.0.5 – v0.1.3 | **> 35,100+ lines** 🏆 |
+| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 – v0.1.4 | **> 75,600+ lines** |
+| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & đồng phát hành v0.0.5 – v0.1.4 | **> 35,100+ lines** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | Loạt 10 PRs: Múi giờ OS, tùy biến data-dir, helpers macOS, session atomic, media cache, updater, message state, định danh tin nhắn (#61), điều hướng trích dẫn (#60), quyền thông báo macOS (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | Loạt 5 PRs: Tiêu chuẩn kỹ thuật, bảo toàn session an toàn, phân giải domain mạng | **> 3,400+ lines** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | Loạt 8 PRs: Tối ưu khởi động SQLite, đồng bộ lịch sử nhóm/Cloud (#45), poll timer worker (#46), virtualization chat, lazy load Font CJK | **~950+ lines** |
 | **Tuyến Trần (gr219)** | [@gr219](https://github.com/gr219) | PR #85 (chờ sự kiện file_done), PR #99 (sửa lỗi spawn helper ETXTBSY), PR #125 (hiển thị biệt danh bạn bè), PR #127 (đính kèm nhiều tệp & album ảnh dạng lưới), PR #145 (nạp trực tiếp Sync V2 WASM từ Zalo PC app.asar, khắc phục #147) | **> 1,400+ lines** 🏆 |
-| **Leoaxo098** | [@Leoaxo098](https://github.com/Leoaxo098) | PR #97: Khóa ô nhập liệu khi thành viên bị hạn chế quyền chat trong nhóm | **~180+ lines** |
+| **minhngoc2512** | [@minhngoc2512](https://github.com/minhngoc2512) | Loạt PRs: Linux XDG & System Tray (#166, #168), Lưu Downloads & ImageViewer (#167, #177), Twemoji & Group Polls (#189, #193), Single-Instance GUI (#182), Media Sizing & Vanish Tombstone (#192), Quick Heart & `@mention` UTF-16 (#174) | **Community PRs** 🏆 |
+| **Leoaxo098** | [@Leoaxo098](https://github.com/Leoaxo098) | PR #97 (khóa ô nhập liệu nhóm hạn chế chat), PR #212 (sửa nhảy cuộn khi tải ảnh), PR #213 (Windows Close-to-Tray & lưu settings trước đăng nhập) | **Community PRs** |
+| **ziq3** | [@ziq3](https://github.com/ziq3) | PR #154 (chặn replay thông báo reaction), PR #207 (Wayland quit-on-close), PR #208 (corner popup chỉ bật trên Windows), PR #209 (phát hiện deadlock double-click reply) | **Community PRs** |
+| **NamGTitm** | [@NamGTitm](https://github.com/NamGTitm) | PR #162 (cảnh báo trạng thái đồng bộ lịch sử chưa đầy đủ) | **Community PR** |
 | **hoanglong149** | [@hoanglong149](https://github.com/hoanglong149) | PR #78, #121, #136, #137, #143, #144: Giải mã Sync v2 WASM, chống thu hồi (#79, #141), thông báo OS, tối ưu CPU/RAM (#135), Console TUI + LLM Agent + cầu nối Telegram ↔ Zalo | **> 3,500+ lines** 🏆 |
 | **Đỗ Mạnh Cường (cuongdm75)** | [@cuongdm75](https://github.com/cuongdm75) | PR #105 & PR #134: Chọn thư mục tải về native, tùy chỉnh UI trực tiếp, trả lời trích dẫn (quote-reply), chuyển tiếp tin nhắn & bảo toàn URL thẻ liên kết (#88, #89) | **> 8,500+ lines** 🏆 |
 | **Trần Đức Thịnh (Fin12n)** | [@Fin12n](https://github.com/Fin12n) | PR #132 & PR #148: Thiết kế lại thẻ tập tin (file cards), sửa phát video trực tiếp, tinh chỉnh UI/UX toàn diện & giải mã Sync V2 protobuf | **> 6,500+ lines** 🏆 |

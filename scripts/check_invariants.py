@@ -18,26 +18,31 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 GUI_FILES = [
     ROOT / "src/gui.rs",
+    ROOT / "src/gui/app_lock_ui.rs",
     ROOT / "src/gui/attachments.rs",
     ROOT / "src/gui/messages.rs",
     ROOT / "src/gui/modals.rs",
     ROOT / "src/gui/theme.rs",
+    ROOT / "src/gui/windows_tray.rs",
     ROOT / "src/gui/worker.rs",
     ROOT / "src/gui/workspace.rs",
 ]
 
 UI_THREAD_FILES = [
     ROOT / "src/gui.rs",
+    ROOT / "src/gui/app_lock_ui.rs",
     ROOT / "src/gui/attachments.rs",
     ROOT / "src/gui/messages.rs",
     ROOT / "src/gui/modals.rs",
     ROOT / "src/gui/theme.rs",
+    ROOT / "src/gui/windows_tray.rs",
     ROOT / "src/gui/workspace.rs",
 ]
 
 STRICT_NON_GUI_MODULES = [
     ROOT / "src/account_manager.rs",
     ROOT / "src/api_mcp.rs",
+    ROOT / "src/app_lock.rs",
     ROOT / "src/chat.rs",
     ROOT / "src/crypto.rs",
     ROOT / "src/data_dir.rs",
@@ -323,7 +328,7 @@ def check_r5_data_hygiene() -> list[Violation]:
         )
         if res.returncode == 0:
             forbidden_re = re.compile(
-                r"(^|/)session\.json$|^accounts/|\.db$|\.db-(?:wal|shm)$|(^|/)crash\.log$"
+                r"(^|/)session\.json$|^accounts/|\.db$|\.db-(?:wal|shm)$|(^|/)crash\.log$|(^|/)app_lock\.json$"
             )
             for tracked in res.stdout.splitlines():
                 if forbidden_re.search(tracked.strip()):

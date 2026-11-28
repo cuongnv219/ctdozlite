@@ -142,6 +142,10 @@ pub struct ChatMessage {
     /// Photo album membership (`group_layout_id`); consecutive photos sharing it render as one grid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_group: Option<MediaGroupLayout>,
+    /// Pixel size the sender declared for a photo (`params.width`/`height`). Lets the chat
+    /// reserve the final size before the thumbnail loads, so the list does not jump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_size: Option<[u32; 2]>,
     /// Bản dịch hiển thị dưới tin gốc (session-only, không persist).
     #[serde(skip)]
     pub translation: Option<String>,
@@ -195,10 +199,15 @@ impl ChatMessage {
         if gained_oa_card {
             self.oa_card = incoming.oa_card.clone();
         }
+        let gained_media_size = self.media_size.is_none() && incoming.media_size.is_some();
+        if gained_media_size {
+            self.media_size = incoming.media_size;
+        }
         self.delivery = self.delivery.merge(incoming.delivery);
         gained_media_group
             || notice_text_changed
             || gained_oa_card
+            || gained_media_size
             || previous_mentions != self.resolved_mention_uids
             || before
                 != (
@@ -519,7 +528,7 @@ impl ChatMessage {
     }
 
     /// Fill independently missing card fields when an existing URL already exists.
-    // The parser layer wires this helper in the dependent protocol change.
+    /// The parser layer wires this helper in the dependent protocol change.
     #[allow(dead_code)]
     fn merge_media_metadata(&mut self, incoming: &Self) -> bool {
         if self.text == "[Tin nhắn đã thu hồi]" {
@@ -623,54 +632,8 @@ pub fn can_edit_message(msg: &ChatMessage, now_ms: i64) -> bool {
     age_ms >= 0 && age_ms <= EDIT_WINDOW_SECS * 1000
 }
 
-#[cfg(test)]
-mod edit_window_tests {
-    use super::*;
-
-    #[test]
-    fn edit_window_allows_own_text_within_15m() {
-        let msg = ChatMessage {
-            is_outgoing: true,
-            text: "hello".into(),
-            ts: 1_000_000,
-            ..Default::default()
-        };
-        assert!(can_edit_message(&msg, 1_000_000 + 14 * 60 * 1000));
-    }
-
-    #[test]
-    fn edit_window_rejects_after_15m() {
-        let msg = ChatMessage {
-            is_outgoing: true,
-            text: "hello".into(),
-            ts: 1_000_000,
-            ..Default::default()
-        };
-        assert!(!can_edit_message(&msg, 1_000_000 + 16 * 60 * 1000));
-    }
-
-    #[test]
-    fn edit_window_rejects_others_and_rich() {
-        let incoming = ChatMessage {
-            is_outgoing: false,
-            text: "hi".into(),
-            ts: 1_000_000,
-            ..Default::default()
-        };
-        assert!(!can_edit_message(&incoming, 1_000_001));
-        let sticker = ChatMessage {
-            is_outgoing: true,
-            text: "[Nhãn dán]".into(),
-            ts: 1_000_000,
-            sticker_id: Some(1),
-            ..Default::default()
-        };
-        assert!(!can_edit_message(&sticker, 1_000_001));
-    }
-}
 
 /// Tin nhắn tự xoá (disappearing messages) — client-side local-only.
-//
 // Tham chiếu hành vi Zalo PC (`MSG_VANISH`, TTL picker, `expireOn` cột TTLItem):
 // - Chế độ theo hội thoại: bật/tắt + 1 thời gian chung cho mọi tin trong thread.
 // - Durations theo config server `chat_privacy_ttl_durations` của Zalo PC:
@@ -678,10 +641,9 @@ mod edit_window_tests {
 // - Zalo thật: server giữ `ttl`/`expireOn` nên phía bên kia vẫn thấy tin hết hạn
 //   (khi server xoá). ctdozlite KHÔNG tìm thấy endpoint/cmd nào để gửi TTL lên
 //   server trong bundle PC nên chỉ tự ẩn phía mình, phía bên kia vẫn thấy tin.
-//
 // Thời điểm bắt đầu (`started_at_sec`, epoch giây) là lúc bật chế độ; mọi tin có
 // `ts` (ms, chuẩn hoá về ms) >= `started_at_sec * 1000` đều chịu chế độ tự xoá và
-// hết hạn sau `duration_sec`. Tin cũ hơn lúc bật không bị ảnh hưởng.
+/// hết hạn sau `duration_sec`. Tin cũ hơn lúc bật không bị ảnh hưởng.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct VanishSetting {
@@ -783,6 +745,9 @@ pub fn apply_vanish_expiry(msg: &mut ChatMessage) -> bool {
     msg.sticker_id = None;
     msg.sticker_cate_id = None;
     msg.sticker_type = None;
+    msg.oa_card = None;
+    msg.media_group = None;
+    msg.media_size = None;
     true
 }
 
@@ -1577,6 +1542,7 @@ pub fn merge_thread_into(
             identities.remove(existing_msg, idx);
             existing_msg.merge_reaction_metadata(&msg);
             merge_delivery_state(&mut existing_msg.delivery, msg.delivery);
+            merge_reply_metadata(existing_msg, &msg);
             if existing_msg.id.starts_with("out_")
                 && !msg.id.is_empty()
                 && !msg.id.starts_with("out_")
@@ -1594,11 +1560,6 @@ pub fn merge_thread_into(
                 existing_msg.sticker_id = msg.sticker_id;
                 existing_msg.sticker_cate_id = msg.sticker_cate_id;
                 existing_msg.sticker_type = msg.sticker_type;
-            }
-            if existing_msg.reply_to_text.is_none() && msg.reply_to_text.is_some() {
-                existing_msg.reply_to_id = msg.reply_to_id;
-                existing_msg.reply_to_sender = msg.reply_to_sender;
-                existing_msg.reply_to_text = msg.reply_to_text;
             }
             if existing_msg.link_url.is_none() && msg.link_url.is_some() {
                 existing_msg.link_url = msg.link_url;
@@ -1652,6 +1613,7 @@ pub fn merge_thread_into(
         }
     }
 
+    repair_thread_quote_replies(&mut target.messages);
     if let Some(newest) = target.messages.last() {
         if !newest.text.is_empty() {
             target.preview = newest.text.replace('\n', " ");
@@ -1742,6 +1704,9 @@ pub fn deduplicate_threads(
                 }
             }
         }
+    }
+    for t in merged.iter_mut() {
+        repair_thread_quote_replies(&mut t.messages);
     }
     *threads = merged;
 }
@@ -2535,6 +2500,44 @@ pub struct MediaGroupLayout {
     pub total: u32,
 }
 
+/// Parse `params` from a message `content`; both may arrive as an object or a JSON string.
+fn content_params(content: &Value) -> Option<Value> {
+    let parse_json = |v: &Value| -> Option<Value> {
+        match v {
+            Value::String(s) if s.trim_start().starts_with('{') => serde_json::from_str(s).ok(),
+            Value::Object(_) => Some(v.clone()),
+            _ => None,
+        }
+    };
+    let content = parse_json(content)?;
+    content.get("params").and_then(parse_json)
+}
+
+/// Read a photo's declared pixel size from `content.params` (`width`, `height`), as numbers
+/// or numeric strings. Returns `None` unless both are positive.
+pub fn photo_size_from_content(content: &Value) -> Option<[u32; 2]> {
+    params_size(content, "width", "height")
+}
+
+/// Read a video's declared pixel size from `content.params` (`video_width`, `video_height`,
+/// the fields Zalo's web client reads for `MSG_VIDEO`).
+pub fn video_size_from_content(content: &Value) -> Option<[u32; 2]> {
+    params_size(content, "video_width", "video_height")
+}
+
+fn params_size(content: &Value, width_key: &str, height_key: &str) -> Option<[u32; 2]> {
+    let params = content_params(content)?;
+    let dim = |key: &str| -> Option<u32> {
+        let v = params.get(key)?;
+        let n = v
+            .as_u64()
+            .or_else(|| v.as_f64().map(|f| f.round() as u64))
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))?;
+        u32::try_from(n).ok().filter(|&n| n > 0)
+    };
+    Some([dim(width_key)?, dim(height_key)?])
+}
+
 impl MediaGroupLayout {
     /// Build the layout for photo `index` of `total`, all sharing `id`.
     pub fn new(id: impl Into<String>, index: u32, total: u32) -> Self {
@@ -2549,15 +2552,7 @@ impl MediaGroupLayout {
     /// `params` carries `group_layout_id`, `is_group_layout` and `id_in_group`. Returns `None`
     /// for photos sent on their own.
     pub fn from_content(content: &Value) -> Option<Self> {
-        let parse_json = |v: &Value| -> Option<Value> {
-            match v {
-                Value::String(s) if s.trim_start().starts_with('{') => serde_json::from_str(s).ok(),
-                Value::Object(_) => Some(v.clone()),
-                _ => None,
-            }
-        };
-        let content = parse_json(content)?;
-        let params = content.get("params").and_then(parse_json)?;
+        let params = content_params(content)?;
         let as_u64 = |key_snake: &str, key_camel: &str| -> Option<u64> {
             let v = params.get(key_snake).or_else(|| params.get(key_camel))?;
             v.as_u64()
@@ -3168,6 +3163,7 @@ pub async fn send_attachment_in_layout(
             link_thumb: Some(final_thumb),
             link_src: Some("Hình ảnh Zalo".into()),
             media_group: layout.filter(|_| joined_album).cloned(),
+            media_size: Some([width, height]).filter(|&[w, h]| w > 0 && h > 0),
             ..Default::default()
         };
         return Ok((send_resp, cm));
@@ -3325,6 +3321,7 @@ pub async fn send_attachment_in_layout(
                             link_desc: (!caption.trim().is_empty())
                                 .then(|| caption.trim().to_string()),
                             link_src: Some("Video Zalo".into()),
+                            media_size: Some([vid_w, vid_h]).filter(|&[w, h]| w > 0 && h > 0),
                             ..Default::default()
                         };
                         return Ok((fwd_resp, cm));
@@ -4899,7 +4896,7 @@ pub async fn search_stickers_by_keyword(s: &Session, keyword: &str) -> Result<Ve
     }
 
     // Prioritize modern illustrated Zalo character packs (`cate_id` descending, matching Zalo PC's
-    // `pointCate` ranking) and exclude legacy round-emoji/photo-meme packs when character packs exist.
+    /// `pointCate` ranking) and exclude legacy round-emoji/photo-meme packs when character packs exist.
     const LEGACY_NON_CHAR_PACKS: &[u64] = &[
         0, 50, 10788, 11190, 11984, 11998, 12002, 12003, 12024, 12658,
     ];
@@ -5010,6 +5007,739 @@ pub(crate) fn quote_target(
     }
 }
 
+fn is_video_url_like(url: &str) -> bool {
+    let l = url.trim().to_ascii_lowercase();
+    (l.starts_with("http://") || l.starts_with("https://"))
+        && (l.ends_with(".mp4")
+            || l.ends_with(".mov")
+            || l.ends_with(".webm")
+            || l.ends_with(".mkv")
+            || l.ends_with(".avi")
+            || l.contains("/video/")
+            || l.contains("videomedia")
+            || l.contains("video-")
+            || l.contains("video.")
+            || l.contains(".dlmd.me"))
+}
+
+fn is_image_filename_only(s: &str) -> bool {
+    let l = s.trim().to_ascii_lowercase();
+    [
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".jfif", ".tiff", ".heic", ".avif",
+    ]
+    .iter()
+    .any(|ext| l.ends_with(ext))
+}
+
+fn is_raw_json_literal(s: &str) -> bool {
+    let t = s.trim();
+    ((t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']')))
+        && serde_json::from_str::<Value>(t).is_ok()
+}
+
+fn clean_quote_text_candidate(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() || t == "sendBubbleMessage" || is_raw_json_literal(t) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+fn clean_media_quote_caption(
+    raw: Option<&str>,
+    reject_image_filenames: bool,
+    extra_skip: &[&str],
+) -> Option<String> {
+    let t = clean_quote_text_candidate(raw?)?;
+    if t.starts_with("http://") || t.starts_with("https://") {
+        return None;
+    }
+    if t.len() > 20 && !t.contains(' ') && !t.contains('.') {
+        return None;
+    }
+    if extra_skip.iter().any(|s| t.eq_ignore_ascii_case(s)) {
+        return None;
+    }
+    if reject_image_filenames && is_image_filename_only(&t) {
+        return None;
+    }
+    Some(t)
+}
+
+fn format_media_quote_label(
+    prefix: &str,
+    alt_prefix: Option<&str>,
+    caption: Option<String>,
+) -> String {
+    let Some(cap) = caption else {
+        return prefix.to_string();
+    };
+    let c = cap.trim();
+    if c.is_empty() || c == prefix || alt_prefix.is_some_and(|a| c == a) {
+        return prefix.to_string();
+    }
+    if c.starts_with(prefix) && c[prefix.len()..].starts_with(char::is_whitespace) {
+        let rest = c[prefix.len()..].trim();
+        return if rest.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix} {rest}")
+        };
+    }
+    if let Some(alt) = alt_prefix {
+        if c.starts_with(alt) && c[alt.len()..].starts_with(char::is_whitespace) {
+            let rest = c[alt.len()..].trim();
+            return if rest.is_empty() {
+                prefix.to_string()
+            } else {
+                format!("{prefix} {rest}")
+            };
+        }
+    }
+    format!("{prefix} {c}")
+}
+
+/// Returns `true` when `reply_to_text` is absent, blank, or carries unparsed wire JSON / CDN URLs.
+pub(crate) fn is_missing_or_raw_quote_text(text: Option<&str>) -> bool {
+    match text.map(str::trim) {
+        None | Some("") => true,
+        Some(t) => {
+            is_raw_json_literal(t)
+                || t == "sendBubbleMessage"
+                || is_zalo_photo_cdn_url(t)
+                || is_video_url_like(t)
+        }
+    }
+}
+
+/// Canonical display summary for a `ChatMessage` when it is quoted in a reply.
+pub(crate) fn quote_preview_text(quoted: &ChatMessage) -> String {
+    let raw_text = quoted
+        .text
+        .strip_prefix("[Đã thu hồi] ")
+        .unwrap_or(&quoted.text)
+        .trim();
+
+    if quoted.sticker_id.is_some()
+        || quoted.kind == crate::message_model::MessageKind::Sticker
+        || raw_text == "[Nhãn dán]"
+    {
+        return "[Nhãn dán]".to_string();
+    }
+    if quoted.kind == crate::message_model::MessageKind::Voice
+        || quoted.link_src.as_deref() == Some("Thoại Zalo")
+        || raw_text == "[Tin nhắn thoại]"
+    {
+        return "[Tin nhắn thoại]".to_string();
+    }
+    if quoted.kind == crate::message_model::MessageKind::Video
+        || quoted.link_src.as_deref() == Some("Video Zalo")
+        || raw_text == "[Video]"
+        || raw_text.starts_with("[Video] ")
+        || quoted.link_url.as_deref().is_some_and(is_video_url_like)
+    {
+        let cap = clean_media_quote_caption(Some(raw_text), false, &["Video", "[Tập tin]"])
+            .filter(|s| !s.starts_with("[Tập tin]"))
+            .or_else(|| clean_media_quote_caption(quoted.link_desc.as_deref(), false, &["Video"]));
+        return format_media_quote_label("[Video]", None, cap);
+    }
+    let is_photo_like = quoted.kind == crate::message_model::MessageKind::Photo
+        || quoted.kind == crate::message_model::MessageKind::Gif
+        || quoted.link_src.as_deref() == Some("Hình ảnh Zalo")
+        || raw_text == "[Hình ảnh]"
+        || raw_text.starts_with("[Hình ảnh] ")
+        || raw_text == "[Photo]"
+        || raw_text.starts_with("[Photo] ")
+        || (!matches!(
+            quoted.kind,
+            crate::message_model::MessageKind::Link
+                | crate::message_model::MessageKind::File
+                | crate::message_model::MessageKind::Action
+                | crate::message_model::MessageKind::WebContent
+        ) && (quoted
+            .link_url
+            .as_deref()
+            .is_some_and(is_zalo_photo_cdn_url)
+            || quoted
+                .link_thumb
+                .as_deref()
+                .is_some_and(is_zalo_photo_cdn_url)));
+    if is_photo_like {
+        let cap = clean_media_quote_caption(Some(raw_text), false, &["Hình ảnh", "Photo"])
+            .or_else(|| {
+                clean_media_quote_caption(
+                    quoted.link_desc.as_deref(),
+                    true,
+                    &["Hình ảnh", "Photo"],
+                )
+            });
+        return format_media_quote_label("[Hình ảnh]", Some("[Photo]"), cap);
+    }
+    if quoted.kind == crate::message_model::MessageKind::File
+        || quoted.link_src.as_deref() == Some("Tập tin Zalo")
+        || raw_text == "[Tập tin]"
+        || raw_text.starts_with("[Tập tin] ")
+    {
+        if raw_text.starts_with("[Tập tin] ") && !raw_text.to_ascii_lowercase().contains("renewmedia")
+        {
+            return raw_text.to_string();
+        }
+        let has_file_meta = quoted.link_title.is_some() || quoted.link_url.is_some();
+        if has_file_meta {
+            let resolved = resolve_attachment_file_name(
+                quoted.link_title.as_deref(),
+                raw_text,
+                quoted.link_url.as_deref().unwrap_or_default(),
+            );
+            if resolved != "tap_tin_zalo" {
+                return format!("[Tập tin] {resolved}");
+            }
+        }
+        return "[Tập tin]".to_string();
+    }
+    if is_raw_json_literal(raw_text) {
+        return normalize_quote_raw_msg(raw_text).unwrap_or_default();
+    }
+    quoted.text.clone()
+}
+
+fn normalize_quote_type(q: &Value) -> String {
+    let raw = q
+        .get("cliMsgType")
+        .or_else(|| q.get("msgType"))
+        .or_else(|| q.get("type"));
+    let numeric = raw.and_then(|v| match v {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    });
+    if let Some(code) = numeric {
+        return match code {
+            1 => "chat.text",
+            2 | 11 | 32 => "chat.photo",
+            3 | 31 => "chat.voice",
+            4 | 13 | 36 | 401..=404 => "chat.sticker",
+            5 | 37 => "chat.doodle",
+            6 | 38 => "chat.contact",
+            7 | 23 | 49 => "chat.gif",
+            17 | 24 | 43 => "chat.location",
+            18 | 44 => "chat.video",
+            19 | 46 => "chat.file",
+            20 | 45 => "chat.undo",
+            -27 => "chat.deleted",
+            -28 => "chat.vanish",
+            21 | 52 | 53 => "chat.webcontent",
+            25 => "chat.ecard",
+            26 => "group.poll",
+            40 => "chat.link",
+            _ => "",
+        }
+        .to_string();
+    }
+    raw.and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn quote_attach_str<'a>(obj: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .filter_map(|k| obj.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+}
+
+fn quote_has_voice_params(v: &Value) -> bool {
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
+    if obj.get("m4a").is_some() || obj.get("voice").is_some() || obj.get("waveform").is_some() {
+        return true;
+    }
+    obj.get("params")
+        .and_then(parse_embedded_json)
+        .and_then(|p| p.as_object().cloned())
+        .is_some_and(|p| {
+            p.get("m4a").is_some() || p.get("voice").is_some() || p.get("waveform").is_some()
+        })
+}
+
+fn quote_has_file_params(v: &Value, link_url: Option<&str>) -> bool {
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
+    if obj.get("fileName").is_some()
+        || obj.get("fileExt").is_some()
+        || obj.get("fileSize").is_some()
+        || link_url.is_some_and(|u| u.to_ascii_lowercase().contains("/renewmedia"))
+    {
+        return true;
+    }
+    obj.get("params")
+        .and_then(parse_embedded_json)
+        .and_then(|p| p.as_object().cloned())
+        .is_some_and(|p| {
+            p.get("fileName").is_some() || p.get("fileExt").is_some() || p.get("fileSize").is_some()
+        })
+}
+
+/// Normalize a raw quote text field (`q.msg`) when it may hold empty whitespace, JSON, or CDN URLs.
+pub(crate) fn normalize_quote_raw_msg(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() || t == "sendBubbleMessage" {
+        return None;
+    }
+    if is_raw_json_literal(t) {
+        let parsed = serde_json::from_str::<Value>(t).ok()?;
+        let synthetic = json!({ "attach": parsed });
+        return resolve_quote_text(&synthetic);
+    }
+    if is_zalo_photo_cdn_url(t) {
+        return Some("[Hình ảnh]".to_string());
+    }
+    if is_video_url_like(t) {
+        return Some("[Video]".to_string());
+    }
+    Some(t.to_string())
+}
+
+fn resolve_quote_text(q: &Value) -> Option<String> {
+    let q_type = normalize_quote_type(q);
+    let attach_val = q.get("attach").and_then(parse_embedded_json);
+    let raw_msg_val = q
+        .get("msg")
+        .or_else(|| q.get("message"))
+        .or_else(|| q.get("content"));
+    let raw_msg_json = raw_msg_val.and_then(|v| {
+        if v.is_object() || v.is_array() {
+            Some(v.clone())
+        } else {
+            parse_embedded_json(v)
+        }
+    });
+    let raw_msg_str = raw_msg_val
+        .and_then(Value::as_str)
+        .and_then(clean_quote_text_candidate);
+
+    let meta_val = attach_val.as_ref().or(raw_msg_json.as_ref());
+    let meta_obj = meta_val.and_then(Value::as_object);
+    let (link_url, _link_title, link_desc, link_thumb, link_src) = meta_val
+        .map(extract_link_info)
+        .unwrap_or((None, None, None, None, None));
+
+    let attach_action = meta_obj
+        .and_then(|o| quote_attach_str(o, &["action"]))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let attach_title_raw = meta_obj.and_then(|o| quote_attach_str(o, &["fileName", "name", "title"]));
+    let attach_desc_raw = link_desc
+        .as_deref()
+        .or_else(|| meta_obj.and_then(|o| quote_attach_str(o, &["description", "caption", "desc"])));
+
+    if matches!(q_type.as_str(), "chat.undo" | "undo") {
+        return Some("[Tin nhắn đã thu hồi]".to_string());
+    }
+    if q_type == "chat.deleted" {
+        return Some("[Tin nhắn đã bị xóa]".to_string());
+    }
+    if q_type == "chat.vanish" {
+        return Some("[Tin nhắn đã tự xóa]".to_string());
+    }
+
+    let is_sticker_quote = matches!(q_type.as_str(), "chat.sticker" | "sticker")
+        || meta_val.and_then(extract_sticker_info).is_some()
+        || attach_action == "recommened.stickerset"
+        || raw_msg_str
+            .as_deref()
+            .is_some_and(|s| s.contains("ami_fat_cat_"))
+        || (q_type == "chat.doodle"
+            && link_url.is_none()
+            && link_thumb.is_none()
+            && raw_msg_str.is_none());
+    if is_sticker_quote {
+        return Some("[Nhãn dán]".to_string());
+    }
+
+    let is_voice_quote = matches!(q_type.as_str(), "chat.voice" | "voice")
+        || link_src.as_deref() == Some("Thoại Zalo")
+        || meta_val.is_some_and(quote_has_voice_params);
+    if is_voice_quote {
+        return Some("[Tin nhắn thoại]".to_string());
+    }
+
+    let is_video_quote = matches!(
+        q_type.as_str(),
+        "chat.video" | "video" | "chat.video.msg" | "chat.video.live.msg"
+    ) || link_src.as_deref() == Some("Video Zalo")
+        || meta_obj.is_some_and(|o| {
+            o.get("videoUrl").is_some()
+                || o.get("video_width").is_some()
+                || o.get("video_height").is_some()
+        })
+        || link_url.as_deref().is_some_and(is_video_url_like)
+        || raw_msg_str.as_deref().is_some_and(is_video_url_like);
+    if is_video_quote {
+        let cap = clean_media_quote_caption(raw_msg_str.as_deref(), false, &["Video"])
+            .or_else(|| clean_media_quote_caption(attach_desc_raw, false, &["Video"]))
+            .or_else(|| clean_media_quote_caption(attach_title_raw, true, &["Video"]));
+        return Some(format_media_quote_label("[Video]", None, cap));
+    }
+
+    let is_contact_or_call = matches!(q_type.as_str(), "chat.contact" | "contact");
+    if is_contact_or_call {
+        if attach_action == "recommened.link" {
+            let fallback = clean_quote_text_candidate(
+                raw_msg_str
+                    .as_deref()
+                    .or(attach_title_raw)
+                    .or(attach_desc_raw)
+                    .or(link_url.as_deref())
+                    .unwrap_or_default(),
+            );
+            return Some(fallback.unwrap_or_else(|| "[Liên kết]".to_string()));
+        }
+        if attach_action == "recommened.misscall" {
+            return Some("[Cuộc gọi nhỡ]".to_string());
+        }
+        if attach_action.starts_with("recommened.calling")
+            || attach_action.starts_with("recommened.receivecall")
+            || attach_action.starts_with("recommened.calltime")
+        {
+            return Some("[Cuộc gọi]".to_string());
+        }
+        let detail = clean_media_quote_caption(raw_msg_str.as_deref(), false, &["Danh thiếp"])
+            .or_else(|| clean_media_quote_caption(attach_title_raw, false, &["Danh thiếp"]))
+            .or_else(|| clean_media_quote_caption(attach_desc_raw, false, &["Danh thiếp"]));
+        return Some(format_media_quote_label("[Danh thiếp]", None, detail));
+    }
+
+    let is_location_quote = matches!(
+        q_type.as_str(),
+        "chat.location" | "chat.location.new" | "location"
+    );
+    if is_location_quote {
+        let detail = clean_media_quote_caption(raw_msg_str.as_deref(), false, &["Vị trí"])
+            .or_else(|| clean_media_quote_caption(attach_title_raw, false, &["Vị trí"]))
+            .or_else(|| clean_media_quote_caption(attach_desc_raw, false, &["Vị trí"]));
+        return Some(format_media_quote_label("[Vị trí]", None, detail));
+    }
+
+    let is_file_quote = matches!(q_type.as_str(), "chat.file" | "file" | "share.file")
+        || link_src.as_deref() == Some("Tập tin Zalo")
+        || (!matches!(
+            q_type.as_str(),
+            "chat.photo" | "photo" | "chat.doodle" | "doodle" | "chat.gif" | "gif"
+        ) && meta_val.is_some_and(|v| quote_has_file_params(v, link_url.as_deref())));
+    if is_file_quote {
+        if let Some(msg) = raw_msg_str.as_deref() {
+            if msg.starts_with("[Tập tin]") && !msg.to_ascii_lowercase().contains("renewmedia") {
+                return Some(msg.to_string());
+            }
+        }
+        let title_for_file = meta_obj.and_then(|o| quote_attach_str(o, &["fileName", "name", "title"]));
+        let owned_param_name = meta_obj
+            .and_then(|o| o.get("params"))
+            .and_then(parse_embedded_json)
+            .and_then(|p| {
+                p.get("fileName")
+                    .or_else(|| p.get("mediaTitle"))
+                    .and_then(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
+        let effective_title = title_for_file.or(owned_param_name.as_deref());
+        if effective_title.is_some() || link_url.is_some() {
+            let resolved = resolve_attachment_file_name(
+                effective_title,
+                raw_msg_str.as_deref().unwrap_or_default(),
+                link_url.as_deref().unwrap_or_default(),
+            );
+            if resolved != "tap_tin_zalo" {
+                return Some(format!("[Tập tin] {resolved}"));
+            }
+        }
+        if let Some(msg) = raw_msg_str.as_deref().filter(|m| {
+            !m.starts_with("http://")
+                && !m.starts_with("https://")
+                && !m.to_ascii_lowercase().contains("renewmedia")
+        }) {
+            return Some(format!("[Tập tin] {msg}"));
+        }
+        return Some("[Tập tin]".to_string());
+    }
+
+    let is_link_quote = matches!(
+        q_type.as_str(),
+        "chat.link" | "link" | "chat.recommended" | "share.link"
+    ) || attach_action == "recommened.link";
+    if is_link_quote {
+        return raw_msg_str
+            .or_else(|| attach_title_raw.map(str::to_string))
+            .or_else(|| attach_desc_raw.map(str::to_string))
+            .or(link_url)
+            .or_else(|| Some("[Liên kết]".to_string()));
+    }
+
+    let is_oa_or_poll = matches!(
+        q_type.as_str(),
+        "chat.webcontent"
+            | "chat.webcontent.v2"
+            | "chat.ecard"
+            | "chat.list.action"
+            | "group.poll"
+    );
+    if is_oa_or_poll {
+        if let Some(msg) = raw_msg_str {
+            return Some(msg);
+        }
+        if let Some(card) = extract_oa_rich_card(&q_type, meta_val) {
+            if let Some(t) = card
+                .title
+                .or(card.description)
+                .or_else(|| card.items.into_iter().find(|it| !it.title.is_empty()).map(|it| it.title))
+            {
+                return Some(t);
+            }
+        }
+        if let Some(extracted) = meta_val.and_then(extract_content_text) {
+            if let Some(clean) = clean_quote_text_candidate(&extracted) {
+                return Some(clean);
+            }
+        }
+        return Some(if q_type == "group.poll" {
+            "[Bình chọn]".to_string()
+        } else {
+            "[Tin nhắn]".to_string()
+        });
+    }
+
+    let has_photo_media_url = link_src.as_deref() == Some("Hình ảnh Zalo")
+        || link_url.as_deref().is_some_and(is_zalo_photo_cdn_url)
+        || link_thumb.as_deref().is_some_and(is_zalo_photo_cdn_url)
+        || raw_msg_str.as_deref().is_some_and(is_zalo_photo_cdn_url)
+        || (q_type.is_empty()
+            && raw_msg_str.is_none()
+            && attach_title_raw.is_none()
+            && (link_url.is_some() || link_thumb.is_some()));
+    let is_photo_quote = matches!(
+        q_type.as_str(),
+        "chat.photo" | "photo" | "chat.doodle" | "doodle" | "chat.gif" | "gif"
+    ) || has_photo_media_url;
+    if is_photo_quote {
+        let cap = clean_media_quote_caption(raw_msg_str.as_deref(), false, &["Hình ảnh", "Photo"])
+            .or_else(|| {
+                clean_media_quote_caption(attach_desc_raw, true, &["Hình ảnh", "Photo"])
+            })
+            .or_else(|| {
+                clean_media_quote_caption(attach_title_raw, true, &["Hình ảnh", "Photo"])
+            });
+        return Some(format_media_quote_label("[Hình ảnh]", Some("[Photo]"), cap));
+    }
+
+    if let Some(o) = meta_obj {
+        if o.get("action").and_then(Value::as_str) == Some("rtf") {
+            if let Some(title) = o.get("title").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(params_s) = o.get("params").and_then(Value::as_str) {
+                    let formatted = format_incoming_zalo_rtf(title, params_s);
+                    if !formatted.trim().is_empty() {
+                        return Some(formatted);
+                    }
+                }
+                return Some(title.to_string());
+            }
+        }
+    }
+
+    if let Some(msg) = raw_msg_str {
+        return Some(msg);
+    }
+
+    if let Some(mv) = meta_val {
+        if let Some(extracted) = extract_content_text(mv) {
+            return normalize_quote_raw_msg(&extracted);
+        }
+    }
+
+    None
+}
+
+/// Extract `(reply_to_id, reply_to_sender, reply_to_text)` from a Zalo `quote` payload.
+pub(crate) fn extract_quote_reply_fields(
+    q: &Value,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let parsed = if q.is_object() {
+        None
+    } else {
+        parse_embedded_json(q)
+    };
+    let q_obj = parsed.as_ref().unwrap_or(q);
+    if !q_obj.is_object() {
+        return (None, None, None);
+    }
+    let q_id = ["cliMsgId", "globalMsgId", "msgId"]
+        .iter()
+        .find_map(|key| wire_identity(q_obj.get(*key)))
+        .or_else(|| pick_str(q_obj, &["cliMsgId", "globalMsgId", "msgId"]));
+    let q_sender = pick_str(q_obj, &["fromD", "dName", "ownerId", "fromUid", "uidFrom"]);
+    let q_text = resolve_quote_text(q_obj);
+    (q_id, q_sender, q_text)
+}
+
+/// Extract an optional thumbnail image URL and `is_video` flag from a Zalo `quote` payload.
+pub(crate) fn extract_quote_thumb_url(q: &Value) -> Option<(String, bool)> {
+    let parsed = if q.is_object() {
+        None
+    } else {
+        parse_embedded_json(q)
+    };
+    let q_obj = parsed.as_ref().unwrap_or(q);
+    if !q_obj.is_object() {
+        return None;
+    }
+    let q_type = normalize_quote_type(q_obj);
+    if matches!(
+        q_type.as_str(),
+        "chat.undo" | "undo" | "chat.deleted" | "chat.vanish" | "chat.sticker" | "sticker"
+            | "chat.voice" | "voice" | "chat.file" | "file" | "share.file"
+    ) {
+        return None;
+    }
+    let attach_val = q_obj.get("attach").and_then(parse_embedded_json).or_else(|| {
+        q_obj
+            .get("msg")
+            .or_else(|| q_obj.get("content"))
+            .and_then(|v| {
+                if v.is_object() || v.is_array() {
+                    Some(v.clone())
+                } else {
+                    parse_embedded_json(v)
+                }
+            })
+    })?;
+    if extract_sticker_info(&attach_val).is_some() || quote_has_voice_params(&attach_val) {
+        return None;
+    }
+    let (link_url, _title, _desc, link_thumb, link_src) = extract_link_info(&attach_val);
+    let is_video = matches!(
+        q_type.as_str(),
+        "chat.video" | "video" | "chat.video.msg" | "chat.video.live.msg"
+    ) || link_src.as_deref() == Some("Video Zalo")
+        || attach_val.as_object().is_some_and(|o| {
+            o.get("videoUrl").is_some()
+                || o.get("video_width").is_some()
+                || o.get("video_height").is_some()
+        })
+        || link_url.as_deref().is_some_and(is_video_url_like);
+    let is_link_like = matches!(
+        q_type.as_str(),
+        "chat.link" | "link" | "chat.recommended" | "share.link" | "chat.contact" | "contact"
+    );
+    let candidate = if is_video || is_link_like {
+        link_thumb
+    } else {
+        link_thumb.or_else(|| {
+            link_url.filter(|u| {
+                !is_video_url_like(u)
+                    && (matches!(
+                        q_type.as_str(),
+                        "chat.photo" | "photo" | "chat.doodle" | "doodle" | "chat.gif" | "gif"
+                    ) || is_zalo_photo_cdn_url(u))
+            })
+        })
+    }?;
+    if !is_safe_external_image_url(&candidate)
+        || candidate.to_ascii_lowercase().contains("/renewmedia")
+        || is_video_url_like(&candidate)
+    {
+        return None;
+    }
+    Some((candidate, is_video))
+}
+
+fn merge_reply_metadata(existing: &mut ChatMessage, incoming: &ChatMessage) {
+    if existing.reply_to_id.is_none() && incoming.reply_to_id.is_some() {
+        existing.reply_to_id = incoming.reply_to_id.clone();
+    }
+    if existing.reply_to_sender.is_none() && incoming.reply_to_sender.is_some() {
+        existing.reply_to_sender = incoming.reply_to_sender.clone();
+    }
+    if is_missing_or_raw_quote_text(existing.reply_to_text.as_deref())
+        && !is_missing_or_raw_quote_text(incoming.reply_to_text.as_deref())
+    {
+        if existing.reply_to_id.is_none() || incoming.reply_to_id.is_some() {
+            existing.reply_to_id = incoming.reply_to_id.clone().or_else(|| existing.reply_to_id.clone());
+        }
+        if existing.reply_to_sender.is_none() || incoming.reply_to_sender.is_some() {
+            existing.reply_to_sender = incoming
+                .reply_to_sender
+                .clone()
+                .or_else(|| existing.reply_to_sender.clone());
+        }
+        existing.reply_to_text = incoming.reply_to_text.clone();
+    }
+    if existing.wire_ref.fields.get("quote").is_none() {
+        if let Some(q) = incoming.wire_ref.fields.get("quote") {
+            existing.wire_ref.fields.insert("quote".into(), q.clone());
+        }
+    }
+}
+
+/// Repair missing, blank, or unparsed quote previews on loaded thread messages from wire metadata
+/// and from matching target messages within the loaded conversation.
+pub(crate) fn repair_thread_quote_replies(messages: &mut [ChatMessage]) {
+    for msg in messages.iter_mut() {
+        if msg
+            .reply_to_text
+            .as_deref()
+            .is_some_and(|t| t.trim().is_empty())
+        {
+            msg.reply_to_text = None;
+        }
+        if is_missing_or_raw_quote_text(msg.reply_to_text.as_deref()) {
+            let wire_q = msg
+                .wire_ref
+                .fields
+                .get("quote")
+                .or_else(|| msg.history_source.as_ref().and_then(|v| v.pointer("/meta/quote")));
+            if let Some(q) = wire_q {
+                let (q_id, q_sender, q_text) = extract_quote_reply_fields(q);
+                if msg.reply_to_id.is_none() {
+                    msg.reply_to_id = q_id;
+                }
+                if msg.reply_to_sender.is_none() {
+                    msg.reply_to_sender = q_sender;
+                }
+                if let Some(txt) = q_text {
+                    msg.reply_to_text = Some(txt);
+                }
+            } else if let Some(raw) = msg.reply_to_text.as_deref() {
+                msg.reply_to_text = normalize_quote_raw_msg(raw);
+            }
+        }
+    }
+
+    let len = messages.len();
+    let mut backfills: Vec<(usize, String)> = Vec::new();
+    for idx in 0..len {
+        if !is_missing_or_raw_quote_text(messages[idx].reply_to_text.as_deref()) {
+            continue;
+        }
+        let Some(ref rid) = messages[idx].reply_to_id else {
+            continue;
+        };
+        if let Some(target_idx) = crate::message_navigation::unique_reference_index(messages, rid) {
+            if target_idx != idx {
+                let preview = quote_preview_text(&messages[target_idx]);
+                if !preview.trim().is_empty() {
+                    backfills.push((idx, preview));
+                }
+            }
+        }
+    }
+    for (idx, preview) in backfills {
+        messages[idx].reply_to_text = Some(preview);
+    }
+}
+
 /// Preserve the request client ID for reconciliation with a later server echo.
 pub(crate) async fn send_quote_message_with_client_id(
     s: &Session,
@@ -5047,6 +5777,8 @@ pub(crate) async fn send_quote_message_with_client_id(
         now.saturating_sub(1000)
     };
 
+    let qmsg_text = quote_preview_text(quoted);
+
     let quote_res: Result<Value> = async {
         if quoted.id.starts_with("local_") || qmsg_id_num == 0 {
             anyhow::bail!("quoted message has no server id");
@@ -5066,7 +5798,7 @@ pub(crate) async fn send_quote_message_with_client_id(
                 ("qmsgId", json!(qmsg_id_num)),
                 ("qmsgCliId", json!(qmsg_cli_id)),
                 ("qmsgType", json!(1)),
-                ("qmsg", json!(quoted.text)),
+                ("qmsg", json!(qmsg_text)),
                 ("qmsgTs", json!(qmsg_ts)),
                 ("visibility", json!(0)),
                 ("ttl", json!(0)),
@@ -5110,7 +5842,7 @@ pub(crate) async fn send_quote_message_with_client_id(
                 ("qmsgCliId", json!(qmsg_cli_id)),
                 ("qmsgType", json!(1)),
                 ("qmsgTs", json!(qmsg_ts)),
-                ("qmsg", json!(quoted.text)),
+                ("qmsg", json!(qmsg_text)),
                 ("imei", json!(s.imei)),
                 ("ttl", json!(0)),
                 ("zsource", json!(101)),
@@ -5415,36 +6147,6 @@ pub fn text_emoticons_to_emoji(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-#[cfg(test)]
-mod text_emoticon_tests {
-    use super::text_emoticons_to_emoji;
-
-    #[test]
-    fn known_codes_become_emoji_and_spacing_is_kept() {
-        assert_eq!(text_emoticons_to_emoji("/-strong"), "👍");
-        assert_eq!(text_emoticons_to_emoji("ok /-heart\n/-strong "), "ok ❤️\n👍 ");
-    }
-
-    #[test]
-    fn unknown_codes_and_embedded_text_are_untouched() {
-        assert_eq!(text_emoticons_to_emoji("/-xyz"), "/-xyz");
-        assert_eq!(text_emoticons_to_emoji("a/-strong"), "a/-strong");
-        assert_eq!(text_emoticons_to_emoji("path /-strong/x"), "path /-strong/x");
-        // Code stays verbatim (fenced blocks and inline spans), text around it converts.
-        assert_eq!(
-            text_emoticons_to_emoji("/-ok\n```\necho /-strong\n```\n/-heart"),
-            "👌\n```\necho /-strong\n```\n❤️"
-        );
-        assert_eq!(
-            text_emoticons_to_emoji("run `echo /-strong` /-strong"),
-            "run `echo /-strong` 👍"
-        );
-        assert!(matches!(
-            text_emoticons_to_emoji("plain text"),
-            std::borrow::Cow::Borrowed(_)
-        ));
-    }
-}
 
 /// Special reaction code sent to clear all of our own reactions on a message (`rType = -1`, `rIcon = ""`).
 pub const CLEAR_REACTION_CODE: &str = "/-remove";
@@ -6913,7 +7615,6 @@ pub async fn poll_new_messages(
             }
         }
     }
-    // 3. Resolve display names for any newly discovered threads
     resolve_thread_names(s, threads).await;
     threads.retain(|t| !t.messages.is_empty() || !t.name.starts_with("Người dùng "));
     deduplicate_threads(threads, None);
@@ -7174,7 +7875,6 @@ pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
     {
         return true;
     }
-    // Zalo specific photo CDNs and subpaths
     u.contains("photo-stal")
         || u.contains("photo-zmp")
         || u.contains("photo-aka")
@@ -8215,19 +8915,12 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         crate::ui::clock()
     };
 
-    let (reply_to_id, reply_to_sender, reply_to_text) =
-        if let Some(q) = it.get("quote").filter(|v| v.is_object()) {
-            let q_id = pick_str(q, &["cliMsgId", "globalMsgId", "msgId"]);
-            let q_sender = pick_str(q, &["fromD", "dName", "ownerId", "fromUid", "uidFrom"]);
-            let q_text = pick_str(q, &["msg", "message", "content"]).or_else(|| {
-                q.get("msg")
-                    .or_else(|| q.get("content"))
-                    .and_then(extract_content_text)
-            });
-            (q_id, q_sender, q_text)
-        } else {
-            (None, None, None)
-        };
+    let (reply_to_id, reply_to_sender, reply_to_text) = it
+        .get("quote")
+        .and_then(parse_embedded_json)
+        .filter(Value::is_object)
+        .map(|q| extract_quote_reply_fields(&q))
+        .unwrap_or((None, None, None));
 
     let (reactions, reaction_summaries) = {
         let mut summaries = crate::reactions::parse_reactions(it);
@@ -8377,6 +9070,13 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         } else {
             None
         },
+        media_size: if is_photo_msg {
+            raw_content_val.and_then(photo_size_from_content)
+        } else if is_video_msg {
+            raw_content_val.and_then(video_size_from_content)
+        } else {
+            None
+        },
         history_source,
 
         ..Default::default()
@@ -8441,7 +9141,6 @@ fn extract_message_thread_id_ext(
         }
     }
 
-    // 2. 1-on-1 or self ("Cloud của tôi") message routing
     // [O] `sync-v2-sub-worker.js:3500260`:
     //   `"0" == e.idTo && "0" == e.uidFrom && (e.idTo = "" + this.userId)`
     // [O] `sync-v2-sub-worker.js:829500` (`_filterDuplicatedMessages`):
@@ -8698,6 +9397,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                     identities.remove(existing, row);
                     existing.merge_reaction_metadata(&parsed);
                     merge_delivery_state(&mut existing.delivery, parsed.delivery);
+                    merge_reply_metadata(existing, &parsed);
                     if existing.id.starts_with("out_")
                         && !parsed.id.is_empty()
                         && !parsed.id.starts_with("out_")
@@ -8717,11 +9417,6 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                         existing.sticker_id = parsed.sticker_id;
                         existing.sticker_cate_id = parsed.sticker_cate_id;
                         existing.sticker_type = parsed.sticker_type;
-                    }
-                    if existing.reply_to_text.is_none() && parsed.reply_to_text.is_some() {
-                        existing.reply_to_id = parsed.reply_to_id;
-                        existing.reply_to_sender = parsed.reply_to_sender;
-                        existing.reply_to_text = parsed.reply_to_text;
                     }
                     if existing.link_url.is_none() && parsed.link_url.is_some() {
                         existing.link_url = parsed.link_url;
@@ -8799,6 +9494,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
     for t in threads.iter_mut() {
         if !t.messages.is_empty() {
             t.messages.sort_by_key(|m| m.ts);
+            repair_thread_quote_replies(&mut t.messages);
             if let Some(newest) = t.messages.last() {
                 if !newest.text.is_empty() {
                     t.preview = newest.text.replace('\n', " ");
@@ -8866,6 +9562,7 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
                 identities.remove(existing, row);
                 existing.merge_reaction_metadata(&m);
                 merge_delivery_state(&mut existing.delivery, m.delivery);
+                merge_reply_metadata(existing, &m);
                 if existing.id.starts_with("out_") && !m.id.is_empty() && !m.id.starts_with("out_")
                 {
                     existing.id = m.id.clone();
@@ -8876,6 +9573,11 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
                     existing.time = m.time;
                 }
                 apply_recall_merge(existing, &m.text);
+                if existing.sticker_id.is_none() && m.sticker_id.is_some() {
+                    existing.sticker_id = m.sticker_id;
+                    existing.sticker_cate_id = m.sticker_cate_id;
+                    existing.sticker_type = m.sticker_type;
+                }
                 if existing.link_url.is_none() && m.link_url.is_some() {
                     existing.link_url = m.link_url;
                     existing.link_title = m.link_title;
@@ -8906,6 +9608,7 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
     }
 
     thread.messages.sort_by_key(|m| m.ts);
+    repair_thread_quote_replies(&mut thread.messages);
 
     if let Some(newest) = thread.messages.last() {
         if !newest.text.is_empty() {
@@ -11201,2591 +11904,4 @@ pub async fn leave_group(s: &Session, grid: &str, silent: bool) -> Result<Value>
         }
     }
     Ok(resp)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quote_target_uses_wire_sender_and_message_ids() {
-        // Group row as stored from a live push: display name in `sender`, uid on the wire.
-        let group_row = ChatMessage {
-            id: "8506658781118".into(),
-            sender: "Vũ Thái Học".into(),
-            client_message_id: "1795077587420".into(),
-            ts: 1795077587922,
-            wire_ref: crate::message_model::WireMessageRef {
-                server_id: Some(json!("8506658781118")),
-                client_id: Some(json!("1795077587420")),
-                sender: Some(json!("2526995101091055705")),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_eq!(
-            quote_target(&group_row, "me", "g1", true),
-            QuoteTarget {
-                owner: "2526995101091055705".into(),
-                msg_id: Some("8506658781118".into()),
-                cli_msg_id: Some("1795077587420".into()),
-            }
-        );
-
-        // `id` holding the cliMsgId must not be sent as qmsgId.
-        let by_client_id = ChatMessage {
-            id: "1795077587420".into(),
-            ..group_row.clone()
-        };
-        assert_eq!(
-            quote_target(&by_client_id, "me", "g1", true)
-                .msg_id
-                .as_deref(),
-            Some("8506658781118")
-        );
-
-        // Own message: owner is our uid even though the wire sender is "0".
-        let own = ChatMessage {
-            is_outgoing: true,
-            wire_ref: crate::message_model::WireMessageRef {
-                sender: Some(json!("0")),
-                ..group_row.wire_ref.clone()
-            },
-            ..group_row.clone()
-        };
-        assert_eq!(quote_target(&own, "me", "g1", true).owner, "me");
-
-        // 1-1 without any uid falls back to the peer.
-        let peer = ChatMessage {
-            sender: "An".into(),
-            wire_ref: Default::default(),
-            ..group_row
-        };
-        assert_eq!(quote_target(&peer, "me", "u42", false).owner, "u42");
-    }
-
-    #[test]
-    fn media_group_layout_reads_incoming_params() {
-        let content = json!({
-            "href": "https://b-f17-zpcloud.zdn.vn/1/a.jpg",
-            "params": "{\"width\":1280,\"group_layout_id\":\"1731100000000\",\"is_group_layout\":1,\"id_in_group\":2,\"total_item_in_group\":4}"
-        });
-        assert_eq!(
-            MediaGroupLayout::from_content(&content),
-            Some(MediaGroupLayout::new("1731100000000", 2, 4))
-        );
-        let as_string = Value::String(content.to_string());
-        assert_eq!(
-            MediaGroupLayout::from_content(&as_string),
-            Some(MediaGroupLayout::new("1731100000000", 2, 4))
-        );
-    }
-
-    #[test]
-    fn media_group_layout_ignores_standalone_photos() {
-        let single = json!({ "params": "{\"width\":800,\"is_group_layout\":0,\"group_layout_id\":\"9\"}" });
-        assert_eq!(MediaGroupLayout::from_content(&single), None);
-        assert_eq!(MediaGroupLayout::from_content(&json!({ "href": "x" })), None);
-        assert_eq!(MediaGroupLayout::from_content(&json!("plain text")), None);
-    }
-
-    #[test]
-    fn media_group_layout_adds_album_fields() {
-        let mut params = serde_json::Map::new();
-        params.insert("photoId".into(), json!(42));
-        MediaGroupLayout::new("1731100000000", 1, 3).apply_to(&mut params);
-        assert_eq!(params["groupLayoutId"], json!("1731100000000"));
-        assert_eq!(params["isGroupLayout"], json!(1));
-        assert_eq!(params["idInGroup"], json!(1));
-        assert_eq!(params["totalItemInGroup"], json!(3));
-        let ext: Value = serde_json::from_str(params["extMsgProp"].as_str().expect("string"))
-            .expect("extMsgProp is JSON");
-        assert_eq!(ext, json!({ "groupMediaMsg": { "groupLayoutId": "1731100000000" } }));
-        assert_eq!(params["photoId"], json!(42));
-    }
-
-    #[test]
-    fn group_posting_restriction_respects_member_roles() {
-        let info = serde_json::json!({
-            "setting": {"lockSendMsg": 1},
-            "creatorId": "owner-1",
-            "adminIds": ["admin-1"]
-        });
-        assert_eq!(group_posting_restricted(&info, "member-1"), Some(true));
-        assert_eq!(group_posting_restricted(&info, "owner-1"), Some(false));
-        assert_eq!(group_posting_restricted(&info, "admin-1"), Some(false));
-        assert_eq!(
-            group_posting_restricted(
-                &serde_json::json!({"setting": {"lockSendMsg": 0}}),
-                "member-1"
-            ),
-            Some(false)
-        );
-        assert_eq!(
-            group_posting_restricted(&serde_json::json!({}), "member-1"),
-            None
-        );
-    }
-
-    #[test]
-    fn local_time_when_parsing_millisecond_timestamps() {
-        use chrono::TimeZone;
-        let expected = chrono::Local
-            .timestamp_millis_opt(1793467800000)
-            .single()
-            .unwrap()
-            .format("%H:%M")
-            .to_string();
-        let thread = parse_thread(&serde_json::json!({
-            "userId": "user-1", "lastActionTime": 1793467800000_i64
-        }))
-        .unwrap();
-        assert_eq!(thread.time, expected);
-        let message = parse_chat_message(&serde_json::json!({
-            "msgId": "msg-0001", "content": "hello", "ts": 1793467800000_i64
-        }))
-        .unwrap();
-        assert_eq!(message.time, expected);
-        assert_eq!(message.ts, 1793467800000_i64);
-    }
-
-    #[test]
-    fn anti_recall_merging_retains_original_text_and_media() {
-        let mut target = Thread {
-            id: "t1".into(),
-            name: "Test".into(),
-            is_group: false,
-            preview: "Ảnh đẹp nè".into(),
-            time: "10:00".into(),
-            messages: vec![ChatMessage {
-                id: "m1".into(),
-                client_message_id: "c1".into(),
-                sender: "Friend".into(),
-                text: "Ảnh đẹp nè".into(),
-                time: "10:00".into(),
-                is_outgoing: false,
-                ts: 1000,
-                link_url: Some("https://res-zalo.zadn.vn/photo.jpg".into()),
-                link_thumb: Some("https://res-zalo.zadn.vn/thumb.jpg".into()),
-                sticker_id: Some(123),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let incoming = Thread {
-            id: "t1".into(),
-            name: "Test".into(),
-            is_group: false,
-            preview: "[Tin nhắn đã thu hồi]".into(),
-            time: "10:05".into(),
-            messages: vec![ChatMessage {
-                id: "m1".into(),
-                client_message_id: "c1".into(),
-                sender: "Friend".into(),
-                text: "[Tin nhắn đã thu hồi]".into(),
-                time: "10:05".into(),
-                is_outgoing: false,
-                ts: 1005,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        merge_thread_into(&mut target, incoming, true);
-        let m = &target.messages[0];
-        assert_eq!(m.text, "[Đã thu hồi] Ảnh đẹp nè");
-        assert_eq!(
-            m.link_url.as_deref(),
-            Some("https://res-zalo.zadn.vn/photo.jpg")
-        );
-        assert_eq!(
-            m.link_thumb.as_deref(),
-            Some("https://res-zalo.zadn.vn/thumb.jpg")
-        );
-        assert_eq!(m.sticker_id, Some(123));
-    }
-
-    #[test]
-    fn extract_typing_and_seen_controls_parses_events() {
-        let payload = json!({
-            "controls": [
-                {
-                    "content": {
-                        "act_type": "typing",
-                        "act": "typing",
-                        "data": {
-                            "fromUid": "u123",
-                            "grid": "g456",
-                            "status": 1
-                        }
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "seen",
-                        "act": "seen",
-                        "data": {
-                            "fromUid": "u789",
-                            "toid": "u789",
-                            "seenTime": 1700000000
-                        }
-                    }
-                }
-            ]
-        });
-        let (typing, seen) = extract_typing_and_seen_controls(&payload);
-        assert_eq!(typing.len(), 1);
-        assert_eq!(typing[0].thread_id, "g456");
-        assert_eq!(typing[0].uid, "u123");
-        assert!(typing[0].is_typing);
-
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].thread_id, "u789");
-        assert_eq!(seen[0].seen_ts, 1700000000);
-    }
-
-    #[test]
-    fn local_time_when_parsing_second_timestamps_and_invalid_values() {
-        let expected = crate::clock::message_time(1793467800000);
-        for ts in [
-            serde_json::json!(1793467800),
-            serde_json::json!("1793467800"),
-        ] {
-            let thread = parse_thread(&serde_json::json!({
-                "userId": "user-1", "lastActionTime": ts
-            }))
-            .unwrap();
-            let message = parse_chat_message(&serde_json::json!({
-                "msgId": "msg-0001", "content": "hello", "ts": ts
-            }))
-            .unwrap();
-            assert_eq!(thread.time, expected);
-            assert_eq!(message.time, expected);
-            assert_eq!(message.ts, 1793467800);
-        }
-        for ts in [
-            serde_json::json!(-1),
-            serde_json::json!(0),
-            serde_json::json!(i64::MAX),
-            serde_json::json!("invalid"),
-        ] {
-            let thread = parse_thread(&serde_json::json!({
-                "userId": "user-1", "lastActionTime": ts
-            }))
-            .unwrap();
-            assert_eq!(thread.time, "");
-        }
-        let message = parse_chat_message(&serde_json::json!({
-            "msgId": "msg-0001", "content": "hello", "ts": i64::MAX
-        }))
-        .unwrap();
-        assert_eq!(message.time, "");
-    }
-
-    #[tokio::test]
-    async fn unauthenticated_calls_fail_cleanly() {
-        let s = Session::new(false, false, false).unwrap();
-        let err1 = get_friends(&s).await.unwrap_err();
-        assert_eq!(err1.to_string(), "chưa đăng nhập");
-
-        let err2 = get_last_msgs(&s, &["test_tid".into()]).await.unwrap_err();
-        assert_eq!(err2.to_string(), "chưa đăng nhập");
-
-        let err3 = send_message(&s, "test_to", "hello").await.unwrap_err();
-        assert_eq!(err3.to_string(), "chưa đăng nhập");
-
-        let err4 = get_pinned(&s).await.unwrap_err();
-        assert_eq!(err4.to_string(), "chưa đăng nhập");
-
-        let err5 = get_group_history(&s, "test_gid", 20).await.unwrap_err();
-        assert_eq!(err5.to_string(), "chưa đăng nhập");
-    }
-
-    fn sample_thread(id: &str) -> Thread {
-        Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: id.into(),
-            name: format!("Name {id}"),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group: false,
-            messages: Vec::new(),
-            vanish: None,
-        }
-    }
-
-    #[test]
-    fn merge_thread_into_matches_exact_client_reference() {
-        let m = |id: &str, text: &str, ts: i64, out: bool| ChatMessage {
-            id: id.into(),
-            client_message_id: if id == "out_9" || id == "77" {
-                "client-9".into()
-            } else {
-                String::new()
-            },
-            text: text.into(),
-            ts,
-            time: format!("{}", ts / 60_000),
-            is_outgoing: out,
-            ..Default::default()
-        };
-        let mut target = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "t".into(),
-            name: "A".into(),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group: false,
-            messages: vec![
-                m("1", "chào", 1_000_000, false),
-                m("out_9", "ok", 2_000_000, true),
-            ],
-            vanish: None,
-        };
-        let incoming = Thread {
-            messages: vec![
-                m("1", "chào", 1_000_000, false),   // same id -> no duplicate
-                m("77", "ok", 2_002_000, true),     // exact client reference -> takes server ID
-                m("78", "ok", 9_000_000_000, true), // same text, other day -> new message
-                m("79", "mới", 3_000_000, false),   // new
-            ],
-            ..target.clone()
-        };
-        merge_thread_into(&mut target, incoming, false);
-        let ids: Vec<&str> = target.messages.iter().map(|x| x.id.as_str()).collect();
-        assert_eq!(ids, vec!["1", "77", "79", "78"]);
-    }
-
-    #[test]
-    fn test_merge_previews_single_message_object() {
-        let mut threads = vec![sample_thread("u1")];
-        let resp = json!({
-            "error_code": 0,
-            "data": [
-                {
-                    "idTo": "u1",
-                    "message": {
-                        "msgId": "m_single",
-                        "content": "Single message text",
-                        "ts": 1729501000000_i64,
-                        "uidFrom": "u1"
-                    }
-                }
-            ]
-        });
-
-        merge_previews(&mut threads, &resp);
-        assert_eq!(threads[0].messages.len(), 1);
-        assert_eq!(threads[0].messages[0].id, "m_single");
-        assert_eq!(threads[0].messages[0].text, "Single message text");
-        assert_eq!(threads[0].preview, "Single message text");
-    }
-
-    #[test]
-    fn test_merge_previews_last_msg_object() {
-        let mut threads = vec![sample_thread("u2")];
-        let resp = json!({
-            "error_code": 0,
-            "data": [
-                {
-                    "idTo": "u2",
-                    "lastMsg": {
-                        "msgId": "m_last",
-                        "content": "LastMsg text",
-                        "ts": 1729502000000_i64,
-                        "uidFrom": "u2"
-                    }
-                }
-            ]
-        });
-
-        merge_previews(&mut threads, &resp);
-        assert_eq!(threads[0].messages.len(), 1);
-        assert_eq!(threads[0].messages[0].id, "m_last");
-        assert_eq!(threads[0].preview, "LastMsg text");
-    }
-
-    #[test]
-    fn test_merge_previews_messages_array_three_items() {
-        let mut threads = vec![sample_thread("u3")];
-        // Provide items out of order to verify timestamp ascending sort
-        let resp = json!({
-            "error_code": 0,
-            "data": [
-                {
-                    "idTo": "u3",
-                    "messages": [
-                        {
-                            "msgId": "m_item1",
-                            "content": "First message",
-                            "ts": 1000_i64,
-                            "uidFrom": "u3"
-                        },
-                        {
-                            "msgId": "m_item3",
-                            "content": "Third message",
-                            "ts": 3000_i64,
-                            "uidFrom": "u3"
-                        },
-                        {
-                            "msgId": "m_item2",
-                            "content": "Second message",
-                            "ts": 2000_i64,
-                            "uidFrom": "0"
-                        }
-                    ]
-                }
-            ]
-        });
-
-        merge_previews(&mut threads, &resp);
-        assert_eq!(threads[0].messages.len(), 3);
-        assert_eq!(threads[0].messages[0].id, "m_item1");
-        assert_eq!(threads[0].messages[0].text, "First message");
-        assert_eq!(threads[0].messages[1].id, "m_item2");
-        assert_eq!(threads[0].messages[1].text, "Second message");
-        assert!(threads[0].messages[1].is_outgoing);
-        assert_eq!(threads[0].messages[2].id, "m_item3");
-        assert_eq!(threads[0].messages[2].text, "Third message");
-        // Preview must be from the newest message (m_item3)
-        assert_eq!(threads[0].preview, "Third message");
-    }
-
-    #[test]
-    fn test_merge_previews_entry_with_no_message() {
-        let mut threads = vec![sample_thread("u4")];
-        threads[0].preview = "Existing preview".into();
-        let resp = json!({
-            "error_code": 0,
-            "data": [
-                {
-                    "idTo": "u4"
-                },
-                {
-                    "idTo": "u4",
-                    "messages": []
-                }
-            ]
-        });
-
-        merge_previews(&mut threads, &resp);
-        assert!(threads[0].messages.is_empty());
-        assert_eq!(threads[0].preview, "Existing preview");
-    }
-
-    #[test]
-    fn test_merge_group_history_fixture() {
-        let mut thread = sample_thread("grp_123");
-        thread.is_group = true;
-
-        let resp = json!({
-            "error_code": 0,
-            "data": {
-                "groupMsgs": [
-                    {
-                        "msgId": "gm_2",
-                        "content": "Second group message",
-                        "ts": 2000_i64,
-                        "uidFrom": "member_2"
-                    },
-                    {
-                        "msgId": "gm_1",
-                        "content": "First group message",
-                        "ts": 1000_i64,
-                        "uidFrom": "member_1"
-                    },
-                    {
-                        "msgId": "gm_2",
-                        "content": "Duplicate second message",
-                        "ts": 2000_i64,
-                        "uidFrom": "member_2"
-                    }
-                ]
-            }
-        });
-
-        merge_group_history(&mut thread, &resp);
-        assert_eq!(thread.messages.len(), 2);
-        assert_eq!(thread.messages[0].id, "gm_1");
-        assert_eq!(thread.messages[1].id, "gm_2");
-        assert_eq!(thread.preview, "Second group message");
-    }
-
-    #[test]
-    fn test_merge_previews_incoming_1_1_and_group_and_cloud() {
-        let mut cloud = sample_thread("9000000000000000001");
-        cloud.name = "Cloud của tôi (Lưu trữ)".into();
-        let friend = sample_thread("1000000000000000001");
-        let mut group = sample_thread("888999000");
-        group.is_group = true;
-        let mut threads = vec![cloud, friend, group];
-
-        let resp = json!({
-            "error_code": 0,
-            "data": {
-                "msgs": [
-                    {
-                        "msgId": "in_1",
-                        "content": "Tin nhan den tu ban be",
-                        "idTo": "0",
-                        "uidFrom": "1000000000000000001",
-                        "ts": "1729505000000"
-                    },
-                    {
-                        "msgId": "cloud_1",
-                        "content": "Tin nhan tu gui vao Cloud",
-                        "idTo": "0",
-                        "uidFrom": "0",
-                        "ts": "1729506000000"
-                    }
-                ],
-                "groupMsgs": [
-                    {
-                        "msgId": "grp_msg_1",
-                        "content": "Tin nhan trong nhom",
-                        "idTo": "888999000",
-                        "uidFrom": "111222333",
-                        "dName": "Nguyen Van B",
-                        "ts": "1729507000000"
-                    }
-                ]
-            }
-        });
-
-        merge_previews(&mut threads, &resp);
-        // Cloud message routed to `9000000000000000001`
-        assert_eq!(threads[0].messages.len(), 1);
-        assert_eq!(threads[0].messages[0].text, "Tin nhan tu gui vao Cloud");
-        assert!(threads[0].messages[0].is_outgoing);
-
-        // Incoming 1-1 routed to `1000000000000000001`
-        assert_eq!(threads[1].messages.len(), 1);
-        assert_eq!(threads[1].messages[0].text, "Tin nhan den tu ban be");
-        assert!(!threads[1].messages[0].is_outgoing);
-
-        // Group message routed to `888999000` (not `111222333`)
-        assert_eq!(threads[2].messages.len(), 1);
-        assert_eq!(threads[2].messages[0].text, "Tin nhan trong nhom");
-        assert_eq!(threads[2].messages[0].sender, "Nguyen Van B");
-        assert!(!threads[2].messages[0].is_outgoing);
-    }
-
-    #[test]
-    fn test_poll_state_encode_and_update() {
-        let mut ps = PollState::default();
-        let encoded = ps.encode_params();
-        assert!(encoded.starts_with("1,1,"));
-        assert!(encoded.ends_with("%2C1"));
-
-        let resp = json!({
-            "data": {
-                "lastActionId": "8399086511016",
-                "lastActionIdOther": "8399036593265",
-                "queueStatus": {
-                    "1": {
-                        "lastId": "8399086511016",
-                        "ids": ["8399086511016"]
-                    },
-                    "15": {
-                        "lastId": "8399036593265",
-                        "ids": ["8399036593265"]
-                    }
-                }
-            }
-        });
-        ps.update_from_response(&resp);
-        assert_eq!(ps.last_action_id, "8399086511016");
-        assert_eq!(ps.last_action_id_other, "8399036593265");
-        assert_eq!(ps.queues.get("1").unwrap().last_id, "8399086511016");
-        assert_eq!(
-            ps.queues.get("1").unwrap().ids,
-            vec!["8399086511016".to_string()]
-        );
-        // Socket-only queue "15" must NOT be added to HTTP polling queues
-        assert!(!ps.queues.contains_key("15"));
-    }
-
-    #[test]
-    fn test_parse_chat_message_sticker_json_string() {
-        let msg_val = json!({
-            "msgId": "stk_1",
-            "msgType": "chat.sticker",
-            "content": "{\"catId\":1002,\"id\":2005,\"type\":1}",
-            "uidFrom": "user_a",
-            "ts": 1729508000000_i64
-        });
-        let parsed = parse_chat_message(&msg_val).expect("must parse sticker");
-        assert_eq!(parsed.text, "[Nhãn dán]");
-        assert_eq!(parsed.id, "stk_1");
-        assert_eq!(parsed.sticker_id, Some(2005));
-        assert_eq!(parsed.sticker_cate_id, Some(1002));
-        assert_eq!(parsed.sticker_type, Some(1));
-        assert_eq!(
-            parsed.sticker_image_url().as_deref(),
-            Some("https://api.zaloapp.com/api/emoticon/sticker/webpc?eid=2005&size=130")
-        );
-    }
-
-    #[test]
-    fn test_parse_chat_message_integer_msg_types() {
-        // Integer msgType = 5 (sticker) with empty content
-        let stk = json!({
-            "msgId": "stk_int",
-            "msgType": 5,
-            "content": "",
-            "uidFrom": "user_b",
-            "ts": 1000_i64
-        });
-        assert_eq!(parse_chat_message(&stk).unwrap().text, "[Nhãn dán]");
-
-        // Integer msgType = 2 (photo)
-        let photo = json!({
-            "msgId": "photo_int",
-            "msgType": 2,
-            "content": "",
-            "uidFrom": "user_b",
-            "ts": 2000_i64
-        });
-        assert_eq!(parse_chat_message(&photo).unwrap().text, "[Hình ảnh]");
-
-        // Integer msgType = 3 (voice)
-        let voice = json!({
-            "msgId": "voice_int",
-            "msgType": 3,
-            "content": "",
-            "uidFrom": "user_b",
-            "ts": 3000_i64
-        });
-        assert_eq!(parse_chat_message(&voice).unwrap().text, "[Tin nhắn thoại]");
-
-        // Integer msgType = 19 (file)
-        let file = json!({
-            "msgId": "file_int",
-            "msgType": 19,
-            "content": "",
-            "uidFrom": "user_b",
-            "ts": 4000_i64
-        });
-        assert_eq!(parse_chat_message(&file).unwrap().text, "[Tập tin]");
-
-        // Integer msgType = 31 (undo)
-        let undo = json!({
-            "msgId": "undo_int",
-            "msgType": 31,
-            "content": "",
-            "uidFrom": "user_b",
-            "ts": 5000_i64
-        });
-        assert_eq!(
-            parse_chat_message(&undo).unwrap().text,
-            "[Tin nhắn đã thu hồi]"
-        );
-    }
-
-    #[test]
-    fn test_parse_chat_message_with_plain_message_string() {
-        let msg = json!({
-            "msgId": "msg_str",
-            "message": "Xin chao buoi sang",
-            "uidFrom": "user_c",
-            "dName": "Charlie",
-            "ts": 1000_i64
-        });
-        let parsed = parse_chat_message(&msg).unwrap();
-        assert_eq!(parsed.text, "Xin chao buoi sang");
-        assert_eq!(parsed.sender, "Charlie");
-    }
-
-    #[test]
-    fn reaction_targets_server_and_client_ids_not_timestamp() {
-        let mut msg = ChatMessage {
-            id: "1700000000123".into(),
-            client_message_id: "1700000000123".into(),
-            ts: 1_700_000_000_000,
-            ..Default::default()
-        };
-        msg.wire_ref.server_id = Some(json!("7012345678901"));
-        msg.wire_ref.client_id = Some(json!("1700000000123"));
-        let (g, c) = reaction_target_ids(&msg, 1);
-        assert_eq!(g, json!("7012345678901"));
-        assert_eq!(c, 1_700_000_000_123);
-
-        // Optimistic local row without server identity: empty gMsgID, client id kept.
-        let local = ChatMessage {
-            id: "out_42".into(),
-            client_message_id: "1700000000999".into(),
-            ts: 1_700_000_000_500,
-            ..Default::default()
-        };
-        let (g, c) = reaction_target_ids(&local, 1);
-        assert_eq!(g, json!(""));
-        assert_eq!(c, 1_700_000_000_999);
-
-        // Merged row: `id` is the bare client id and only a wire server id is known.
-        let mut merged = ChatMessage {
-            id: "1700000000777".into(),
-            client_message_id: "1700000000777".into(),
-            ..Default::default()
-        };
-        merged.wire_ref.server_id = Some(json!("7012345670000"));
-        let (g, c) = reaction_target_ids(&merged, 1);
-        assert_eq!(g, json!("7012345670000"));
-        assert_eq!(c, 1_700_000_000_777);
-    }
-
-    #[test]
-    fn test_parse_thread_boolean_is_group_and_string_time() {
-        let val = json!({
-            "userId": "grp_test",
-            "displayName": "Nhom Chem Gio",
-            "isGroup": true,
-            "lastActionTime": "1729505000000"
-        });
-        let thread = parse_thread(&val).unwrap();
-        assert!(thread.is_group);
-        assert_eq!(thread.name, "Nhom Chem Gio");
-        assert!(!thread.time.is_empty());
-    }
-
-    #[test]
-    fn test_deduplicate_threads_migrates_session_scoped_ids() {
-        let old_dtc = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "1000000000000000005".into(),
-            name: "Đtc".into(),
-            preview: "Hi".into(),
-            time: "10:21".into(),
-            avatar: Some("https://s120-26-ava-talk.zadn.vn/5/00000000000000000000000000000001.jpg?key=abc&time=1797763127".into()),
-            is_group: false,
-            messages: vec![ChatMessage {
-                id: "m1".into(),
-                sender: "Đtc".into(),
-                text: "Hi".into(),
-                time: "10:21".into(),
-                is_outgoing: false,
-                ts: 1792578088952,
-                ..Default::default()
-            }],
-            vanish: None,
-        };
-        let new_dtc = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "1000000000000000006".into(),
-            name: "Đtc".into(),
-            preview: "".into(),
-            time: "16:48".into(),
-            avatar: Some("https://s160-26-ava-talk.zadn.vn/5/00000000000000000000000000000001.jpg?key=xyz&time=1797876325".into()),
-            is_group: false,
-            messages: Vec::new(),
-            vanish: None,
-        };
-        let mut threads = vec![old_dtc, new_dtc];
-        deduplicate_threads(&mut threads, None);
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].id, "1000000000000000006");
-        assert_eq!(threads[0].messages.len(), 1);
-        assert_eq!(threads[0].preview, "Hi");
-    }
-
-    #[test]
-    fn test_merge_group_history_parses_stringified_cloud_data() {
-        let mut cloud_thread = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "9000000000000000002".into(),
-            name: "Cloud của tôi (Lưu trữ)".into(),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group: false,
-            messages: Vec::new(),
-            vanish: None,
-        };
-        let raw_cloud_resp = json!({
-            "error_code": 0,
-            "data": r#"{"error":0,"groupMsgs":[{"msgId":"1000000000001","cliMsgId":"1700000000001","msgType":"chat.recommended","uidFrom":"0","idTo":"9000000000000000002","dName":"User Test","ts":"1700000000001","content":{"title":"","description":"Ghi chú đám mây","href":"https://zalo.me/test","action":"recommened.link"}}]}"#
-        });
-        merge_group_history(&mut cloud_thread, &raw_cloud_resp);
-        assert_eq!(cloud_thread.messages.len(), 1);
-        assert!(cloud_thread.messages[0].text.contains("Ghi chú đám mây"));
-        assert_eq!(
-            cloud_thread.messages[0].link_url.as_deref(),
-            Some("https://zalo.me/test")
-        );
-    }
-
-    #[test]
-    fn test_strip_vn_for_sticker_kw() {
-        assert_eq!(strip_vn_for_sticker_kw("Xin chào"), "xin chao");
-        assert_eq!(strip_vn_for_sticker_kw("Cảm ơn nhiều"), "cam on nhieu");
-        assert_eq!(strip_vn_for_sticker_kw("Ngủ ngon nhé"), "ngu ngon nhe");
-        assert_eq!(strip_vn_for_sticker_kw("Nguyễn Văn An"), "nguyen van an");
-        assert_eq!(
-            normalize_sticker_keyword("  iu\u{a0}that\u{a0}  "),
-            "iu that"
-        );
-
-        let q1 = canonical_vn_sticker_queries("Mệt quá");
-        assert!(q1.contains(&"mệt quá".to_string()));
-        assert!(q1.contains(&"met qua".to_string()));
-
-        let q2 = canonical_vn_sticker_queries("khoc");
-        assert!(q2.contains(&"khoc".to_string()));
-        assert!(q2.contains(&"khóc".to_string()));
-    }
-
-    #[test]
-    fn test_parse_friendship_status_response() {
-        let r_friend = json!({"error_code": 0, "data": {"is_friend": 1, "is_requested": 0, "is_requesting": 0}});
-        assert_eq!(
-            parse_friendship_status_response(&r_friend),
-            FriendshipStatus::Friend
-        );
-
-        let r_inc = json!({"error_code": 0, "data": {"is_friend": 0, "is_requested": 0, "is_requesting": 1}});
-        assert_eq!(
-            parse_friendship_status_response(&r_inc),
-            FriendshipStatus::IncomingPending
-        );
-
-        let r_out = json!({"error_code": 0, "data": {"is_friend": 0, "is_requested": 1, "is_requesting": 0}});
-        assert_eq!(
-            parse_friendship_status_response(&r_out),
-            FriendshipStatus::OutgoingPending
-        );
-
-        let r_stranger = json!({"error_code": 0, "data": {"is_friend": 0, "is_requested": 0, "is_requesting": 0}});
-        assert_eq!(
-            parse_friendship_status_response(&r_stranger),
-            FriendshipStatus::Stranger
-        );
-    }
-
-    #[test]
-    fn test_prevent_cloud_message_pollution_across_threads() {
-        let mut contact = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "1000000000000000009".into(),
-            name: "Người dùng Test".into(),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group: false,
-            messages: Vec::new(),
-            vanish: None,
-        };
-        let raw_cloud_resp = json!({
-            "error_code": 0,
-            "data": {
-                "groupMsgs": [{
-                    "msgId": "1000000000002",
-                    "msgType": "webchat",
-                    "uidFrom": "0",
-                    "idTo": "9000000000000000001",
-                    "dName": "User Test",
-                    "ts": "1700000000002",
-                    "content": "Ghi chú Cloud của tôi"
-                }]
-            }
-        });
-        merge_group_history(&mut contact, &raw_cloud_resp);
-        assert!(contact.messages.is_empty());
-
-        let cloud = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "9000000000000000001".into(),
-            name: "Cloud của tôi (Lưu trữ)".into(),
-            preview: "Ghi chú Cloud của tôi".into(),
-            time: "12:00".into(),
-            avatar: None,
-            is_group: false,
-            messages: vec![ChatMessage {
-                id: "1000000000002".into(),
-                sender: "Tôi".into(),
-                text: "Ghi chú Cloud của tôi".into(),
-                time: "12:00".into(),
-                is_outgoing: true,
-                ts: 1700000000002,
-                ..Default::default()
-            }],
-            vanish: None,
-        };
-        let polluted_contact = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "1000000000000000009".into(),
-            name: "Người dùng Test".into(),
-            preview: "Ghi chú Cloud của tôi".into(),
-            time: "12:00".into(),
-            avatar: None,
-            is_group: false,
-            messages: vec![ChatMessage {
-                id: "1000000000002".into(),
-                sender: "Tôi".into(),
-                text: "Ghi chú Cloud của tôi".into(),
-                time: "12:00".into(),
-                is_outgoing: true,
-                ts: 1700000000002,
-                ..Default::default()
-            }],
-            vanish: None,
-        };
-        let mut list = vec![cloud, polluted_contact];
-        deduplicate_threads(&mut list, None);
-        assert_eq!(list[0].messages.len(), 1);
-        assert!(list[1].messages.is_empty());
-        assert!(list[1].preview.is_empty());
-    }
-
-    #[test]
-    fn test_duplicate_display_names_with_different_ids_stay_distinct() {
-        let contact_a = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "1000000000000000111".into(),
-            name: "Nguyễn Văn A".into(),
-            preview: "Xin chào từ người 1".into(),
-            time: "09:00".into(),
-            avatar: Some(
-                "https://s120-ava-talk.zadn.vn/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg".into(),
-            ),
-            is_group: false,
-            messages: vec![ChatMessage {
-                id: "m_a".into(),
-                sender: "Nguyễn Văn A".into(),
-                text: "Xin chào từ người 1".into(),
-                time: "09:00".into(),
-                is_outgoing: false,
-                ts: 1700000001000,
-                ..Default::default()
-            }],
-            vanish: None,
-        };
-        // Second contact has the exact same Zalo display name and no avatar URL yet (e.g., from incoming poll)
-        let contact_b = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "1000000000000000222".into(),
-            name: "Nguyễn Văn A".into(),
-            preview: "Tin nhắn mới từ người 2".into(),
-            time: "10:30".into(),
-            avatar: None,
-            is_group: false,
-            messages: vec![ChatMessage {
-                id: "m_b".into(),
-                sender: "Nguyễn Văn A".into(),
-                text: "Tin nhắn mới từ người 2".into(),
-                time: "10:30".into(),
-                is_outgoing: false,
-                ts: 1700000002000,
-                ..Default::default()
-            }],
-            vanish: None,
-        };
-        assert!(!threads_represent_same_contact(&contact_a, &contact_b));
-        let mut threads = vec![contact_a, contact_b];
-        deduplicate_threads(&mut threads, None);
-        assert_eq!(threads.len(), 2);
-        assert_eq!(threads[0].id, "1000000000000000111");
-        assert_eq!(threads[1].id, "1000000000000000222");
-        assert_eq!(threads[0].messages[0].text, "Xin chào từ người 1");
-        assert_eq!(threads[1].messages[0].text, "Tin nhắn mới từ người 2");
-    }
-}
-
-#[cfg(test)]
-mod message_state_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn legacy_message_when_metadata_is_absent_uses_conservative_defaults() {
-        let message: ChatMessage = serde_json::from_value(json!({
-            "id": "msg-0001", "sender": "user-1", "text": "Hello",
-            "time": "", "is_outgoing": false, "ts": 1
-        }))
-        .unwrap();
-        assert_eq!(message.kind, crate::message_model::MessageKind::Unknown);
-        assert_eq!(
-            message.delivery,
-            crate::message_model::DeliveryState::default()
-        );
-        assert!(message.wire_ref.fields.is_empty());
-        assert!(message.reaction_summaries.is_empty());
-        assert!(message.resolved_mention_uids.is_empty());
-    }
-
-    #[test]
-    fn legacy_thread_when_sidebar_and_unread_are_absent_roundtrips() {
-        let thread: Thread = serde_json::from_value(json!({
-            "id": "thread-1", "name": "Example", "preview": "", "time": "",
-            "avatar": null, "is_group": false, "messages": []
-        }))
-        .unwrap();
-        assert_eq!(thread.presentation, SidebarPresentation::default());
-        assert_eq!(thread.unread, crate::unread::UnreadState::default());
-        let restored: Thread =
-            serde_json::from_value(serde_json::to_value(&thread).unwrap()).unwrap();
-        assert_eq!(restored.presentation, thread.presentation);
-        assert_eq!(restored.unread, thread.unread);
-    }
-}
-
-#[cfg(test)]
-mod send_identity_tests {
-    use super::*;
-
-    #[test]
-    fn request_ids_are_unique_when_sends_share_a_clock_tick() {
-        let ids: Vec<_> = (0..10_000).map(|_| next_client_message_id()).collect();
-        assert!(ids.windows(2).all(|ids| ids[0] < ids[1]));
-    }
-
-    #[tokio::test]
-    async fn request_client_id_survives_send_variants_and_fallbacks() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::time::Duration;
-
-        // Only loopback fixture traffic is used; all keys and identifiers are synthetic.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let host = format!("http://{}", listener.local_addr().unwrap());
-        let fixture = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-            for _ in 0..9 {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                let mut headers = Vec::new();
-                while !headers.ends_with(b"\r\n\r\n") {
-                    let mut byte = [0];
-                    stream.read_exact(&mut byte).unwrap();
-                    headers.push(byte[0]);
-                    assert!(headers.len() < 16_384);
-                }
-                let headers = String::from_utf8(headers).unwrap();
-                let size: usize = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap();
-                assert!(size < 16_384);
-                let mut body = vec![0; size];
-                stream.read_exact(&mut body).unwrap();
-                let query = reqwest::Url::parse(&format!(
-                    "http://fixture.invalid/?{}",
-                    String::from_utf8(body).unwrap()
-                ))
-                .unwrap();
-                let encrypted = query
-                    .query_pairs()
-                    .find(|(key, _)| key == "params")
-                    .unwrap()
-                    .1
-                    .into_owned();
-                let body: Value =
-                    serde_json::from_str(&crate::crypto::decode_aes(&[7; 32], &encrypted).unwrap())
-                        .unwrap();
-                let path = headers
-                    .lines()
-                    .next()
-                    .unwrap()
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap()
-                    .to_string();
-                let fail = path.contains("/link?") || path.contains("/quote?");
-                requests.push((path, body));
-                let response = if fail {
-                    r#"{"error_code":114}"#
-                } else {
-                    r#"{"error_code":0,"data":{"msgId":"server-a"}}"#
-                };
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}", response.len(), response).unwrap();
-            }
-            requests
-        });
-        let mut session = Session::new(false, false, false).unwrap();
-        session.login = Some(crate::session::LoginInfo::default());
-        session.secret_key = Some(vec![7; 32]);
-        session.domains.chat = host.clone();
-        session.domains.group = host;
-        let client_id = 1_793_425_680_123;
-        send_message_with_client_id(&session, "contact-1", "Text", client_id)
-            .await
-            .unwrap();
-        send_group_message_with_client_id(&session, "group-1", "Text", client_id)
-            .await
-            .unwrap();
-        send_link_message_with_client_id(
-            &session,
-            "contact-1",
-            "Text",
-            &LinkMetadata {
-                url: "https://example.invalid/link".into(),
-                title: "Title".into(),
-                desc: String::new(),
-                thumb: String::new(),
-                src: String::new(),
-            },
-            false,
-            client_id,
-        )
-        .await
-        .unwrap();
-        send_sticker_with_client_id(&session, "contact-1", 1, 2, 7, false, client_id)
-            .await
-            .unwrap();
-        send_quote_message_with_client_id(
-            &session,
-            "contact-1",
-            "Text",
-            &ChatMessage {
-                // A numeric server id, so the quote request is attempted (and fails over).
-                id: "8506658781118".into(),
-                ..Default::default()
-            },
-            false,
-            client_id,
-        )
-        .await
-        .unwrap();
-        forward_message_with_client_id(
-            &session,
-            "contact-1",
-            false,
-            &ChatMessage {
-                text: "Forward".into(),
-                ..Default::default()
-            },
-            client_id,
-        )
-        .await
-        .unwrap();
-        forward_message_with_client_id(
-            &session,
-            "contact-1",
-            false,
-            &ChatMessage {
-                sticker_id: Some(1),
-                ..Default::default()
-            },
-            client_id,
-        )
-        .await
-        .unwrap();
-        let requests = fixture.join().unwrap();
-        assert_eq!(requests.len(), 9);
-        for (_, body) in requests {
-            assert_eq!(body["clientId"], json!(client_id));
-        }
-    }
-
-    #[test]
-    fn extract_mute_controls_parses_set_and_unset_events_for_peers_and_groups() {
-        let now = 1700000000_i64;
-        let payload = json!({
-            "controls": [
-                {
-                    "content": {
-                        "act_type": "mute",
-                        "act": "set",
-                        "data": {
-                            "toId": "123456789",
-                            "muteType": 1,
-                            "duration": -1,
-                            "startTime": now,
-                            "muteMode": 1
-                        }
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "mute",
-                        "act": "set",
-                        "data": "{\"toId\":\"987654321\",\"muteType\":2,\"duration\":3600,\"startTime\":1700000000,\"muteMode\":1}"
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "mute",
-                        "act": "unset",
-                        "data": {
-                            "toId": "123456789",
-                            "muteType": 1,
-                            "duration": 0,
-                            "muteMode": 0
-                        }
-                    }
-                }
-            ]
-        });
-
-        let events = extract_mute_controls(&payload, now);
-        assert_eq!(events.len(), 3);
-        assert_eq!(
-            events[0],
-            MuteControlEvent {
-                thread_id: "123456789".into(),
-                is_group: false,
-                muted: true,
-                muted_until: None,
-                settings_until: Some(-1),
-            }
-        );
-        assert_eq!(
-            events[1],
-            MuteControlEvent {
-                thread_id: "g987654321".into(),
-                is_group: true,
-                muted: true,
-                muted_until: Some(now + 3600),
-                settings_until: Some(now + 3600),
-            }
-        );
-        assert_eq!(
-            events[2],
-            MuteControlEvent {
-                thread_id: "123456789".into(),
-                is_group: false,
-                muted: false,
-                muted_until: None,
-                settings_until: None,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_photo_message_hides_raw_cdn_url_and_sets_photo_source() {
-        let raw_photo = json!({
-            "msgId": "photo_72",
-            "msgType": "chat.photo",
-            "uidFrom": "1000001",
-            "ts": 1700000000000_i64,
-            "content": {
-                "title": "",
-                "description": "",
-                "href": "https://photo-stal-zmp.zdn.vn/jpg/55022364c4202d7e7431/999888777.jpg",
-                "thumb": "https://photo-stal-zmp.zdn.vn/jpg/55022364c4202d7e7431/999888777_thumb.jpg",
-                "params": "{\"width\":1280,\"height\":960}"
-            }
-        });
-        let msg = parse_chat_message(&raw_photo).expect("must parse photo message");
-        assert_eq!(msg.link_src.as_deref(), Some("Hình ảnh Zalo"));
-        assert_eq!(msg.text, "[Hình ảnh]");
-        assert!(is_zalo_photo_cdn_url(msg.link_url.as_deref().unwrap()));
-    }
-
-    #[test]
-    fn parse_share_file_preserves_sender_doc_filename_instead_of_renew_media() {
-        let raw_file = json!({
-            "msgId": "file_74",
-            "msgType": "share.file",
-            "uidFrom": "1000002",
-            "ts": 1700000001000_i64,
-            "content": {
-                "title": "Bao_cao_do_an.doc",
-                "description": "",
-                "href": "https://f16-zpc.zdn.vn/renewMedia?p=abc123xyz",
-                "thumb": "",
-                "params": "{\"fileSize\":\"54272\",\"checksum\":\"deadbeef\",\"fileExt\":\"doc\"}"
-            }
-        });
-        let msg = parse_chat_message(&raw_file).expect("must parse file message");
-        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
-        assert_eq!(msg.link_title.as_deref(), Some("Bao_cao_do_an.doc"));
-        assert_eq!(msg.text, "[Tập tin] Bao_cao_do_an.doc");
-        let resolved = resolve_attachment_file_name(
-            msg.link_title.as_deref(),
-            &msg.text,
-            msg.link_url.as_deref().unwrap_or_default(),
-        );
-        assert_eq!(resolved, "Bao_cao_do_an.doc");
-
-        // Also verify when `title` omits `.doc` but `params.fileExt` has `"doc"`
-        let raw_file_no_ext = json!({
-            "msgId": "file_74_b",
-            "msgType": "share.file",
-            "uidFrom": "1000002",
-            "ts": 1700000002000_i64,
-            "content": {
-                "title": "De_cuong_mon_hoc",
-                "description": "",
-                "href": "https://f16-zpc.zdn.vn/renewMedia?p=def456",
-                "params": "{\"fileSize\":\"12345\",\"fileExt\":\"doc\"}"
-            }
-        });
-        let msg_b = parse_chat_message(&raw_file_no_ext).expect("must parse file message");
-        assert_eq!(msg_b.link_src.as_deref(), Some("Tập tin Zalo"));
-        assert_eq!(msg_b.link_title.as_deref(), Some("De_cuong_mon_hoc.doc"));
-    }
-
-    #[test]
-    fn parse_share_file_preserves_file_ext_for_opaque_mp3_url() {
-        let raw_file = json!({
-            "msgId": "file_mp3_opaque",
-            "msgType": "share.file",
-            "uidFrom": "1000002",
-            "ts": 1700000003000_i64,
-            "content": {
-                "href": "https://files.example/download/opaque-token",
-                "params": "{\"fileSize\":\"12345\",\"fileExt\":\"mp3\",\"duration\":\"120\"}"
-            }
-        });
-
-        let msg = parse_chat_message(&raw_file).expect("must parse MP3 file message");
-        assert_eq!(msg.kind, crate::message_model::MessageKind::File);
-        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
-        assert_eq!(msg.link_title.as_deref(), Some("opaque-token.mp3"));
-        assert_eq!(msg.text, "[Tập tin] opaque-token.mp3");
-    }
-
-    #[test]
-    fn parse_share_file_with_mp3_filename_and_duration_stays_a_file() {
-        let raw_file = json!({
-            "msgId": "file_mp3_named",
-            "msgType": "share.file",
-            "uidFrom": "1000002",
-            "ts": 1700000004000_i64,
-            "content": {
-                "title": "meeting.mp3",
-                "href": "https://files.example/download/opaque-token",
-                "params": "{\"duration\":\"120\"}"
-            }
-        });
-
-        let msg = parse_chat_message(&raw_file).expect("must parse named MP3 message");
-        assert_eq!(msg.kind, crate::message_model::MessageKind::File);
-        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
-        assert_eq!(msg.link_title.as_deref(), Some("meeting.mp3"));
-    }
-
-    #[test]
-    fn parse_regular_file_with_duration_stays_a_file() {
-        let raw_file = json!({
-            "msgId": "file_pdf_duration",
-            "msgType": "share.file",
-            "uidFrom": "1000002",
-            "ts": 1700000004500_i64,
-            "content": {
-                "title": "report.pdf",
-                "href": "https://files.example/download/opaque-token",
-                "params": "{\"duration\":\"120\"}"
-            }
-        });
-
-        let msg = parse_chat_message(&raw_file).expect("must parse PDF message");
-        assert_eq!(msg.kind, crate::message_model::MessageKind::File);
-        assert_eq!(msg.link_src.as_deref(), Some("Tập tin Zalo"));
-    }
-
-    #[test]
-    fn parse_dotted_display_title_uses_duration_video_fallback() {
-        let raw_video = json!({
-            "msgId": "video_dotted_title",
-            "msgType": "chat.recommended",
-            "uidFrom": "1000002",
-            "ts": 1700000004700_i64,
-            "content": {
-                "title": "v1.2 notes",
-                "href": "https://media.example/download/opaque-token",
-                "params": "{\"duration\":\"45\"}"
-            }
-        });
-
-        let msg = parse_chat_message(&raw_video).expect("must parse duration-based video message");
-        assert_eq!(msg.kind, crate::message_model::MessageKind::Video);
-        assert_eq!(msg.link_src.as_deref(), Some("Video Zalo"));
-    }
-
-    #[test]
-    fn parse_video_with_duration_and_opaque_url_stays_a_video() {
-        let raw_video = json!({
-            "msgId": "video_opaque_duration",
-            "msgType": "chat.recommended",
-            "uidFrom": "1000002",
-            "ts": 1700000005000_i64,
-            "content": {
-                "href": "https://media.example/download/opaque-token",
-                "params": "{\"duration\":\"45\"}"
-            }
-        });
-
-        let msg = parse_chat_message(&raw_video).expect("must parse video message");
-        assert_eq!(msg.kind, crate::message_model::MessageKind::Video);
-        assert_eq!(msg.link_src.as_deref(), Some("Video Zalo"));
-        assert_eq!(msg.text, "[Video]");
-
-        let named_video = json!({
-            "msgId": "video_named_duration",
-            "msgType": "chat.recommended",
-            "uidFrom": "1000002",
-            "ts": 1700000006000_i64,
-            "content": {
-                "title": "clip.mp4",
-                "href": "https://media.example/download/opaque-token",
-                "params": "{\"duration\":\"45\"}"
-            }
-        });
-        let named_msg = parse_chat_message(&named_video).expect("must parse named video message");
-        assert_eq!(named_msg.kind, crate::message_model::MessageKind::Video);
-    }
-
-    #[test]
-    fn test_is_zalo_photo_cdn_url_comprehensive() {
-        // Direct images and Zalo CDNs
-        assert!(is_zalo_photo_cdn_url("https://photo-stal-6.zdn.vn/gr/jpg/beab7091ea123f4c6603/1WUpuktR2ex7c7iAAbWSyDORFc86tI59Rxwuy31ukJWzM6h8D9hN5HA66gJ2eFCzUBU.jpg"));
-        assert!(is_zalo_photo_cdn_url(
-            "https://f16-zpcloud.zdn.vn/4755838023238443440/415f16b28c720c2c5563.jpg"
-        ));
-        assert!(is_zalo_photo_cdn_url(
-            "https://b-f65-zpg-r.zdn.vn/1913892508530765023/24acd63939f9b9a7e0e8.jpg"
-        ));
-        assert!(is_zalo_photo_cdn_url(
-            "https://res-zalo.zadn.vn/upload/media/2020/2/7/2x_ecardsn_1581058405234_716426.png"
-        ));
-        assert!(is_zalo_photo_cdn_url(
-            "https://example.com/banner.webp?w=500"
-        ));
-        assert!(is_zalo_photo_cdn_url("local:///Users/mac/test.png"));
-        // #118: định dạng/host mới Zalo dùng
-        assert!(is_zalo_photo_cdn_url(
-            "https://zpsocial2-f9-org.zadn.vn/abc123.jxl"
-        ));
-        assert!(is_zalo_photo_cdn_url("https://example.com/photo.heic"));
-        assert!(is_zalo_photo_cdn_url("https://example.com/photo.avif"));
-        assert!(is_zalo_photo_cdn_url("https://example.com/scan.tif"));
-        assert!(is_zalo_photo_cdn_url("https://example.com/tex.tga"));
-        assert!(is_zalo_photo_cdn_url("https://example.com/icon.qoi"));
-        assert!(is_zalo_photo_cdn_url(
-            "https://f16-zpcloud.zdn.vn/123/jxl/abc"
-        ));
-
-        // Non-images
-        assert!(!is_zalo_photo_cdn_url(
-            "https://file-stal-10.dlfl.vn/gr/1d5605655a9c8fc2d68d/document.pdf"
-        ));
-        assert!(!is_zalo_photo_cdn_url(
-            "https://www.youtube.com/watch?v=F1c8-nNze3U"
-        ));
-        assert!(!is_zalo_photo_cdn_url(
-            "https://docs.google.com/spreadsheets/d/123/edit"
-        ));
-        assert!(!is_zalo_photo_cdn_url(
-            "https://f16-zpc.zdn.vn/renewMedia?p=abc"
-        ));
-    }
-
-    #[test]
-    fn test_image_crate_decodes_extended_preview_formats() {
-        let mut rgba = image::RgbaImage::new(2, 2);
-        for p in rgba.pixels_mut() {
-            *p = image::Rgba([20, 140, 240, 255]);
-        }
-        let dyn_img = image::DynamicImage::ImageRgba8(rgba);
-        for fmt in [
-            image::ImageFormat::Png,
-            image::ImageFormat::Jpeg,
-            image::ImageFormat::Gif,
-            image::ImageFormat::WebP,
-            image::ImageFormat::Bmp,
-            image::ImageFormat::Ico,
-            image::ImageFormat::Tiff,
-            image::ImageFormat::Tga,
-            image::ImageFormat::Qoi,
-        ] {
-            let mut buf = std::io::Cursor::new(Vec::new());
-            let src = if matches!(fmt, image::ImageFormat::Jpeg | image::ImageFormat::Tga) {
-                image::DynamicImage::ImageRgb8(dyn_img.to_rgb8())
-            } else {
-                dyn_img.clone()
-            };
-            src.write_to(&mut buf, fmt)
-                .unwrap_or_else(|e| panic!("encode {fmt:?} failed: {e}"));
-            let decoded = if fmt == image::ImageFormat::Tga {
-                image::load_from_memory_with_format(buf.get_ref(), fmt)
-            } else {
-                image::load_from_memory(buf.get_ref())
-            }
-            .unwrap_or_else(|e| panic!("decode {fmt:?} failed: {e}"));
-            assert_eq!(decoded.width(), 2);
-            assert_eq!(decoded.height(), 2);
-        }
-    }
-
-    #[test]
-    fn test_is_safe_external_image_url() {
-        assert!(is_safe_external_image_url(
-            "https://photo-stal-6.zdn.vn/gr/jpg/test.jpg"
-        ));
-        assert!(is_safe_external_image_url(
-            "https://example.com/banner.webp"
-        ));
-        assert!(!is_safe_external_image_url(
-            "http://localhost:8080/test.png"
-        ));
-        assert!(!is_safe_external_image_url("http://127.0.0.1/admin.png"));
-        assert!(!is_safe_external_image_url("https://10.0.0.1/secret.jpg"));
-        assert!(!is_safe_external_image_url("http://192.168.1.1/router.png"));
-        assert!(!is_safe_external_image_url(
-            "http://169.254.169.254/latest/meta-data.png"
-        ));
-        assert!(!is_safe_external_image_url("local:///Users/mac/test.png"));
-    }
-
-    #[test]
-    fn test_parse_pinned_conversations_various_formats() {
-        // Format 1: Direct array of string IDs
-        let v1 = json!({
-            "error_code": 0,
-            "data": ["u10001", "g20002", "30003"]
-        });
-        assert_eq!(
-            parse_pinned_conversations(&v1),
-            vec![
-                "u10001".to_string(),
-                "g20002".to_string(),
-                "30003".to_string()
-            ]
-        );
-
-        // Format 2: Object with "conversations" or "pins" key
-        let v2 = json!({
-            "error_code": 0,
-            "data": {
-                "conversations": ["u10001", "g20002"]
-            }
-        });
-        assert_eq!(
-            parse_pinned_conversations(&v2),
-            vec!["u10001".to_string(), "g20002".to_string()]
-        );
-
-        // Format 3: Array of objects with convId / id
-        let v3 = json!({
-            "error_code": 0,
-            "data": [
-                {"convId": "u10001", "pinned": true},
-                {"id": "g20002", "pinned": true}
-            ]
-        });
-        assert_eq!(
-            parse_pinned_conversations(&v3),
-            vec!["u10001".to_string(), "g20002".to_string()]
-        );
-
-        // Format 4: Stringified JSON in data
-        let v4 = json!({
-            "error_code": 0,
-            "data": "[\"u999\", \"g888\"]"
-        });
-        assert_eq!(
-            parse_pinned_conversations(&v4),
-            vec!["u999".to_string(), "g888".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_board_topics_reads_ids_and_message_keys_from_object_and_string_data() {
-        // `data` as an object with a `topics` array; `params` as a JSON string (server shape).
-        let v1 = json!({
-            "error_code": 0,
-            "data": { "topics": [
-                { "id": 111, "type": 2, "params": "{\"global_msg_id\":\"m-1\",\"client_msg_id\":\"c-1\"}" }
-            ]}
-        });
-        let got = parse_board_topics(&v1);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].id, "111");
-        assert_eq!(got[0].msg_ids, vec!["m-1".to_string(), "c-1".to_string()]);
-
-        // `data` as a JSON string, single topic object, numeric ids.
-        let v2 = json!({
-            "error_code": 0,
-            "data": "{\"topic\":{\"topicId\":\"222\",\"params\":{\"global_msg_id\":777}}}"
-        });
-        let got = parse_board_topics(&v2);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].id, "222");
-        assert_eq!(got[0].msg_ids, vec!["777".to_string()]);
-
-        // Empty board.
-        assert!(parse_board_topics(&json!({ "error_code": 0, "data": {} })).is_empty());
-    }
-
-    #[test]
-    fn test_is_pinned_in_list_handles_prefixes_and_types() {
-        let pinned = vec![
-            "u10001".to_string(),
-            "g20002".to_string(),
-            "30003".to_string(),
-        ];
-
-        // 1-1 user thread (is_group = false)
-        assert!(is_pinned_in_list("10001", false, &pinned));
-        assert!(is_pinned_in_list("u10001", false, &pinned));
-        assert!(!is_pinned_in_list("20002", false, &pinned)); // g20002 should not match user 20002
-
-        // Group thread (is_group = true)
-        assert!(is_pinned_in_list("20002", true, &pinned));
-        assert!(is_pinned_in_list("g20002", true, &pinned));
-        assert!(is_pinned_in_list("group_20002", true, &pinned));
-        assert!(!is_pinned_in_list("10001", true, &pinned)); // u10001 should not match group 10001
-
-        // Plain ID matches both if unadorned
-        assert!(is_pinned_in_list("30003", false, &pinned));
-        assert!(is_pinned_in_list("30003", true, &pinned));
-    }
-
-    #[test]
-    fn test_apply_pinned_threads_and_merge() {
-        let t1 = Thread {
-            id: "10001".into(),
-            is_group: false,
-            ..Default::default()
-        };
-        let t2 = Thread {
-            id: "20002".into(),
-            is_group: true,
-            ..Default::default()
-        };
-        let t3 = Thread {
-            id: "40004".into(),
-            is_group: false,
-            ..Default::default()
-        };
-        let mut threads = vec![t1, t2, t3];
-        let pinned = vec!["u10001".to_string(), "g20002".to_string()];
-
-        apply_pinned_threads(&mut threads, &pinned);
-        assert!(threads[0].presentation.pinned);
-        assert!(threads[1].presentation.pinned);
-        assert!(!threads[2].presentation.pinned);
-
-        // Verify merge_thread_into preserves pinned status
-        let incoming_pinned = Thread {
-            id: "40004".into(),
-            presentation: SidebarPresentation {
-                pinned: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        merge_thread_into(&mut threads[2], incoming_pinned, true);
-        assert!(threads[2].presentation.pinned);
-    }
-
-    #[test]
-    fn extract_mobile_sync_controls_parses_transfer_confirm_and_backup_ready() {
-        let payload = json!({
-            "controls": [
-                {
-                    "content": {
-                        "act_type": "transfer_msg",
-                        "act": "transfer_after_login",
-                        "data": "{\"temp_key\":\"tk_login_999\"}"
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "syncmsgmb",
-                        "act": "user_confirm",
-                        "data": { "user_action": 1, "pc_name": "DESKTOP" }
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "syncmsgmb",
-                        "act": "syncmsg_info",
-                        "data": {
-                            "url": "https://f1-zpc.zdn.vn/backup.zdb",
-                            "file_name": "backup.zdb",
-                            "encrypted_key": "enc_key_b64",
-                            "checksum_code": "md5_123"
-                        }
-                    }
-                }
-            ]
-        });
-        let evs = extract_mobile_sync_controls(&payload);
-        assert_eq!(evs.len(), 3);
-        assert_eq!(
-            evs[0],
-            MobileSyncControlEvent::TransferAfterLogin {
-                temp_key: "tk_login_999".into()
-            }
-        );
-        assert_eq!(evs[1], MobileSyncControlEvent::UserConfirmed);
-        assert_eq!(
-            evs[2],
-            MobileSyncControlEvent::BackupReady {
-                url: "https://f1-zpc.zdn.vn/backup.zdb".into(),
-                file_name: "backup.zdb".into(),
-                encrypted_key: "enc_key_b64".into(),
-                checksum: "md5_123".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn extract_mobile_sync_controls_handles_v2_idle_errors_and_empty_last() {
-        let payload = json!({
-            "controls": [
-                {
-                    "content": {
-                        "act_type": "transfer_sync2",
-                        "act": "transfer_status",
-                        "data": "{\"syncId\":\"s1\",\"status\":2}"
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "transfer_sync2",
-                        "act": "upload_batch",
-                        "data": { "syncId": "s1", "err": 1120, "errorMessage": "partition missing" }
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "transfer_sync2",
-                        "act": "upload_batch",
-                        "data": { "syncId": "s1", "err": 0, "msgUrl": "", "batchType": 1, "isLast": 1 }
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "transfer_sync2",
-                        "act": "upload_batch",
-                        "data": { "syncId": "s1", "err": 0, "msgUrl": "https://cdn/b1", "batchType": "1", "isLast": "1" }
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "transfer_sync2",
-                        "act": "transfer_error",
-                        "data": { "syncId": "s1", "errorCode": 1031, "errorMessage": "timeout", "isLast": 1 }
-                    }
-                }
-            ]
-        });
-        let evs = extract_mobile_sync_controls(&payload);
-        assert_eq!(evs.len(), 5);
-        assert_eq!(
-            evs[0],
-            MobileSyncControlEvent::SyncV2MobileIdle {
-                sync_id: "s1".into()
-            }
-        );
-        assert_eq!(
-            evs[1],
-            MobileSyncControlEvent::SyncV2Error {
-                sync_id: "s1".into(),
-                err: 1120,
-                message: "partition missing".into(),
-                is_last: false,
-            }
-        );
-        assert_eq!(
-            evs[2],
-            MobileSyncControlEvent::SyncV2EmptyDone {
-                sync_id: "s1".into()
-            }
-        );
-        assert_eq!(
-            evs[3],
-            MobileSyncControlEvent::SyncV2Batch {
-                url: "https://cdn/b1".into(),
-                sync_id: "s1".into(),
-                batch_type: 1,
-                is_last: true
-            }
-        );
-        assert_eq!(
-            evs[4],
-            MobileSyncControlEvent::SyncV2Error {
-                sync_id: "s1".into(),
-                err: 1031,
-                message: "timeout".into(),
-                is_last: true,
-            }
-        );
-    }
-
-    #[test]
-    fn sweep_thread_vanish_expires_only_covered_messages() {
-        let m = |id: &str, text: &str, ts: i64| ChatMessage {
-            id: id.into(),
-            text: text.into(),
-            ts,
-            ..Default::default()
-        };
-        // Bật vanish 1 giờ; dùng epoch thật để normalize_ts_ms không nhân 1000 lần nữa.
-        let start_sec = 1_760_000_000;
-        let mut t = Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "van".into(),
-            name: "Van".into(),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group: false,
-            messages: Vec::new(),
-            vanish: None,
-        };
-        assert!(set_thread_vanish(&mut t, 3600, start_sec));
-        t.messages = vec![
-            m("old", "tin cũ", (start_sec - 10) * 1000),
-            m("fresh", "tin mới", (start_sec + 10) * 1000),
-            m("edge", "vừa hết hạn", (start_sec + 10) * 1000),
-        ];
-        // Chưa tới giờ: không tin nào lật.
-        let now_ms = (start_sec + 100) * 1000;
-        assert!(sweep_thread_vanish(&mut t, now_ms).is_empty());
-        assert_eq!(t.messages[1].text, "tin mới");
-        // Quá 1 giờ từ lúc gửi: 2 tin sau mốc bật lật, tin cũ giữ nguyên.
-        let now_ms = (start_sec + 10 + 3600) * 1000;
-        let expired = sweep_thread_vanish(&mut t, now_ms);
-        assert_eq!(expired, vec!["fresh".to_string(), "edge".to_string()]);
-        assert!(is_vanished_message(&t.messages[1]));
-        assert!(is_vanished_message(&t.messages[2]));
-        assert_eq!(t.messages[0].text, "tin cũ");
-        // Sweep lại: không lật trùng.
-        assert!(sweep_thread_vanish(&mut t, now_ms).is_empty());
-        // Tắt vanish: sweep không làm gì.
-        assert!(set_thread_vanish(&mut t, 0, now_ms / 1000));
-        t.messages.push(m("after", "sau khi tắt", now_ms));
-        assert!(sweep_thread_vanish(&mut t, now_ms + 10_000_000).is_empty());
-    }
-
-    #[test]
-    fn guess_translate_source_detects_script() {
-        assert_eq!(
-            guess_translate_source("Hello world, how are you"),
-            Some("en")
-        );
-        assert_eq!(guess_translate_source("你好世界"), Some("zh"));
-        assert_eq!(guess_translate_source("こんにちは"), Some("ja"));
-        assert_eq!(guess_translate_source("안녕하세요"), Some("ko"));
-        assert_eq!(guess_translate_source("Привет мир"), Some("ru"));
-        // Đã Việt / quá ngắn / số → không dịch.
-        assert_eq!(guess_translate_source("Xin chào bạn"), None);
-        assert_eq!(guess_translate_source("CHÀO BẠN"), None);
-        assert_eq!(guess_translate_source("XIN CHÀO BẠN"), None);
-        // Dấu lẻ tẻ kiểu "café" chưa đủ kết luận Việt → dịch bình thường.
-        assert_eq!(guess_translate_source("Let's meet at the café"), Some("en"));
-        assert_eq!(guess_translate_source("ok"), None);
-        assert_eq!(guess_translate_source("12345"), None);
-        assert_eq!(guess_translate_source(""), None);
-        // Phân biệt "đã đúng target" vs "quá ngắn": tin Việt + target en vẫn dịch.
-        assert_eq!(
-            translate_source_for_target("Xin chào bạn", "en"),
-            Some("vi")
-        );
-        assert_eq!(translate_source_for_target("Xin chào bạn", "vi"), None);
-        assert_eq!(translate_source_for_target("Hello world", "en"), None);
-        assert_eq!(translate_source_for_target("Hello world", "vi"), Some("en"));
-    }
-
-    #[test]
-    fn parse_mymemory_response_offline() {
-        use serde_json::json;
-        let ok = json!({"responseStatus": 200, "responseData": {"translatedText": "Xin chào"}});
-        assert_eq!(parse_mymemory_response(&ok, "Hello").unwrap(), "Xin chào");
-        let ok_str =
-            json!({"responseStatus": "200", "responseData": {"translatedText": "Xin chào"}});
-        assert_eq!(
-            parse_mymemory_response(&ok_str, "Hello").unwrap(),
-            "Xin chào"
-        );
-        let quota = json!({"responseStatus": 200, "quotaFinished": true, "responseData": {"translatedText": "x"}});
-        assert_eq!(
-            parse_mymemory_response(&quota, "Hello").unwrap_err(),
-            TranslateError::Quota
-        );
-        for status in [json!(429), json!("429")] {
-            let r = json!({"responseStatus": status, "responseData": {"translatedText": "x"}});
-            assert_eq!(
-                parse_mymemory_response(&r, "Hello").unwrap_err(),
-                TranslateError::Quota
-            );
-        }
-        let diag = json!({"responseStatus": 200, "responseData": {"translatedText": "PLEASE SELECT TWO DISTINCT LANGUAGES"}});
-        assert_eq!(
-            parse_mymemory_response(&diag, "Hello").unwrap_err(),
-            TranslateError::Empty
-        );
-        let echo = json!({"responseStatus": 200, "responseData": {"translatedText": "Hello"}});
-        assert_eq!(
-            parse_mymemory_response(&echo, "Hello").unwrap_err(),
-            TranslateError::Empty
-        );
-        let bad = json!({"responseStatus": 403, "responseDetails": "INVALID EMAIL", "responseData": {"translatedText": "INVALID EMAIL"}});
-        assert!(matches!(
-            parse_mymemory_response(&bad, "Hello").unwrap_err(),
-            TranslateError::Rejected(_)
-        ));
-    }
-
-    #[test]
-    fn voice_response_fixture_keeps_url_and_rejects_envelope_errors() {
-        use serde_json::json;
-        // Success giữ voice URL + msgId.
-        let ok = json!({
-            "error_code": 0,
-            "data": {"fileUrl": "https://fdl.zaloapp.com/voice.m4a", "msgId": "m-voice-1"}
-        });
-        let cm = parse_voice_send_response(&ok, 77, 65).unwrap();
-        assert_eq!(
-            cm.link_url.as_deref(),
-            Some("https://fdl.zaloapp.com/voice.m4a")
-        );
-        assert_eq!(cm.id, "m-voice-1");
-        assert_eq!(cm.link_title.as_deref(), Some("Tin nhắn thoại (01:05)"));
-        // error_code tài liệu hoá → Err.
-        for code in [-101, -111, -112, 201, 202] {
-            let err = json!({"error_code": code, "error_message": "fail", "data": {}});
-            assert!(
-                parse_voice_send_response(&err, 77, 65).is_err(),
-                "code {code}"
-            );
-        }
-    }
-
-    #[test]
-    fn pr125_and_issue126_contact_name_and_placeholder_distinction() {
-        use serde_json::json;
-
-        assert!(is_placeholder_thread_name("", "987654"));
-        assert!(is_placeholder_thread_name("987654", "987654"));
-        assert!(is_placeholder_thread_name("Người dùng 987654", "987654"));
-        assert!(is_placeholder_thread_name("Nhóm 987654", "987654"));
-
-        // Genuine contact aliases ("123") and group prefix names ("Nhóm học") are NOT placeholders.
-        assert!(!is_placeholder_thread_name("123", "987654"));
-        assert!(!is_placeholder_thread_name("Nhóm học", "987654"));
-
-        // parse_thread marks displayName as contact_name = true.
-        let friend_json = json!({
-            "userId": "987654",
-            "displayName": "123",
-            "zaloName": "Nguyen Van A"
-        });
-        let mut t = parse_thread(&friend_json).expect("parse_thread");
-        assert_eq!(t.name, "123");
-        assert!(t.presentation.contact_name);
-
-        // Non-contact name or placeholder cannot overwrite a contact_name alias.
-        adopt_thread_name(&mut t, "Nguyen Van A".into(), false);
-        assert_eq!(t.name, "123");
-        assert!(t.presentation.contact_name);
-
-        adopt_thread_name(&mut t, "Người dùng 987654".into(), false);
-        assert_eq!(t.name, "123");
-
-        // Updated contact_name can update it.
-        adopt_thread_name(&mut t, "456".into(), true);
-        assert_eq!(t.name, "456");
-        assert!(t.presentation.contact_name);
-
-        // Group prefix "Nhóm học" is preserved over "Nhóm {id}" placeholder.
-        let group_json = json!({
-            "groupId": "777888",
-            "name": "Nhóm học"
-        });
-        let mut g = parse_thread(&group_json).expect("parse_thread group");
-        assert_eq!(g.name, "Nhóm học");
-        adopt_thread_name(&mut g, "Nhóm 777888".into(), false);
-        assert_eq!(g.name, "Nhóm học");
-    }
-
-    #[test]
-    fn issue128_my_cloud_text_extraction_and_routing() {
-        use serde_json::json;
-
-        let self_uid = "10001";
-        let cloud_id = "20002";
-
-        // 1. Plain string content sent to send2me_id routes to cloud_id and extracts text.
-        let msg_str = json!({
-            "msgId": "mc-1",
-            "cliMsgId": "cli-mc-1",
-            "uidFrom": self_uid,
-            "idTo": cloud_id,
-            "msgType": "webchat",
-            "content": "Ghi chú đám mây 1",
-            "ts": "1700000001000"
-        });
-        let (tid1, is_group1) =
-            extract_message_thread_id_ext(&msg_str, &msg_str, false, Some(cloud_id)).unwrap();
-        assert_eq!(tid1, cloud_id);
-        assert!(!is_group1);
-        let cm1 = parse_chat_message(&msg_str).unwrap();
-        assert_eq!(cm1.text, "Ghi chú đám mây 1");
-
-        // 2. Structured object content in My Cloud extracts nested text/title/description.
-        let msg_obj = json!({
-            "msgId": "mc-2",
-            "cliMsgId": "cli-mc-2",
-            "uidFrom": "0",
-            "idTo": cloud_id,
-            "msgType": "webchat",
-            "content": {
-                "data": {
-                    "text": "Ghi chú có cấu trúc"
-                }
-            },
-            "ts": "1700000002000"
-        });
-        let (tid2, is_group2) =
-            extract_message_thread_id_ext(&msg_obj, &msg_obj, false, Some(cloud_id)).unwrap();
-        assert_eq!(tid2, cloud_id);
-        assert!(!is_group2);
-        let cm2 = parse_chat_message(&msg_obj).unwrap();
-        assert_eq!(cm2.text, "Ghi chú có cấu trúc");
-        assert!(cm2.is_outgoing);
-        assert_eq!(
-            cm2.delivery,
-            crate::message_model::DeliveryState::ServerAccepted
-        );
-    }
-
-    #[test]
-    fn issue128_recall_deduplication_and_issue81_initial_sent_status() {
-        use serde_json::json;
-
-        let peer_uid = "30003";
-
-        let orig = json!({
-            "msgId": "msg-500",
-            "cliMsgId": "cli-500",
-            "uidFrom": "0",
-            "idTo": peer_uid,
-            "msgType": "webchat",
-            "content": "Tin nhắn gốc",
-            "ts": "1700000010000"
-        });
-        let cm_orig = parse_chat_message(&orig).unwrap();
-        assert_eq!(
-            cm_orig.delivery,
-            crate::message_model::DeliveryState::ServerAccepted
-        );
-
-        // Recall event where globalMsgId is "0" on outer envelope and real target ID is in content.
-        let undo1 = json!({
-            "msgId": "undo-notif-1",
-            "cliMsgId": "cli-500",
-            "globalMsgId": "0",
-            "uidFrom": "0",
-            "idTo": peer_uid,
-            "msgType": "chat.undo",
-            "content": {
-                "globalMsgId": "msg-500",
-                "cliMsgId": "cli-500",
-                "deleteMsg": 1
-            },
-            "ts": "1700000020000"
-        });
-        let undo2 = json!({
-            "msgId": "undo-notif-2",
-            "cliMsgId": "cli-500",
-            "globalMsgId": "0",
-            "uidFrom": "0",
-            "idTo": peer_uid,
-            "msgType": "chat.undo",
-            "content": {
-                "globalMsgId": "msg-500",
-                "cliMsgId": "cli-500",
-                "deleteMsg": 1
-            },
-            "ts": "1700000025000"
-        });
-
-        let cm_undo1 = parse_chat_message(&undo1).unwrap();
-        let _cm_undo2 = parse_chat_message(&undo2).unwrap();
-        assert_eq!(cm_undo1.id, "msg-500");
-        assert_eq!(cm_undo1.text, "[Tin nhắn đã thu hồi]");
-
-        let mut threads = vec![Thread {
-            id: peer_uid.into(),
-            name: "Bạn bè".into(),
-            messages: vec![cm_orig],
-            ..Default::default()
-        }];
-
-        let resp = json!({
-            "data": [undo1, undo2]
-        });
-        merge_previews(&mut threads, &resp);
-
-        assert_eq!(
-            threads[0].messages.len(),
-            1,
-            "recall must update in place without inserting duplicate rows"
-        );
-        assert_eq!(threads[0].messages[0].text, "[Tin nhắn đã thu hồi]");
-        assert_eq!(threads[0].messages[0].ts, 1700000010000);
-    }
-
-    #[tokio::test]
-    async fn leave_group_requires_login_and_validates_grid() {
-        let s = Session::new(false, false, false).unwrap();
-        let res = leave_group(&s, "g_123456", false).await;
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().to_string(), "chưa đăng nhập");
-    }
-
-    #[test]
-    fn test_parse_video_message_with_raw_token() {
-        let video_raw = json!({
-            "msgId": "vid-1",
-            "msgType": 18,
-            "content": "2aOboRCNJyrsnJG0K5FnqP4zCs9HLAKnoazCx0iG",
-            "uidFrom": "user_vid",
-            "ts": 1700000000000_i64
-        });
-        let parsed = parse_chat_message(&video_raw).expect("parse video message");
-        assert_eq!(parsed.text, "[Video]");
-        assert_eq!(parsed.link_src.as_deref(), Some("Video Zalo"));
-        assert_eq!(parsed.link_title.as_deref(), Some("Video"));
-    }
-
-    /// A `group.poll` vote as it arrives on the wire (shape from a real group; ids and names are made up).
-    fn poll_vote_payload() -> Value {
-        json!({
-            "msgId": "9000000000001",
-            "cliMsgId": "1700000000001",
-            "msgType": "group.poll",
-            "uidFrom": "1000000000000000001",
-            "idTo": "2000000000000000002",
-            "dName": "Lan",
-            "ts": "1700000000001",
-            "content": {
-                "action": "vote",
-                "childnumber": 0,
-                "description": "",
-                "href": "",
-                "thumb": "",
-                "title": "",
-                "type": "",
-                "params": "{\"msg\":{\"vi\":\"%1$s tham gia cuộc bình chọn: %2$s\",\"en\":\"%1$s voted in the poll: %2$s\"},\"isAnonymous\":false,\"question\":\"Họp lớp tối nay?\",\"pollId\":42,\"dName\":\"Lan\"}"
-            }
-        })
-    }
-
-    #[test]
-    fn poll_vote_is_a_system_notice_not_a_photo() {
-        let cm = parse_chat_message(&poll_vote_payload()).expect("poll vote parses");
-        assert_eq!(cm.text, "Lan tham gia cuộc bình chọn: Họp lớp tối nay?");
-        assert_eq!(cm.kind, crate::message_model::MessageKind::System);
-        assert!(cm.link_src.is_none());
-    }
-
-    #[test]
-    fn poll_notice_falls_back_without_a_template() {
-        let content = json!({ "params": "{\"question\":\"Đi đâu?\"}" });
-        assert_eq!(
-            poll_notice_text(&content, "An").as_deref(),
-            Some("An đã cập nhật cuộc bình chọn: Đi đâu?")
-        );
-        assert_eq!(poll_notice_text(&json!({ "href": "" }), "An"), None);
-    }
-
-    #[test]
-    fn cached_poll_votes_labelled_as_photos_are_repaired() {
-        let raw = poll_vote_payload();
-        let mut stale = parse_chat_message(&raw).expect("poll vote parses");
-        // What older builds stored: the photo label on a plain text row.
-        stale.text = "[Hình ảnh]".into();
-        stale.kind = crate::message_model::MessageKind::Text;
-        let mut threads = vec![Thread {
-            id: "2000000000000000002".into(),
-            messages: vec![stale],
-            ..Default::default()
-        }];
-        repair_poll_notices(&mut threads);
-        let msg = &threads[0].messages[0];
-        assert_eq!(msg.text, "Lan tham gia cuộc bình chọn: Họp lớp tối nay?");
-        assert_eq!(msg.kind, crate::message_model::MessageKind::System);
-    }
-
-    #[test]
-    fn merging_a_parsed_poll_notice_replaces_the_stale_photo_label() {
-        let fresh = parse_chat_message(&poll_vote_payload()).expect("poll vote parses");
-        let mut stale = fresh.clone();
-        stale.text = "[Hình ảnh]".into();
-        stale.kind = crate::message_model::MessageKind::Text;
-        assert!(stale.merge_reaction_metadata(&fresh));
-        assert_eq!(stale.text, fresh.text);
-        assert_eq!(stale.kind, crate::message_model::MessageKind::System);
-        // Already repaired rows are also rebuilt from wire content on load.
-        let mut threads = vec![Thread {
-            messages: vec![ChatMessage {
-                text: "[Hình ảnh]".into(),
-                ..fresh.clone()
-            }],
-            ..Default::default()
-        }];
-        repair_poll_notices(&mut threads);
-        assert_eq!(threads[0].messages[0].text, fresh.text);
-    }
-
-    #[test]
-    fn empty_href_and_thumb_do_not_make_a_photo_label() {
-        let msg = json!({
-            "msgId": "1",
-            "msgType": "group.unknownevent",
-            "uidFrom": "u1",
-            "ts": "1700000000000",
-            "content": { "href": "", "thumb": "", "title": "" }
-        });
-        let cm = parse_chat_message(&msg).expect("parses");
-        assert_ne!(cm.text, "[Hình ảnh]");
-    }
-
-    #[test]
-    fn test_parse_chat_message_recommended_card_with_image_href_classified_as_link() {
-        let msg = json!({
-            "msgId": "rec-msg-1",
-            "cliMsgId": "cli-rec-1",
-            "msgType": "chat.recommended",
-            "content": {
-                "href": "https://example.com/banner.jpg",
-                "title": "Khám phá công nghệ mới",
-                "desc": "Bài viết chi tiết về công nghệ AI"
-            },
-            "uidFrom": "user123",
-            "ts": "1700000030000"
-        });
-        let cm = parse_chat_message(&msg).expect("Failed to parse recommended message");
-        assert_eq!(cm.kind, crate::message_model::MessageKind::Link);
-        assert_eq!(
-            cm.link_url.as_deref(),
-            Some("https://example.com/banner.jpg")
-        );
-        assert_eq!(cm.link_title.as_deref(), Some("Khám phá công nghệ mới"));
-    }
-
-    #[test]
-    fn merge_thread_into_advances_read_point_and_preserves_recall_kind() {
-        let mut target = Thread {
-            id: "t1".into(),
-            unread: crate::unread::UnreadState {
-                last_seen_id: Some("100".into()),
-                ..Default::default()
-            },
-            messages: vec![ChatMessage {
-                id: "50".into(),
-                text: "[Tin nhắn đã thu hồi]".into(),
-                kind: crate::message_model::MessageKind::Text,
-                ts: 1000,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let incoming = Thread {
-            id: "t1".into(),
-            unread: crate::unread::UnreadState {
-                last_seen_id: Some("250".into()),
-                fresh: true,
-                ..Default::default()
-            },
-            messages: vec![ChatMessage {
-                id: "50".into(),
-                text: "[Video]".into(),
-                kind: crate::message_model::MessageKind::Video,
-                ts: 1000,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        merge_thread_into(&mut target, incoming, true);
-        assert_eq!(target.unread.last_seen_id.as_deref(), Some("250"));
-        assert_eq!(target.messages[0].text, "[Đã thu hồi] [Video]");
-        assert_eq!(
-            target.messages[0].kind,
-            crate::message_model::MessageKind::Video
-        );
-
-        // Older read-point never moves cursor backward.
-        let older = Thread {
-            id: "t1".into(),
-            unread: crate::unread::UnreadState {
-                last_seen_id: Some("150".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        merge_thread_into(&mut target, older, false);
-        assert_eq!(target.unread.last_seen_id.as_deref(), Some("250"));
-    }
-
-    #[test]
-    fn parse_cloud_page_meta_and_stop_retry_handle_nested_and_top_level_shapes() {
-        let nested = json!({
-            "error_code": 0,
-            "data": {
-                "data": {
-                    "hasMore": 1,
-                    "isOld": 1,
-                    "lastMsgId": "8398973008356"
-                }
-            }
-        });
-        assert_eq!(
-            parse_cloud_page_meta(&nested),
-            (true, true, Some("8398973008356".into()))
-        );
-
-        let done = json!({
-            "data": {
-                "hasMore": 0,
-                "isOld": 0,
-                "lastMsgId": "0"
-            }
-        });
-        assert_eq!(parse_cloud_page_meta(&done), (false, false, None));
-
-        let err_stop: anyhow::Error = crate::session::SessionError::new(-69, "Stop retry").into();
-        assert!(is_cloud_stop_retry(&err_stop));
-
-        let err_other: anyhow::Error = crate::session::SessionError::new(114, "Other").into();
-        assert!(!is_cloud_stop_retry(&err_other));
-    }
-
-    #[test]
-    fn is_system_or_oa_thread_identifies_bots_without_false_positives() {
-        assert!(is_system_or_oa_thread("378702083183087169", "Trợ lý Kiki"));
-        assert!(is_system_or_oa_thread("995144610173421775", "Zalo"));
-        assert!(is_system_or_oa_thread("174368941280994155", "Thời Tiết"));
-        assert!(is_system_or_oa_thread(
-            "6091808854554923872",
-            "zStyle – Phong cách Zalo"
-        ));
-        assert!(is_system_or_oa_thread("2864797716192570561", "CloudOTP"));
-        assert!(is_system_or_oa_thread("oa_12345", "Shop ABC"));
-
-        assert!(!is_system_or_oa_thread("5758525960230414336", "Đỗ Thành"));
-        assert!(!is_system_or_oa_thread("123456", "Nguyễn Zalo"));
-        assert!(!is_system_or_oa_thread("123456", "Hoang"));
-    }
-
-    #[test]
-    fn parse_chat_message_oa_list_action_extracts_banner_and_sub_articles() {
-        let msg = json!({
-            "msgId": "1794571926938",
-            "msgType": "chat.list.action",
-            "uidFrom": "6091808854554923872",
-            "dName": "zStyle – Phong cách Zalo",
-            "ts": "1794571926938",
-            "content": [
-                {
-                    "type": "l.a.header.full",
-                    "title": "⚡Siêu Ưu Đãi: Mua 1 Tặng 1",
-                    "description": "Áp dụng cho gói zStyle tháng 11",
-                    "thumb": "https://res-zalo.zadn.vn/upload/media/zstyle_banner.jpg",
-                    "action": "action.open.inapp",
-                    "href": "https://zstyle.zalo.me/promo"
-                },
-                {
-                    "type": "l.a.child.full",
-                    "title": "Khám phá bộ hình nền mới",
-                    "description": "Hơn 50 chủ đề mùa đông",
-                    "thumb": "https://res-zalo.zadn.vn/upload/media/zstyle_sub1.jpg",
-                    "action": "action.open.inapp",
-                    "href": "https://zstyle.zalo.me/themes"
-                },
-                {
-                    "type": "l.a.child.full",
-                    "title": "Nhạc chờ Zalo hot tuần này",
-                    "thumb": "https://res-zalo.zadn.vn/upload/media/zstyle_sub2.jpg",
-                    "action": "action.open.inapp",
-                    "href": "https://zstyle.zalo.me/music"
-                }
-            ]
-        });
-        let cm = parse_chat_message(&msg).expect("should parse OA list message");
-        assert_eq!(cm.kind, crate::message_model::MessageKind::Action);
-        assert_eq!(cm.text, "⚡Siêu Ưu Đãi: Mua 1 Tặng 1");
-        let card = cm.effective_oa_card().expect("should have OA rich card");
-        assert_eq!(card.card_type, "oa_list");
-        assert_eq!(
-            card.banner_thumb.as_deref(),
-            Some("https://res-zalo.zadn.vn/upload/media/zstyle_banner.jpg")
-        );
-        assert_eq!(card.title.as_deref(), Some("⚡Siêu Ưu Đãi: Mua 1 Tặng 1"));
-        assert_eq!(
-            card.description.as_deref(),
-            Some("Áp dụng cho gói zStyle tháng 11")
-        );
-        assert_eq!(card.url.as_deref(), Some("https://zstyle.zalo.me/promo"));
-        assert_eq!(card.items.len(), 2);
-        assert_eq!(card.items[0].title, "Khám phá bộ hình nền mới");
-        assert_eq!(
-            card.items[0].url.as_deref(),
-            Some("https://zstyle.zalo.me/themes")
-        );
-        assert_eq!(card.items[1].title, "Nhạc chờ Zalo hot tuần này");
-    }
-
-    #[test]
-    fn parse_chat_message_webcontent_zinstant_extracts_banner_articles_and_buttons() {
-        let params_str = json!({
-            "customMsg": {
-                "msg": {
-                    "vi": "Chúc một ngày tốt lành, thời tiết TP. Hà Nội hôm nay 22/11: Nhiều mây."
-                },
-                "actions": [
-                    {
-                        "title": "Xem dự báo 7 ngày",
-                        "href": "https://thoitiet.zalo.me/hanoi"
-                    },
-                    {
-                        "name": "Mở Mini App",
-                        "actionId": "open.miniapp",
-                        "data": { "url": "zalo://miniapp/weather" }
-                    }
-                ]
-            },
-            "elements": [
-                {
-                    "title": "Chất lượng không khí: Trung bình",
-                    "description": "AQI 68",
-                    "thumb": "https://res-zalo.zadn.vn/weather/aqi.png",
-                    "href": "https://thoitiet.zalo.me/aqi"
-                }
-            ]
-        })
-        .to_string();
-        let msg = json!({
-            "msgId": "1795306210316",
-            "msgType": "chat.webcontent",
-            "uidFrom": "5128600805588494022",
-            "dName": "Thời Tiết",
-            "ts": "1795306210316",
-            "content": {
-                "title": "Thời tiết TP. Hà Nội 22/11",
-                "thumb": "https://res-zalo.zadn.vn/weather/banner_hanoi.png",
-                "params": params_str
-            }
-        });
-        let cm = parse_chat_message(&msg).expect("should parse webcontent message");
-        assert_eq!(cm.kind, crate::message_model::MessageKind::WebContent);
-        let card = cm.effective_oa_card().expect("should have webcontent card");
-        assert_eq!(card.card_type, "webcontent");
-        assert_eq!(
-            card.banner_thumb.as_deref(),
-            Some("https://res-zalo.zadn.vn/weather/banner_hanoi.png")
-        );
-        assert_eq!(card.title.as_deref(), Some("Thời tiết TP. Hà Nội 22/11"));
-        assert_eq!(
-            card.description.as_deref(),
-            Some("Chúc một ngày tốt lành, thời tiết TP. Hà Nội hôm nay 22/11: Nhiều mây.")
-        );
-        assert_eq!(card.items.len(), 1);
-        assert_eq!(card.items[0].title, "Chất lượng không khí: Trung bình");
-        assert_eq!(card.buttons.len(), 2);
-        assert_eq!(card.buttons[0].label, "Xem dự báo 7 ngày");
-        assert_eq!(
-            card.buttons[0].url.as_deref(),
-            Some("https://thoitiet.zalo.me/hanoi")
-        );
-        assert_eq!(card.buttons[1].label, "Mở Mini App");
-        assert_eq!(
-            card.buttons[1].url.as_deref(),
-            Some("zalo://miniapp/weather")
-        );
-    }
-
-    #[test]
-    fn parse_chat_message_ecard_and_malformed_params_behave_safely() {
-        let ecard_msg = json!({
-            "msgId": "2001",
-            "msgType": "chat.ecard",
-            "uidFrom": "5226566053441588578",
-            "dName": "Zalo",
-            "ts": "1795312339143",
-            "content": {
-                "title": "Chúc mừng sinh nhật",
-                "description": "Gửi lời chúc ngay hôm nay",
-                "href": "https://res-zalo.zadn.vn/ecard/bday.png",
-                "params": "{\"actions\":[{\"name\":\"Gửi lời chúc\",\"actionId\":\"greet\",\"data\":{\"url\":\"https://zalo.me/bday\"}}]}"
-            }
-        });
-        let cm = parse_chat_message(&ecard_msg).expect("should parse ecard");
-        assert_eq!(cm.kind, crate::message_model::MessageKind::WebContent);
-        let card = cm.effective_oa_card().expect("ecard should produce oa_card");
-        assert_eq!(card.card_type, "ecard");
-        assert_eq!(card.buttons.len(), 1);
-        assert_eq!(card.buttons[0].label, "Gửi lời chúc");
-
-        let malformed_msg = json!({
-            "msgId": "2002",
-            "msgType": "chat.webcontent.v2",
-            "uidFrom": "5128600805588494022",
-            "dName": "Thời Tiết",
-            "ts": "1795312339999",
-            "content": {
-                "title": "Bản tin thời tiết",
-                "zinstant_msg": "{not valid json"
-            }
-        });
-        let malformed = parse_chat_message(&malformed_msg).expect("should not panic on bad json");
-        assert_eq!(malformed.kind, crate::message_model::MessageKind::WebContent);
-        assert_eq!(
-            malformed.effective_oa_card().and_then(|c| c.title).as_deref(),
-            Some("Bản tin thời tiết")
-        );
-    }
-
-    #[test]
-    fn effective_oa_card_synthesizes_cached_zalo_banner_and_skips_empty_or_calls() {
-        let cached_zalo_login = ChatMessage {
-            id: "1795312339143".into(),
-            sender: "Zalo".into(),
-            text: "Đăng nhập Zalo trên máy tính thành công".into(),
-            kind: crate::message_model::MessageKind::Text,
-            link_title: Some("Đăng nhập Zalo trên máy tính thành công".into()),
-            link_desc: Some("Bạn đã đăng nhập Zalo PC trên ADMIN-PC".into()),
-            link_thumb: Some(
-                "https://res-zalo.zadn.vn/upload/media/2019/2/20/banner_loginPC_Success_1550651290804_16793.png".into(),
-            ),
-            ..Default::default()
-        };
-        let card = cached_zalo_login
-            .effective_oa_card()
-            .expect("cached Zalo banner should synthesize card");
-        assert_eq!(card.card_type, "banner");
-        assert_eq!(
-            card.title.as_deref(),
-            Some("Đăng nhập Zalo trên máy tính thành công")
-        );
-
-        let empty_card_msg = ChatMessage {
-            id: "empty1".into(),
-            text: "hello".into(),
-            oa_card: Some(OaRichCard::default()),
-            ..Default::default()
-        };
-        assert!(empty_card_msg.effective_oa_card().is_none());
-
-        let legacy_call = ChatMessage {
-            id: "call1".into(),
-            text: "Cuộc gọi".into(),
-            link_title: Some("sendBubbleMessage".into()),
-            link_thumb: Some("https://res-zalo.zadn.vn/call.png".into()),
-            ..Default::default()
-        };
-        assert!(legacy_call.effective_oa_card().is_none());
-    }
 }

@@ -8,16 +8,20 @@ Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diệ
 
 | Tham số | Ý nghĩa | Ví dụ |
 |---|---|---|
-| `--data-dir <PATH>` | Chọn thư mục lưu phiên, cache, log và cơ sở dữ liệu; đường dẫn tương đối tính từ thư mục khởi chạy. | `zalo-rust --data-dir ./local-data --gui` |
-| `--print-data-dir` | Chuẩn bị và in thư mục dữ liệu rồi thoát, không mở giao diện hay kết nối mạng. | `zalo-rust --print-data-dir` |
-| `--gui` | Chạy chế độ giao diện đồ họa (mặc định nếu không truyền tham số). | `zalo-rust --gui` |
-| `--tui` | Chạy chế độ giao diện dòng lệnh trong terminal. | `zalo-rust --tui` |
-| `--qr` | Yêu cầu tạo mã QR đăng nhập ngay khi khởi động TUI. | `zalo-rust --tui --qr` |
-| `--dev` | Bật thanh công cụ Dev Inspector để xem log mạng và payload giải mã. | `zalo-rust --gui --dev` |
-| `--logout` | Xóa phiên đăng nhập hiện tại (`session.json`) rồi thoát. | `zalo-rust --logout` |
-| `--phone <SỐ>` | Điền sẵn số điện thoại khi thử đăng nhập bằng mật khẩu. | `zalo-rust --tui --phone 0912345678` |
-| `--pass <MK>` | Điền sẵn mật khẩu. | `zalo-rust --tui --phone 0912345678 --pass ...` |
-| `--dump` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phục vụ phân tích. | `zalo-rust --dump` |
+| `--data-dir <PATH>` | Chọn thư mục lưu phiên, cache, log và cơ sở dữ liệu; đường dẫn tương đối tính từ thư mục khởi chạy. | `ctdozlite --data-dir ./local-data --gui` |
+| `--profile <TÊN>` | Chạy hồ sơ dữ liệu riêng trong thư mục con `profiles/<tên>`. | `ctdozlite --profile work --gui` |
+| `--print-data-dir` | Chuẩn bị và in thư mục dữ liệu rồi thoát, không mở giao diện hay kết nối mạng. | `ctdozlite --print-data-dir` |
+| `--gui` | Chạy chế độ giao diện đồ họa (mặc định nếu không truyền tham số). | `ctdozlite --gui` |
+| `--tui` | Chạy chế độ giao diện dòng lệnh trong terminal. | `ctdozlite --tui` |
+| `--qr` | Yêu cầu tạo mã QR đăng nhập ngay khi khởi động TUI. | `ctdozlite --tui --qr` |
+| `--dev` | Bật thanh công cụ Dev Inspector để xem log mạng và payload giải mã. | `ctdozlite --gui --dev` |
+| `--api-port <PORT>` | Mở Local HTTP REST API trên `127.0.0.1:<PORT>` (hoặc biến môi trường `CTDOZLITE_API_PORT`). | `ctdozlite --gui --api-port 8765` |
+| `--mcp` | Chạy máy chủ Model Context Protocol (JSON-RPC 2.0 trên stdio). | `ctdozlite --mcp` |
+| `--logout` | Xóa phiên đăng nhập hiện tại (`session.json`) rồi thoát. | `ctdozlite --logout` |
+| `--phone <SỐ>` | Điền sẵn số điện thoại khi thử đăng nhập bằng mật khẩu. | `ctdozlite --tui --phone 0912345678` |
+| `--pass <MK>` | Điền sẵn mật khẩu. | `ctdozlite --tui --phone 0912345678 --pass ...` |
+| `--dump` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phục vụ phân tích. | `ctdozlite --dump` |
+| `--version` / `-V` | In phiên bản rồi thoát mà không khởi tạo thư mục dữ liệu. | `ctdozlite --version` |
 
 ---
 
@@ -38,7 +42,7 @@ Vì vậy mở app từ menu ứng dụng hay từ terminal ở bất kỳ thư 
 ## 2. Giao diện đồ họa (GUI)
 
 ### 2.1. Đăng nhập
-1. Chạy `./target/release/zalo-rust --gui`.
+1. Chạy `./target/release/ctdozlite --gui`.
 2. Mở ứng dụng Zalo trên điện thoại, quét mã QR hiển thị trên màn hình và bấm **Đăng nhập**.
 3. Sau khi xác nhận, phiên làm việc được lưu vào `session.json`. Ở những lần mở tiếp theo, ứng dụng tự nạp lại phiên này mà không cần quét lại mã QR.
 
@@ -53,10 +57,17 @@ Vì vậy mở app từ menu ứng dụng hay từ terminal ở bất kỳ thư 
   - Tab **Tìm kiếm** tự động tìm nhãn dán ngay khi gõ từ khóa mà không cần bấm Enter.
   - Tab **Kho nhãn** cho phép duyệt và ghim các bộ nhãn dán từ máy chủ Zalo.
 - **Tương tác trên tin nhắn:**
-  - Nhấp chuột phải vào bong bóng tin nhắn để thả cảm xúc (reaction), trả lời trích dẫn, chuyển tiếp, sao chép nội dung, ghim, đánh dấu sao, thu hồi tin nhắn với mọi người hoặc xóa ở phía cá nhân.
-  - Hỗ trợ dán ảnh trực tiếp từ clipboard (`Ctrl+V` / `Cmd+V`) vào khung chat.
+  - Rê chuột lên bong bóng tin nhắn để dùng nhanh nút **Thả tim (`❤️`)**, **Trả lời**, **Chuyển tiếp** hoặc mở menu mở rộng (`...`).
+  - Nhấp chuột phải vào bong bóng tin nhắn để chọn đầy đủ cảm xúc (reaction), trả lời trích dẫn, chuyển tiếp, sao chép nội dung, ghim, đánh dấu sao, thu hồi tin nhắn với mọi người hoặc xóa ở phía cá nhân.
+  - Hỗ trợ dán ảnh trực tiếp từ clipboard (`Ctrl+V` / `Cmd+V`), xem trước tài liệu (PDF/DOCX/XLSX/PPTX/CSV), bình chọn nhóm (Group Polls) và mở trình duyệt ảnh toàn hội thoại (`ImageViewerModal`).
 
-### 2.3. Gọi thoại và gọi video 1-1
+### 2.3. Bảo mật PIN 4 số, Đa tài khoản, Khay hệ thống & Bộ nhớ
+- **Khóa ứng dụng (App Lock PIN4):** Bật trong **Cài đặt → Quyền riêng tư** (hoặc modal thiết lập nhanh), hỗ trợ khóa tức thì bằng phím tắt `Ctrl+L` / nút ổ khóa trên thanh tiêu đề, tự động khóa khi không tương tác hoặc ngủ máy, ẩn nội dung thông báo và cách ly cuộc gọi khi đang khóa.
+- **Quản lý bộ nhớ 3 tầng (Storage Manager):** Mở trong **Cài đặt → Lưu trữ** để xem dung lượng dữ liệu gốc, media, cache, dọn dẹp hoặc di chuyển thư mục lưu trữ.
+- **Đa tài khoản (Multi-Account Switcher):** Quản lý và chuyển đổi tức thì giữa các tài khoản đã đăng nhập mà không lẫn DB/cache.
+- **Thu gọn xuống khay hệ thống (Close-to-Tray):** Bật trong Cài đặt trên Windows (`#213`) hoặc Linux X11 (`#166`).
+
+### 2.4. Gọi thoại và gọi video 1-1
 - Trong cuộc trò chuyện cá nhân, bấm biểu tượng điện thoại hoặc máy quay ở góc phải thanh tiêu đề hội thoại để bắt đầu cuộc gọi.
 - Thiết bị thu âm (Mic) và máy ảnh (Camera) có thể chọn trực tiếp trong cửa sổ cuộc gọi hoặc tại mục **Cài đặt -> Cài đặt chung**.
 
@@ -66,7 +77,7 @@ Vì vậy mở app từ menu ứng dụng hay từ terminal ở bất kỳ thư 
 
 Khởi chạy:
 ```bash
-./target/release/zalo-rust --tui --qr
+./target/release/ctdozlite --tui --qr
 ```
 
 | Phím tắt | Chức năng |

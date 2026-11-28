@@ -14,6 +14,7 @@ accounts/*_threads.json
 threads_cache.json
 threads_cache*.json
 app_settings.json
+app_lock.json
 theme.json
 custom_stickers.json
 autoreply_rules.json

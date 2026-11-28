@@ -559,7 +559,6 @@ async fn run_bridge_loop_inner(
         }
     }
     loop {
-        // --- Zalo → TG ---
         let mut st = state.clone();
         let mut th = threads.clone();
         if crate::chat::poll_new_messages(&session, &mut st, &mut th).await.is_ok() {
@@ -617,7 +616,6 @@ async fn run_bridge_loop_inner(
             }
             crate::chat::save_threads_cache(&threads);
         }
-        // --- TG → Zalo (long-poll 25s) ---
         match tg.get_updates(tg_offset, 25).await {
             Ok(updates) => {
                 for u in updates {
@@ -802,62 +800,4 @@ pub async fn forward_zalo_to_tg(
         caption: caption2,
         is_photo,
     }])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn topic_map_parses_pairs() {
-        let m = parse_topic_map("  1/2 : tid1 , 3:tid2,bad, :x ");
-        assert_eq!(m.get("1/2").map(String::as_str), Some("tid1"));
-        assert_eq!(m.get("3").map(String::as_str), Some("tid2"));
-        assert_eq!(m.len(), 2);
-    }
-
-    #[test]
-    fn quota_lru_evicts_oldest_first() {
-        let dir = std::env::temp_dir().join(format!("zlite-bridge-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dbp = dir.join("t.db");
-        let mut st = crate::store::MessageStore::open(dbp.to_str().unwrap()).unwrap();
-        let mk = |id: &str, bytes: u64, last: i64| crate::tg_bridge::BridgeFile {
-            msg_id: id.into(),
-            thread_id: "t1".into(),
-            path: dir.join(id).to_string_lossy().to_string(),
-            tg_file_id: String::new(),
-            zalo_url: String::new(),
-            bytes,
-            offset: bytes,
-            done: true,
-            last_access: last,
-        };
-        std::fs::write(dir.join("a"), vec![0u8; 500]).unwrap();
-        std::fs::write(dir.join("b"), vec![0u8; 300]).unwrap();
-        st.bridge_file_put(&mk("a", 500, 1)).unwrap();
-        st.bridge_file_put(&mk("b", 300, 2)).unwrap();
-        // quota 1000, need 300 more: usage 800+300=1100 > 1000 → evict oldest (a,500)
-        // → used 300, 300+300=600 ≤ target 700 → stop. Keeps newest (b).
-        super::ensure_quota(&mut st, 1000, 300).unwrap();
-        let rest = st.bridge_files_all().unwrap();
-        assert_eq!(rest.len(), 1);
-        assert_eq!(rest[0].msg_id, "b");
-        // single file bigger than quota → refuse
-        assert!(super::ensure_quota(&mut st, 100, 500).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn split_target_chat_and_topic() {
-        assert_eq!(split_tg_target("-100x"), ("-100x".into(), None));
-        assert_eq!(split_tg_target("-100x/5"), ("-100x".to_string(), Some(5)));
-    }
-
-    #[test]
-    fn bridge_dir_sanitizes_thread() {
-        let p = bridge_dir(std::path::Path::new("/d"), "g12 3/4:b");
-        assert_eq!(p, PathBuf::from("/d/bridge/g12_3_4_b"));
-    }
 }

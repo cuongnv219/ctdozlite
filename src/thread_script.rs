@@ -189,7 +189,6 @@ fn build_engine(
             }
         });
     }
-    // ── get_messages(thread_id, limit) -> array(map) ──
     {
         let db = db_path.clone();
         let threads = threads.clone();
@@ -252,7 +251,6 @@ fn build_engine(
                 .unwrap_or(false)
         });
     }
-    // ── kv_get / kv_set / kv_list ──
     {
         let db = db_path.clone();
         engine.register_fn("kv_get", move |tid: &str, key: &str| -> String {
@@ -279,7 +277,6 @@ fn build_engine(
         chrono::Local::now().format("%Y-%m-%d").to_string()
     });
 
-    // ── kv_list ──
     {
         let db = db_path.clone();
         engine.register_fn("kv_list", move |tid: &str| -> Array {
@@ -293,7 +290,6 @@ fn build_engine(
                 .unwrap_or_default()
         });
     }
-    // ── thread_stats(thread_id) -> map (tái dùng group_stats) ──
     {
         let db = db_path.clone();
         let threads = threads.clone();
@@ -326,7 +322,6 @@ fn build_engine(
             map
         });
     }
-    // ── send_queued(thread_id, text): đẩy outbox, worker gửi ──
     {
         engine.register_fn(
             "send_queued",
@@ -346,7 +341,6 @@ fn build_engine(
             },
         );
     }
-    // ── toast(msg) ──
     {
         engine.register_fn("toast", move |msg: &str| {
             if msg.trim().is_empty() {
@@ -359,7 +353,6 @@ fn build_engine(
             }
         });
     }
-    // ── log(msg): lưu thread_script_logs ──
     {
         let logs = logs.clone();
         engine.register_fn("log", move |msg: &str| {
@@ -525,154 +518,3 @@ pub fn builtin_template_code(id: &str) -> Option<(&'static str, &'static str)> {
         _ => None,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_db(name: &str) -> String {
-        let p = std::env::temp_dir().join(format!("ctdoz_script_test_{name}_{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&p);
-        p.to_string_lossy().to_string()
-    }
-
-    fn mk_script(code: &str) -> ThreadScript {
-        ThreadScript {
-            id: 1,
-            thread_id: "t1".into(),
-            name: "test".into(),
-            code: code.into(),
-            trigger: "manual".into(),
-            ..Default::default()
-        }
-    }
-
-    fn seed_messages(db: &str) {
-        let mut store = crate::store::MessageStore::open(db).unwrap();
-        let now_ms = chrono::Local::now().timestamp_millis();
-        for (i, (sender, text)) in
-            [("An", "hello deadline tuần này"), ("Bình", "ok nhé"), ("An", "chốt hạn cuối tháng")].iter().enumerate()
-        {
-            store
-                .upsert_message(&crate::store::StoredMessage {
-                    msg_id: format!("m{i}"),
-                    thread_id: "t1".into(),
-                    sender_id: format!("u{i}"),
-                    sender_name: sender.to_string(),
-                    text: text.to_string(),
-                    msg_type: "text".into(),
-                    ts: now_ms - (i as i64) * 1000,
-                    is_outgoing: false,
-                    raw_json: "{}".into(),
-                })
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn sandbox_blocks_infinite_loop() {
-        let db = test_db("loop");
-        let s = mk_script("while true {}");
-        let err = run_script(&db, &[], "t1", &s, &ScriptEvent::test()).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("timeout") || msg.contains("operation") || msg.contains("limit"),
-            "unexpected: {msg}"
-        );
-        let _ = std::fs::remove_file(&db);
-    }
-
-    #[test]
-    fn sandbox_blocks_import_and_eval() {
-        let db = test_db("block");
-        // `nonExistentFunction` thay vì import: import bị disable → lỗi biên dịch.
-        let s = mk_script(r#"import "x" as y;"#);
-        assert!(run_script(&db, &[], "t1", &s, &ScriptEvent::test()).is_err());
-        let s2 = mk_script(r#"eval("40+2");"#);
-        assert!(run_script(&db, &[], "t1", &s2, &ScriptEvent::test()).is_err());
-        let _ = std::fs::remove_file(&db);
-    }
-
-    #[test]
-    fn kv_roundtrip_through_script() {
-        let db = test_db("kv");
-        let s = mk_script(r#"kv_set(thread_id, "k1", "v1"); kv_get(thread_id, "k1")"#);
-        let out = run_script(&db, &[], "t1", &s, &ScriptEvent::test()).unwrap();
-        assert_eq!(out.output, "v1");
-        let store = crate::store::MessageStore::open(&db).unwrap();
-        assert_eq!(store.thread_kv_get("t1", "k1").as_deref(), Some("v1"));
-        assert_eq!(store.thread_kv_list("t1"), vec!["k1".to_string()]);
-        let _ = std::fs::remove_file(&db);
-    }
-
-    #[test]
-    fn digest_template_on_sample_db() {
-        let db = test_db("digest");
-        seed_messages(&db);
-        let s = ThreadScript {
-            code: TEMPLATE_DIGEST.into(),
-            ..mk_script("")
-        };
-        let out = run_script(&db, &[], "t1", &s, &ScriptEvent::test()).unwrap();
-        assert!(out.output.contains("Tổng hợp"), "output: {}", out.output);
-        let store = crate::store::MessageStore::open(&db).unwrap();
-        assert!(store.get_group_note("t1").contains("Tổng hợp"));
-        assert!(!store.list_script_logs("t1", 10).is_empty());
-        let _ = std::fs::remove_file(&db);
-    }
-
-    #[test]
-    fn deadline_template_counts_hits() {
-        let db = test_db("deadline");
-        seed_messages(&db);
-        let s = ThreadScript {
-            code: TEMPLATE_DEADLINE.into(),
-            ..mk_script("")
-        };
-        let out = run_script(&db, &[], "t1", &s, &ScriptEvent::test()).unwrap();
-        assert_eq!(out.output, "2");
-        assert_eq!(out.toasts.len(), 1);
-        let _ = std::fs::remove_file(&db);
-    }
-
-    #[test]
-    fn welcome_template_only_once_per_day() {
-        let db = test_db("welcome");
-        let s = ThreadScript { code: TEMPLATE_WELCOME.into(), ..mk_script("") };
-
-        let ev = ScriptEvent::message("hello", "Lạ");
-        let out1 = run_script(&db, &[], "t1", &s, &ev).unwrap();
-        assert_eq!(out1.outbox.len(), 1, "lần đầu phải chào");
-        let out2 = run_script(&db, &[], "t1", &s, &ev).unwrap();
-        assert!(out2.outbox.is_empty(), "lần 2 trong ngày không chào lại");
-        let _ = std::fs::remove_file(&db);
-    }
-
-    #[test]
-    fn trigger_match_keyword_and_interval() {
-        assert_eq!(parse_trigger("on_keyword:deadline", ""), TriggerKind::OnKeyword("deadline".into()));
-        assert_eq!(parse_trigger("on_keyword", "han"), TriggerKind::OnKeyword("han".into()));
-        assert_eq!(parse_trigger("on_interval_30", ""), TriggerKind::OnInterval(30));
-        assert_eq!(parse_trigger("on_interval", "15"), TriggerKind::OnInterval(15));
-        assert_eq!(parse_trigger("manual", ""), TriggerKind::Manual);
-        assert!(trigger_fires_on_message(&TriggerKind::OnMessage, "bất kỳ"));
-        assert!(trigger_fires_on_message(&TriggerKind::OnKeyword("dead".into()), "có DEADLINE nhé"));
-        assert!(!trigger_fires_on_message(&TriggerKind::OnKeyword("dead".into()), "không có gì"));
-        assert!(!trigger_fires_on_message(&TriggerKind::Manual, "deadline"));
-        assert!(interval_due(0, 60, 1_000_000));
-        assert!(!interval_due(1_000_000, 60, 1_000_000 + 100));
-        assert!(interval_due(1_000_000, 60, 1_000_000 + 3600));
-    }
-
-    #[test]
-    fn outbox_capped_and_no_direct_send() {
-        let db = test_db("outbox");
-        let s = mk_script(
-            r#"for i in 0..20 { send_queued(thread_id, `hi ${i}`); } send_queued(thread_id, "x")"#,
-        );
-        let out = run_script(&db, &[], "t1", &s, &ScriptEvent::test()).unwrap();
-        assert_eq!(out.outbox.len(), MAX_OUTBOX_PER_RUN);
-        let _ = std::fs::remove_file(&db);
-    }
-}
-

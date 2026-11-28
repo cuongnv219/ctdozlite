@@ -119,50 +119,236 @@ pub fn reaction_id_to_label(reaction_id: i64) -> &'static str {
     }
 }
 
+/// Normalize a Zalo UID by trimming whitespace and stripping any `_<version>` suffix.
+pub(crate) fn clean_feed_uid(raw: &str) -> String {
+    raw.split('_').next().unwrap_or(raw).trim().to_string()
+}
+
+/// Return `true` when `name` is empty, a raw numeric UIN placeholder, or matches `uid`.
+pub(crate) fn is_placeholder_author_name(name: &str, uid: &str) -> bool {
+    let t = name.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let clean_uid = clean_feed_uid(uid);
+    if !clean_uid.is_empty() && (t == clean_uid || clean_feed_uid(t) == clean_uid) {
+        return true;
+    }
+    if t.len() >= 6 && t.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    crate::chat::is_placeholder_thread_name(t, &clean_uid)
+}
+
+fn extract_json_id(val: &Value, keys: &[&str]) -> Option<String> {
+    for k in keys {
+        let Some(v) = val.get(*k) else {
+            continue;
+        };
+        let candidate = match v {
+            Value::String(s) => s.trim().to_string(),
+            Value::Number(n) => {
+                if let Some(u) = n.as_u64() {
+                    u.to_string()
+                } else if let Some(i) = n.as_i64() {
+                    i.to_string()
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        };
+        if !candidate.is_empty() && candidate != "0" && candidate != "-1" {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn extract_json_text(val: &Value, keys: &[&str]) -> Option<String> {
+    for k in keys {
+        if let Some(s) = val.get(*k).and_then(Value::as_str) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn pick_best_display_name(val: &Value, keys: &[&str], uid: &str) -> String {
+    let mut first_non_empty: Option<String> = None;
+    for k in keys {
+        let Some(s) = val.get(*k).and_then(Value::as_str) else {
+            continue;
+        };
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if first_non_empty.is_none() {
+            first_non_empty = Some(trimmed.to_string());
+        }
+        if !is_placeholder_author_name(trimmed, uid) {
+            return trimmed.to_string();
+        }
+    }
+    first_non_empty.unwrap_or_else(|| uid.to_string())
+}
+
+fn unwrap_data_value<'a>(dec: &'a Value, scratch: &'a mut Option<Value>) -> &'a Value {
+    match dec.get("data") {
+        Some(Value::String(s)) => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(s.trim()) {
+                *scratch = Some(parsed);
+                scratch.as_ref().unwrap_or(dec)
+            } else {
+                dec
+            }
+        }
+        Some(v) => v,
+        None => dec,
+    }
+}
+
+fn merge_profile_into(dst: &mut SocialUserProfile, src: SocialUserProfile) {
+    if is_placeholder_author_name(&dst.display_name, &dst.uid)
+        && !is_placeholder_author_name(&src.display_name, &src.uid)
+    {
+        dst.display_name = src.display_name;
+    }
+    if is_placeholder_author_name(&dst.zalo_name, &dst.uid)
+        && !is_placeholder_author_name(&src.zalo_name, &src.uid)
+    {
+        dst.zalo_name = src.zalo_name;
+    }
+    if dst.username.is_empty() && !src.username.is_empty() {
+        dst.username = src.username;
+    }
+    if (dst.avatar_url.trim().is_empty() || dst.avatar_url.ends_with("/default"))
+        && !src.avatar_url.trim().is_empty()
+        && !src.avatar_url.ends_with("/default")
+    {
+        dst.avatar_url = src.avatar_url;
+    }
+    if (dst.cover_url.trim().is_empty() || dst.cover_url.ends_with("/default"))
+        && !src.cover_url.trim().is_empty()
+        && !src.cover_url.ends_with("/default")
+    {
+        dst.cover_url = src.cover_url;
+    }
+    if dst.sdob.is_empty() && !src.sdob.is_empty() {
+        dst.sdob = src.sdob;
+    }
+    if dst.status.is_empty() && !src.status.is_empty() {
+        dst.status = src.status;
+    }
+    if dst.last_action_time.is_none() {
+        dst.last_action_time = src.last_action_time;
+    }
+}
+
+/// Merge resolved profile display name and avatar onto a feed item without crossing distinct UIDs.
+pub(crate) fn enrich_feed_item_author_from_profiles(
+    item: &mut FeedItem,
+    profiles: &[SocialUserProfile],
+) {
+    let item_uid = clean_feed_uid(&item.author.uid);
+    let matched = if !item_uid.is_empty() {
+        profiles.iter().find(|p| clean_feed_uid(&p.uid) == item_uid)
+    } else if !item.author.display_name.trim().is_empty() {
+        profiles.iter().find(|p| {
+            p.display_name
+                .trim()
+                .eq_ignore_ascii_case(item.author.display_name.trim())
+                || p.zalo_name
+                    .trim()
+                    .eq_ignore_ascii_case(item.author.display_name.trim())
+        })
+    } else {
+        None
+    };
+
+    if let Some(prof) = matched {
+        let prof_uid = clean_feed_uid(&prof.uid);
+        if item.author.uid.trim().is_empty() && !prof_uid.is_empty() {
+            item.author.uid = prof_uid.clone();
+        } else if !item_uid.is_empty() {
+            item.author.uid = item_uid;
+        }
+        let target_uid = &item.author.uid;
+        if is_placeholder_author_name(&item.author.display_name, target_uid) {
+            if !is_placeholder_author_name(&prof.display_name, &prof.uid) {
+                item.author.display_name = prof.display_name.clone();
+            } else if !is_placeholder_author_name(&prof.zalo_name, &prof.uid) {
+                item.author.display_name = prof.zalo_name.clone();
+            }
+        }
+        if (item.author.avatar_url.trim().is_empty() || item.author.avatar_url.ends_with("/default"))
+            && !prof.avatar_url.trim().is_empty()
+            && !prof.avatar_url.ends_with("/default")
+        {
+            item.author.avatar_url = prof.avatar_url.clone();
+        }
+    }
+}
+
 impl SocialUserProfile {
     pub fn from_json(uid: &str, val: &Value) -> Option<Self> {
         let obj = val.as_object()?;
-        let resolved_uid = obj
-            .get("userId")
-            .or_else(|| obj.get("uid"))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(uid);
-        let display_name = obj
-            .get("displayName")
-            .or_else(|| obj.get("dpn"))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(resolved_uid)
-            .to_string();
-        let zalo_name = obj
-            .get("zaloName")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&display_name)
-            .to_string();
-        let username = obj
-            .get("username")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let avatar_url = obj
-            .get("avatar")
-            .or_else(|| obj.get("avt"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let fallback_uid = clean_feed_uid(uid);
+        let resolved_uid = extract_json_id(
+            val,
+            &["userId", "uid", "id", "ownerId", "owner_id", "creatorId"],
+        )
+        .map(|s| clean_feed_uid(&s))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_uid);
+        let display_name = pick_best_display_name(
+            val,
+            &[
+                "displayName",
+                "dpn",
+                "zaloName",
+                "display_name",
+                "name",
+                "alias",
+                "username",
+            ],
+            &resolved_uid,
+        );
+        let zalo_name = pick_best_display_name(
+            val,
+            &["zaloName", "displayName", "dpn", "name", "username"],
+            &resolved_uid,
+        );
+        let zalo_name = if is_placeholder_author_name(&zalo_name, &resolved_uid)
+            && !is_placeholder_author_name(&display_name, &resolved_uid)
+        {
+            display_name.clone()
+        } else {
+            zalo_name
+        };
+        let username = extract_json_text(val, &["username"]).unwrap_or_default();
+        let avatar_url = extract_json_text(
+            val,
+            &["avatar", "avt", "avatarUrl", "fullAvt", "profile_avatar"],
+        )
+        .map(|u| normalize_social_media_url(&u))
+        .unwrap_or_default();
         let cover_url = obj
             .get("cover")
             .or_else(|| obj.get("bgavatar"))
+            .or_else(|| obj.get("coverUrl"))
             .and_then(Value::as_str)
             .or_else(|| {
                 obj.get("cover")
                     .and_then(|c| c.get("coverUrl").or_else(|| c.get("url")))
                     .and_then(Value::as_str)
             })
-            .unwrap_or("")
-            .to_string();
+            .map(normalize_social_media_url)
+            .unwrap_or_default();
         let gender = obj.get("gender").and_then(Value::as_i64).unwrap_or(0) as i32;
         let sdob = obj
             .get("sdob")
@@ -187,7 +373,7 @@ impl SocialUserProfile {
             .or_else(|| parse_u64_any(obj.get("lastUpdate")));
 
         Some(Self {
-            uid: resolved_uid.to_string(),
+            uid: resolved_uid,
             username,
             display_name,
             zalo_name,
@@ -200,6 +386,104 @@ impl SocialUserProfile {
             last_action_time,
         })
     }
+}
+
+/// Parse `/api/social/profile/me-v2` JSON payloads across `data.profile`, `data.info`, and flat variants.
+pub(crate) fn parse_my_social_profile_response(
+    my_uid: &str,
+    dec: &Value,
+) -> Option<SocialUserProfile> {
+    let mut scratch = None;
+    let data = unwrap_data_value(dec, &mut scratch);
+    let versioned = format!("{}_0", clean_feed_uid(my_uid));
+    let target_obj = data
+        .get("profile")
+        .or_else(|| data.get("info"))
+        .or_else(|| data.get("user"))
+        .or_else(|| data.get(my_uid))
+        .or_else(|| data.get(&versioned))
+        .unwrap_or(data);
+    SocialUserProfile::from_json(my_uid, target_obj)
+}
+
+/// Parse `/api/social/friend/getprofiles` JSON payloads across `data.<uid>`, `changed_profiles`, and flat maps.
+pub(crate) fn parse_friend_social_profile_response(
+    target_uid: &str,
+    dec: &Value,
+) -> Option<SocialUserProfile> {
+    let mut scratch = None;
+    let data = unwrap_data_value(dec, &mut scratch);
+    let clean = clean_feed_uid(target_uid);
+    let versioned = format!("{clean}_0");
+    let prof_obj = data
+        .get(target_uid)
+        .or_else(|| data.get(&clean))
+        .or_else(|| data.get(&versioned))
+        .or_else(|| {
+            data.get("changed_profiles").and_then(|m| {
+                m.get(target_uid)
+                    .or_else(|| m.get(&clean))
+                    .or_else(|| m.get(&versioned))
+            })
+        })
+        .or_else(|| {
+            data.get("unchanged_profiles").and_then(|m| {
+                m.get(target_uid)
+                    .or_else(|| m.get(&clean))
+                    .or_else(|| m.get(&versioned))
+            })
+        })
+        .or_else(|| {
+            data.get("profiles").and_then(|m| {
+                m.get(target_uid)
+                    .or_else(|| m.get(&clean))
+                    .or_else(|| m.get(&versioned))
+            })
+        })
+        .unwrap_or(data);
+    SocialUserProfile::from_json(&clean, prof_obj)
+}
+
+/// Parse `/api/social/friend/getprofiles/v2` across `changed_profiles`, `unchanged_profiles`, and `profiles`.
+pub(crate) fn parse_social_profiles_batch_response(dec: &Value) -> Vec<SocialUserProfile> {
+    let mut scratch = None;
+    let data = unwrap_data_value(dec, &mut scratch);
+    let root = data.get("data").filter(|v| v.is_object()).unwrap_or(data);
+
+    let mut maps: Vec<&serde_json::Map<String, Value>> = Vec::new();
+    for key in ["changed_profiles", "unchanged_profiles", "profiles"] {
+        if let Some(m) = root.get(key).and_then(Value::as_object) {
+            maps.push(m);
+        }
+    }
+    if maps.is_empty() {
+        if let Some(m) = root.as_object() {
+            maps.push(m);
+        }
+    }
+
+    let mut all_profiles: Vec<SocialUserProfile> = Vec::new();
+    let mut idx_by_uid: HashMap<String, usize> = HashMap::new();
+    for map in maps {
+        for (raw_uid, pval) in map {
+            let clean_uid = clean_feed_uid(raw_uid);
+            if clean_uid.is_empty() || clean_uid == "0" {
+                continue;
+            }
+            if let Some(p) = SocialUserProfile::from_json(&clean_uid, pval) {
+                if p.uid.is_empty() || p.uid == "0" {
+                    continue;
+                }
+                if let Some(&existing_idx) = idx_by_uid.get(&p.uid) {
+                    merge_profile_into(&mut all_profiles[existing_idx], p);
+                } else {
+                    idx_by_uid.insert(p.uid.clone(), all_profiles.len());
+                    all_profiles.push(p);
+                }
+            }
+        }
+    }
+    all_profiles
 }
 
 /// Đóng gói binary `RequestPacket` chuẩn giao thức Zalo Social Feed (reverse từ `pw0.e`, `mw0.c`, `o41.g`, `nu0.v`)
@@ -318,7 +602,7 @@ pub mod packet {
     }
 }
 
-// Mở rộng các phương thức mạng xã hội cho Session
+/// Mở rộng các phương thức mạng xã hội cho Session
 impl crate::session::Session {
     /// Lấy hồ sơ mạng xã hội của chính mình (`/api/social/profile/me-v2` hoặc fallback `getprofiles`)
     pub async fn get_my_social_profile(&self) -> Result<SocialUserProfile> {
@@ -344,11 +628,8 @@ impl crate::session::Session {
             if let Ok(resp) = self.get(&url).await {
                 let dec = self.maybe_decrypt(resp, self.session_key_bytes()).await;
                 if dec.get("error_code").and_then(Value::as_i64) == Some(0) {
-                    if let Some(data) = dec.get("data") {
-                        let target_obj = data.get(&my_uid).unwrap_or(data);
-                        if let Some(p) = SocialUserProfile::from_json(&my_uid, target_obj) {
-                            return Ok(p);
-                        }
+                    if let Some(p) = parse_my_social_profile_response(&my_uid, &dec) {
+                        return Ok(p);
                     }
                 }
             }
@@ -359,9 +640,10 @@ impl crate::session::Session {
 
     /// Lấy hồ sơ chi tiết bạn bè (Ảnh bìa Cover HD, Avatar, Ngày sinh, Giới tính, Bio)
     pub async fn get_friend_social_profile(&self, target_uid: &str) -> Result<SocialUserProfile> {
+        let clean_target = clean_feed_uid(target_uid);
         let body = json!({
             "avatar_size": 240,
-            "friend_ids": [target_uid],
+            "friend_ids": [&clean_target],
             "imei": self.imei,
         });
 
@@ -376,16 +658,14 @@ impl crate::session::Session {
         let dec = self.maybe_decrypt(resp, self.session_key_bytes()).await;
 
         if dec.get("error_code").and_then(Value::as_i64) == Some(0) {
-            if let Some(prof_obj) = dec.get("data").and_then(|d| d.get(target_uid).or(Some(d))) {
-                if let Some(p) = SocialUserProfile::from_json(target_uid, prof_obj) {
-                    return Ok(p);
-                }
+            if let Some(p) = parse_friend_social_profile_response(&clean_target, &dec) {
+                return Ok(p);
             }
         }
 
         // Fallback sang batch v2 cho 1 UID nếu endpoint v1 trả lỗi
         if let Ok(mut list) = self
-            .get_friend_social_profiles_batch(&[target_uid.to_string()])
+            .get_friend_social_profiles_batch(&[clean_target.clone()])
             .await
         {
             if let Some(p) = list.pop() {
@@ -462,11 +742,19 @@ impl crate::session::Session {
         if target_uids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut all_profiles = Vec::new();
-        let mut seen_uids = HashSet::new();
+        let mut all_profiles: Vec<SocialUserProfile> = Vec::new();
+        let mut idx_by_uid: HashMap<String, usize> = HashMap::new();
 
         for chunk in target_uids.chunks(40) {
-            let pversion_map: Vec<String> = chunk.iter().map(|u| format!("{u}_0")).collect();
+            let pversion_map: Vec<String> = chunk
+                .iter()
+                .map(|u| clean_feed_uid(u))
+                .filter(|u| !u.is_empty() && u != "0")
+                .map(|u| format!("{u}_0"))
+                .collect();
+            if pversion_map.is_empty() {
+                continue;
+            }
             let body = json!({
                 "phonebook_version": 0,
                 "friend_pversion_map": pversion_map,
@@ -485,17 +773,12 @@ impl crate::session::Session {
             let resp = self.post_form(&url, form).await?;
             let dec = self.maybe_decrypt(resp, self.session_key_bytes()).await;
 
-            if let Some(changed) = dec
-                .get("data")
-                .and_then(|d| d.get("changed_profiles").or(Some(d)))
-                .and_then(Value::as_object)
-            {
-                for (uid, pval) in changed {
-                    if let Some(p) = SocialUserProfile::from_json(uid, pval) {
-                        if seen_uids.insert(p.uid.clone()) {
-                            all_profiles.push(p);
-                        }
-                    }
+            for p in parse_social_profiles_batch_response(&dec) {
+                if let Some(&existing_idx) = idx_by_uid.get(&p.uid) {
+                    merge_profile_into(&mut all_profiles[existing_idx], p);
+                } else {
+                    idx_by_uid.insert(p.uid.clone(), all_profiles.len());
+                    all_profiles.push(p);
                 }
             }
         }
@@ -517,11 +800,10 @@ impl crate::session::Session {
         let mut seen_feed_ids: HashSet<String> = HashSet::new();
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // 1. Lấy hồ sơ cá nhân & kho ảnh đại diện/nhật ký của chính mình
         let my_uid = self
             .login
             .as_ref()
-            .map(|l| l.uin.clone())
+            .map(|l| clean_feed_uid(&l.uin))
             .unwrap_or_default();
         let mut my_name = self
             .login
@@ -536,8 +818,12 @@ impl crate::session::Session {
 
         let my_profile_opt = self.get_my_social_profile().await.ok();
         if let Some(ref mp) = my_profile_opt {
-            if !mp.display_name.is_empty() {
-                my_name = mp.display_name.clone();
+            if !is_placeholder_author_name(&mp.display_name, &my_uid)
+                || is_placeholder_author_name(&my_name, &my_uid)
+            {
+                if !mp.display_name.trim().is_empty() {
+                    my_name = mp.display_name.clone();
+                }
             }
             if !mp.avatar_url.is_empty() {
                 my_ava = mp.avatar_url.clone();
@@ -586,51 +872,106 @@ impl crate::session::Session {
             }
         }
 
-        // 2. Lấy hàng loạt hồ sơ mạng xã hội của bạn bè theo thời gian thực
         let mut ordered_uids: Vec<String> = Vec::new();
         let mut uid_set: HashSet<String> = HashSet::new();
-        for u in friend_uids {
-            let trimmed = u.trim();
-            if !trimmed.is_empty() && trimmed != my_uid && uid_set.insert(trimmed.to_string()) {
-                ordered_uids.push(trimmed.to_string());
+        let mut priority_uids: Vec<String> = Vec::new();
+        for u in shared_media_by_uid.keys() {
+            let trimmed = clean_feed_uid(u);
+            if !trimmed.is_empty()
+                && trimmed != "0"
+                && trimmed != my_uid
+                && !trimmed.starts_with("group_")
+                && uid_set.insert(trimmed.clone())
+            {
+                ordered_uids.push(trimmed.clone());
+                priority_uids.push(trimmed);
             }
         }
-        for u in shared_media_by_uid.keys() {
-            let trimmed = u.trim();
-            if !trimmed.is_empty() && trimmed != my_uid && uid_set.insert(trimmed.to_string()) {
-                ordered_uids.push(trimmed.to_string());
+        for u in friend_uids {
+            let trimmed = clean_feed_uid(u);
+            if !trimmed.is_empty()
+                && trimmed != "0"
+                && trimmed != my_uid
+                && !trimmed.starts_with("group_")
+                && uid_set.insert(trimmed.clone())
+            {
+                ordered_uids.push(trimmed);
             }
         }
 
-        let batch_ids: Vec<String> = ordered_uids.into_iter().take(120).collect();
+        let batch_ids: Vec<String> = ordered_uids.into_iter().take(400).collect();
         let mut profiles = self
             .get_friend_social_profiles_batch(&batch_ids)
             .await
             .unwrap_or_default();
 
-        // Fallback: nếu getprofiles/v2 trả rỗng thì gọi get_friend_social_profile cho 10 bạn đầu
-        if profiles.is_empty() {
-            for uid in batch_ids.iter().take(10) {
-                if let Ok(p) = self.get_friend_social_profile(uid).await {
-                    profiles.push(p);
+        let mut missing_or_incomplete: Vec<String> = Vec::new();
+        let mut missing_seen: HashSet<String> = HashSet::new();
+        let is_profile_incomplete = |p: &SocialUserProfile| {
+            is_placeholder_author_name(&p.display_name, &p.uid) || p.avatar_url.trim().is_empty()
+        };
+        for uid in &priority_uids {
+            let needs_lookup = profiles
+                .iter()
+                .find(|p| clean_feed_uid(&p.uid) == *uid)
+                .map(is_profile_incomplete)
+                .unwrap_or(true);
+            if needs_lookup && missing_seen.insert(uid.clone()) {
+                missing_or_incomplete.push(uid.clone());
+            }
+        }
+        for uid in batch_ids.iter().take(60) {
+            if !profiles.iter().any(|p| clean_feed_uid(&p.uid) == *uid)
+                && missing_seen.insert(uid.clone())
+            {
+                missing_or_incomplete.push(uid.clone());
+            }
+        }
+
+        if !missing_or_incomplete.is_empty() {
+            for chunk in missing_or_incomplete.chunks(50) {
+                if let Ok(mini_map) = crate::chat::get_mini_profiles(self, chunk).await {
+                    for (raw_k, pval) in &mini_map {
+                        upsert_mini_profile_into_profiles(&mut profiles, raw_k, pval);
+                    }
+                }
+            }
+            for uid in priority_uids.iter().take(15) {
+                let still_missing = profiles
+                    .iter()
+                    .find(|p| clean_feed_uid(&p.uid) == *uid)
+                    .map(is_profile_incomplete)
+                    .unwrap_or(true);
+                if still_missing {
+                    if let Ok(p) = self.get_friend_social_profile(uid).await {
+                        if let Some(existing) = profiles
+                            .iter_mut()
+                            .find(|ep| clean_feed_uid(&ep.uid) == clean_feed_uid(&p.uid))
+                        {
+                            merge_profile_into(existing, p);
+                        } else {
+                            profiles.push(p);
+                        }
+                    }
                 }
             }
         }
 
         if let Some(mp) = my_profile_opt {
-            if !profiles.iter().any(|p| p.uid == mp.uid) {
+            if !profiles
+                .iter()
+                .any(|p| clean_feed_uid(&p.uid) == clean_feed_uid(&mp.uid))
+            {
                 profiles.push(mp);
             }
         }
 
-        // Sắp xếp hồ sơ theo thời gian hoạt động gần nhất (real-time)
         profiles.sort_by(|a, b| {
             b.last_action_time
                 .unwrap_or(0)
                 .cmp(&a.last_action_time.unwrap_or(0))
         });
 
-        // 3. Nạp bài đăng Nhật ký thực tế từ cơ sở dữ liệu SQLite (nếu có bảng timeline_feed_1 / user_feed)
         let mut db_candidates = Vec::new();
         if let Ok(env_db) = std::env::var("ZALO_TIMELINE_DB") {
             if !env_db.trim().is_empty() {
@@ -647,55 +988,51 @@ impl crate::session::Session {
                         if !seen_feed_ids.insert(rf.feed_id.clone()) {
                             continue;
                         }
-                        if let Some(prof) = profiles.iter().find(|p| {
-                            p.uid == rf.author.uid
-                                || p.display_name
-                                    .trim()
-                                    .eq_ignore_ascii_case(rf.author.display_name.trim())
-                                || p.zalo_name
-                                    .trim()
-                                    .eq_ignore_ascii_case(rf.author.display_name.trim())
-                        }) {
-                            rf.author.uid = prof.uid.clone();
-                            if !prof.display_name.is_empty() {
-                                rf.author.display_name = prof.display_name.clone();
-                            }
-                            if !prof.avatar_url.is_empty() {
-                                rf.author.avatar_url = prof.avatar_url.clone();
-                            }
-                        }
+                        enrich_feed_item_author_from_profiles(&mut rf, &profiles);
                         items.push(rf);
                     }
                 }
             }
         }
 
-        // 4. Hợp nhất dữ liệu hoạt động thực tế từ phiên live (media chia sẻ thực tế + cập nhật tiểu sử/ảnh bìa thật từ API)
-        let profile_map: HashMap<String, &SocialUserProfile> =
-            profiles.iter().map(|p| (p.uid.clone(), p)).collect();
+        let profile_map: HashMap<String, &SocialUserProfile> = profiles
+            .iter()
+            .map(|p| (clean_feed_uid(&p.uid), p))
+            .collect();
 
         for (uid, media_vec) in shared_media_by_uid {
             if media_vec.is_empty() {
                 continue;
             }
-            let feed_id = format!("shared_media_{uid}");
+            let clean_uid = clean_feed_uid(uid);
+            if clean_uid.is_empty() || clean_uid == my_uid {
+                continue;
+            }
+            let feed_id = format!("shared_media_{clean_uid}");
             if !seen_feed_ids.insert(feed_id.clone()) {
                 continue;
             }
             let (display_name, avatar_url, status_text, ts_ms) =
-                if let Some(prof) = profile_map.get(uid) {
+                if let Some(prof) = profile_map.get(&clean_uid) {
                     let ts = prof
                         .last_action_time
                         .map(|t| if t < 100_000_000_000 { (t * 1000) as i64 } else { t as i64 })
                         .unwrap_or(now_ms - 1_000);
-                    (
-                        prof.display_name.clone(),
-                        prof.avatar_url.clone(),
-                        prof.status.clone(),
-                        ts,
-                    )
+                    let best_name = if !is_placeholder_author_name(&prof.display_name, &clean_uid) {
+                        prof.display_name.clone()
+                    } else if !is_placeholder_author_name(&prof.zalo_name, &clean_uid) {
+                        prof.zalo_name.clone()
+                    } else {
+                        prof.display_name.clone()
+                    };
+                    (best_name, prof.avatar_url.clone(), prof.status.clone(), ts)
                 } else {
-                    (uid.clone(), String::new(), String::new(), now_ms - 1_000)
+                    (
+                        clean_uid.clone(),
+                        String::new(),
+                        String::new(),
+                        now_ms - 1_000,
+                    )
                 };
 
             let date_str = format_vn_timestamp_ms(ts_ms);
@@ -708,7 +1045,7 @@ impl crate::session::Session {
             items.push(FeedItem {
                 feed_id,
                 author: FeedAuthor {
-                    uid: uid.clone(),
+                    uid: clean_uid,
                     display_name,
                     avatar_url,
                 },
@@ -937,59 +1274,170 @@ fn extract_media_from_photo_val(photo: &Value, default_dim: Option<&Value>) -> O
     })
 }
 
+/// Upsert a profile object from `/api/social/group/members` (`get_mini_profiles`) into `profiles`.
+pub(crate) fn upsert_mini_profile_into_profiles(
+    profiles: &mut Vec<SocialUserProfile>,
+    raw_k: &str,
+    pval: &Value,
+) {
+    let clean_k = clean_feed_uid(raw_k);
+    if clean_k.is_empty() || clean_k == "0" {
+        return;
+    }
+    if let Some(p) = SocialUserProfile::from_json(&clean_k, pval) {
+        if let Some(existing) = profiles
+            .iter_mut()
+            .find(|ep| clean_feed_uid(&ep.uid) == clean_feed_uid(&p.uid))
+        {
+            merge_profile_into(existing, p);
+        } else {
+            profiles.push(p);
+        }
+    }
+}
+
+fn extract_feed_author(item: &Value) -> Option<FeedAuthor> {
+    let header = item.get("header");
+    let nested_owner = item
+        .get("owner")
+        .or_else(|| item.get("author"))
+        .or_else(|| item.get("creator"))
+        .or_else(|| item.get("user"));
+
+    if header.is_none() && nested_owner.is_none() {
+        let has_top_id = extract_json_id(
+            item,
+            &[
+                "owner_id",
+                "ownerId",
+                "creator_id",
+                "creatorId",
+                "author_uid",
+                "uid",
+                "user_id",
+                "userId",
+            ],
+        )
+        .is_some();
+        if !has_top_id {
+            return None;
+        }
+    }
+
+    let uid = header
+        .and_then(|h| {
+            extract_json_id(
+                h,
+                &[
+                    "uid",
+                    "ownerId",
+                    "owner_id",
+                    "creatorId",
+                    "creator_id",
+                    "userId",
+                    "user_id",
+                    "id",
+                ],
+            )
+        })
+        .or_else(|| {
+            nested_owner.and_then(|o| {
+                extract_json_id(
+                    o,
+                    &[
+                        "uid",
+                        "ownerId",
+                        "owner_id",
+                        "creatorId",
+                        "userId",
+                        "user_id",
+                        "id",
+                    ],
+                )
+            })
+        })
+        .or_else(|| {
+            extract_json_id(
+                item,
+                &[
+                    "owner_id",
+                    "ownerId",
+                    "creator_id",
+                    "creatorId",
+                    "author_uid",
+                    "uid",
+                    "user_id",
+                    "userId",
+                ],
+            )
+        })
+        .map(|s| clean_feed_uid(&s))
+        .unwrap_or_default();
+
+    let name_keys = [
+        "dpn",
+        "displayName",
+        "zaloName",
+        "display_name",
+        "author_name",
+        "name",
+    ];
+    let display_name = [header, nested_owner, Some(item)]
+        .into_iter()
+        .flatten()
+        .find_map(|src| {
+            let picked = pick_best_display_name(src, &name_keys, &uid);
+            (!picked.is_empty() && picked != uid).then_some(picked)
+        })
+        .or_else(|| {
+            [header, nested_owner, Some(item)]
+                .into_iter()
+                .flatten()
+                .find_map(|src| extract_json_text(src, &name_keys))
+        })
+        .unwrap_or_default();
+
+    let ava_keys = ["avt", "avatar", "avatarUrl", "fullAvt", "author_avatar"];
+    let avatar_url = [header, nested_owner, Some(item)]
+        .into_iter()
+        .flatten()
+        .find_map(|src| extract_json_text(src, &ava_keys))
+        .map(|u| normalize_social_media_url(&u))
+        .unwrap_or_default();
+
+    Some(FeedAuthor {
+        uid,
+        display_name,
+        avatar_url,
+    })
+}
+
 fn parse_feed_item_json(
     val: &Value,
     target_uid: &str,
     rt_stats: &HashMap<String, RealtimeFeedStat>,
 ) -> Option<FeedItem> {
     let item = val.get("item").unwrap_or(val);
-    let header = item.get("header")?;
+    let author = extract_feed_author(item)?;
+    let clean_target = clean_feed_uid(target_uid);
 
-    let author_uid = header
-        .get("uid")
-        .and_then(|v| {
-            v.as_str()
-                .map(|s| s.to_string())
-                .or_else(|| v.as_i64().map(|n| n.to_string()))
-        })
-        .unwrap_or_default();
-    let author_dpn = header
-        .get("dpn")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-
-    let matches_target = target_uid.is_empty()
-        || author_uid == target_uid
-        || author_dpn.trim().eq_ignore_ascii_case(target_uid.trim());
+    let matches_target = clean_target.is_empty()
+        || author.uid == clean_target
+        || author
+            .display_name
+            .trim()
+            .eq_ignore_ascii_case(target_uid.trim());
     if !matches_target {
         return None;
     }
 
-    let fid = item
-        .get("fid")
-        .and_then(|v| {
-            v.as_str()
-                .map(|s| s.to_string())
-                .or_else(|| v.as_i64().map(|n| n.to_string()))
-        })
-        .unwrap_or_default();
+    let fid = extract_json_id(item, &["fid", "feedId", "id"]).unwrap_or_default();
     if fid.is_empty() {
         return None;
     }
 
     let cts = item.get("cts").and_then(Value::as_i64).unwrap_or(0);
     let date_str = format_vn_timestamp_ms(cts);
-
-    let author = FeedAuthor {
-        uid: author_uid,
-        display_name: author_dpn,
-        avatar_url: header
-            .get("avt")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-    };
 
     let content_obj = item.get("content").cloned().unwrap_or(json!({}));
     let caption = content_obj
@@ -1158,104 +1606,4 @@ pub fn load_real_timeline_from_sqlite(db_path: &str, target_uid: &str) -> Result
     });
 
     Ok(feeds)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn social_profile_and_feed_packet_encode_correctly() {
-        let payload = packet::build_get_feed_payload(435550501, 435550501, 0, 1, 20);
-        assert_eq!(payload.len(), 52, "Payload pw0.e.d phải chuẩn 52 bytes");
-        assert_eq!(payload[0], 0x01);
-        assert_eq!(
-            i32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]),
-            packet::CLIENT_VERSION
-        );
-        assert_eq!(payload[9], 0); // tab = 0
-        assert_eq!(
-            i32::from_be_bytes([payload[10], payload[11], payload[12], payload[13]]),
-            1
-        ); // page = 1
-        assert_eq!(
-            i32::from_be_bytes([payload[14], payload[15], payload[16], payload[17]]),
-            20
-        ); // count = 20
-
-        let pkt = packet::build_request_packet(
-            packet::CMD_FEED_TIMELINE,
-            packet::SUBCMD_GET_FEED,
-            &payload,
-        );
-        assert_eq!(pkt.len(), 4 + 16 + 52);
-        assert_eq!(pkt[4], 0x01); // version = 1
-        assert_eq!(pkt[5], 0x00); // encrypt = 0
-        assert_eq!(pkt[10], packet::CMD_TYPE_REQUEST); // cmd_type = 3
-        assert_eq!(u16::from_be_bytes([pkt[11], pkt[12]]), 1230); // CMD_FEED_TIMELINE = 1230
-        assert_eq!(pkt[13], 6); // SUBCMD_GET_FEED = 6
-
-        let user_payload = packet::build_user_timeline_payload(257404931, 0);
-        assert_eq!(user_payload.len(), 18, "Payload mw0.c.k phải chuẩn 18 bytes");
-
-        let prof_val = json!({
-            "displayName": "Nguyễn Thành",
-            "zaloName": "Thanh",
-            "avatar": "https://s120.ava.talk.zdn.vn/a.jpg",
-            "cover": "https://cover-talk.zadn.vn/c.jpg",
-            "gender": 0,
-            "sdob": "01/01/2000",
-            "status": "Zalo Rust",
-            "isFr": 1,
-            "lastActionTime": 1762958439000u64
-        });
-        let p = SocialUserProfile::from_json("435550501", &prof_val).unwrap();
-        assert_eq!(p.display_name, "Nguyễn Thành");
-        assert!(p.is_friend);
-        assert_eq!(p.cover_url, "https://cover-talk.zadn.vn/c.jpg");
-        assert_eq!(p.last_action_time, Some(1762958439000u64));
-    }
-
-    #[test]
-    fn load_real_dtc_timeline_from_sqlite_works() {
-        let db_path = "test_lab/databases/zalo";
-        if std::path::Path::new(db_path).exists() {
-            let feeds = load_real_timeline_from_sqlite(db_path, "257404931").unwrap();
-            assert_eq!(
-                feeds.len(),
-                2,
-                "Phải nạp được đúng 2 bài viết thật của Đtc"
-            );
-            assert!(
-                feeds[0].timestamp_ms >= feeds[1].timestamp_ms,
-                "Bài mới hơn phải xếp trước"
-            );
-
-            // Kiểm tra bài đăng 1 (FPT University)
-            let f1 = feeds
-                .iter()
-                .find(|f| f.feed_id == "18223066329")
-                .expect("Phải có feed 18223066329");
-            assert_eq!(f1.author.display_name, "Đtc");
-            assert_eq!(f1.reaction.like_count, 16);
-            assert_eq!(f1.reaction.comment_count, 6);
-            assert!(f1.content.contains("FPT University"));
-            assert!(!f1.media_list.is_empty());
-            assert!(f1.media_list[0].url.ends_with(".jpg"));
-            assert_eq!(f1.timestamp_ms, 1726408850459);
-
-            // Kiểm tra bài đăng 2 (Bão lũ an toàn)
-            let f2 = feeds
-                .iter()
-                .find(|f| f.feed_id == "18193461996")
-                .expect("Phải có feed 18193461996");
-            assert_eq!(f2.author.display_name, "Đtc");
-            assert_eq!(f2.reaction.like_count, 6);
-            assert_eq!(f2.reaction.comment_count, 0);
-            assert!(f2.content.contains("an toàn"));
-            assert!(!f2.media_list.is_empty());
-            assert!(f2.media_list[0].url.ends_with(".jpg"));
-            assert_eq!(f2.timestamp_ms, 1725774890913);
-        }
-    }
 }

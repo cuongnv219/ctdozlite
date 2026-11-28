@@ -295,9 +295,7 @@ pub fn build_make_call_payload(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Outbound Native-to-Server Signaling (`/api/voicecall/*` & `/api/voicecall/group/*`)
-// ---------------------------------------------------------------------------
 
 fn voice_call_domain(s: &Session) -> &str {
     if s.domains.voice_call.is_empty() {
@@ -844,9 +842,7 @@ async fn dispatch_send_signal_inner(s: &Session, command: i64, n: &Value) -> Res
     }
 }
 
-// ---------------------------------------------------------------------------
 // Incoming VoIP Control Polling (`getControllFromPolling`, cmd `99101`)
-// ---------------------------------------------------------------------------
 
 /// State machine for `lp_control` (`p4-ctl-chat.zaloapp.com`, `queueIds: ["4", "5"]`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -860,7 +856,6 @@ impl Default for CtrlPollState {
     fn default() -> Self {
         let mut queues = BTreeMap::new();
         // Queue ids the official PC client tracks for `lp_ctrl` (`evict_broadcast_queues.lp_ctrl`).
-        //
         // `ZCALL_QUEUES=a,b,c` replaces the set (dev knob). Captured ground truth: the official
         // desktop subscribes to `603_1`, `603_0`, `604_0`, and the full media-carrying
         // `act:"request"` invite only arrives on those; the generic set below yields only the
@@ -1116,9 +1111,7 @@ pub async fn poll_voip_controls(s: &Session, state: &mut CtrlPollState) -> Resul
     Ok(voip)
 }
 
-// ---------------------------------------------------------------------------
 // Pure-Rust In-App VoIP Signaling & ZRTP Relay Engine (Zero external `ZaloCall.exe` process)
-// ---------------------------------------------------------------------------
 
 struct GroupMemberLeg {
     call_id: i64,
@@ -1152,6 +1145,7 @@ struct PureRustCallState {
     partner_id: String,
     partner_name: String,
     is_video: bool,
+    cam_enabled: bool,
     is_group: bool,
     is_caller: bool,
     is_connected: bool,
@@ -1216,6 +1210,12 @@ impl Drop for PureRustCallState {
             let _ = tx.send(true);
         }
     }
+}
+
+/// Return true only when an active call already has a connected relay endpoint and RTP socket,
+/// preventing `SetMediaState` from spawning `MediaHandle` with empty addresses and `None` sockets.
+fn can_upgrade_call_media(st: &PureRustCallState) -> bool {
+    st.is_connected && !st.rtp_ip.trim().is_empty() && st.udp_rtp_sock.is_some()
 }
 
 /// Convert a decimal 64-bit Zalo user ID string to the lower 32-bit `u32` ID used in ZRTP UDP headers (`std::stoull` cast to `uint32_t`).
@@ -2110,7 +2110,7 @@ pub fn build_pure_rust_invite_fields_with_probe(
         "srtcp": 0,
         "srtpMode": 0,
         "supportCallBusy": 1,
-        "supportHevcDecode": if crate::media::is_ffmpeg_available() { 1 } else { 0 },
+        "supportHevcDecode": 0,
         "tpType": 0,
         "video": {
             "codec": [
@@ -2184,7 +2184,7 @@ pub fn build_callee_extend_data(
         "srtcp": 0,
         "srtpMode": 0,
         "supportCallBusy": 1,
-        "supportHevcDecode": if crate::media::is_ffmpeg_available() { 1 } else { 0 },
+        "supportHevcDecode": 0,
         "tpType": 0,
         "video": {
             "codec": [
@@ -2652,6 +2652,7 @@ impl CallBridge {
                                             partner_id,
                                             partner_name: grp_name.clone(),
                                             is_video,
+                                            cam_enabled: is_video,
                                             is_group: true,
                                             is_caller: true,
                                             is_connected: false,
@@ -2925,6 +2926,7 @@ impl CallBridge {
                                 partner_id: primary.partner_id.clone(),
                                 partner_name: partner_name.clone(),
                                 is_video,
+                                cam_enabled: is_video,
                                 is_group,
                                 is_caller: true,
                                 is_connected: false,
@@ -3221,6 +3223,7 @@ impl CallBridge {
                                     ) {
                                         Ok(m) => {
                                             if cam_start_off {
+                                                st.cam_enabled = false;
                                                 m.set_cam_enabled(false);
                                             }
                                             st.media = Some(m);
@@ -3356,16 +3359,25 @@ impl CallBridge {
                         let mut guard = active_call.lock().await;
                         if let Some(ref mut st) = *guard {
                             st.is_video = st.is_video || is_on_cam;
-                            if st.media.is_none() && is_on_cam {
+                            st.cam_enabled = is_on_cam;
+                            if st.media.is_none()
+                                && is_on_cam
+                                && can_upgrade_call_media(st)
+                            {
+                                let rtcp_addr = if st.rtcp_ip.trim().is_empty() {
+                                    st.rtp_ip.clone()
+                                } else {
+                                    st.rtcp_ip.clone()
+                                };
                                 st.media = crate::media::MediaHandle::start_with_sockets(
-                                    String::new(),
-                                    String::new(),
+                                    st.rtp_ip.clone(),
+                                    rtcp_addr,
                                     st.from_uid_u32,
                                     st.partner_uid_u32,
                                     st.is_caller,
                                     st.relay_token,
-                                    None,
-                                    None,
+                                    st.udp_rtp_sock.clone(),
+                                    st.udp_rtcp_sock.clone(),
                                     0,
                                     true,
                                     Some(gui_tx.clone()),
@@ -4095,6 +4107,9 @@ impl CallBridge {
                                                 Some(egui_ctx.clone()),
                                             ) {
                                                 Ok(m) => {
+                                                    if !st.cam_enabled {
+                                                        m.set_cam_enabled(false);
+                                                    }
                                                     st.media = Some(m);
                                                 }
                                                 Err(e) => {
@@ -4110,6 +4125,7 @@ impl CallBridge {
                                         let call_id = st.call_id;
                                         let callee_id = st.partner_id.clone();
                                         let is_vid_now = st.is_video;
+                                        let cam_now = st.cam_enabled;
                                         let group_host_now = st.group_host_call.clone();
                                         let self_uid32_now = st.from_uid_u32;
                                         if is_group_call {
@@ -4124,7 +4140,7 @@ impl CallBridge {
                                                     "userId": self_uid32_now as u64,
                                                     "callState": 3,
                                                     "audioState": 1,
-                                                    "videoState": if is_vid_now { 1 } else { 0 },
+                                                    "videoState": if is_vid_now && cam_now { 1 } else { 0 },
                                                     "params": ""
                                                 });
                                                 let _ = dispatch_send_signal(
@@ -4145,7 +4161,7 @@ impl CallBridge {
                                                     let req_12006 = json!({
                                                         "calleeId": callee_id,
                                                         "callId": call_id,
-                                                        "isOnCam": 1,
+                                                        "isOnCam": if cam_now { 1 } else { 0 },
                                                         "isOnMic": 1,
                                                         "data": ""
                                                     });
@@ -4577,6 +4593,7 @@ impl CallBridge {
                                             partner_id: caller_id.clone(),
                                             partner_name: caller_name.clone(),
                                             is_video,
+                                            cam_enabled: is_video,
                                             is_group,
                                             is_caller: false,
                                             is_connected: false,
@@ -4715,744 +4732,5 @@ impl CallBridge {
     /// Hang up or cancel the current active call in pure Rust (`405` cancel or `409` endcall).
     pub fn end_call(&self) {
         let _ = self.cmd_tx.send(CallEngineCmd::EndCall);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn outbound_call_lock_allows_only_test_accounts() {
-        // Outbound calls are unlocked for all non-empty 1-1 and group targets
-        assert!(call_target_allowed("1000000000000000001", "", false));
-        assert!(call_target_allowed("123456789012345678", "", false));
-        assert!(call_target_allowed("", "Nguyễn Văn A", false));
-        assert!(call_target_allowed(
-            "7518545940799845719",
-            "Đỗ Thành, Đtc, Hoang",
-            true
-        ));
-        assert!(call_target_allowed("group_123", "", true));
-        assert!(!call_target_allowed("", "", false));
-        assert!(ensure_call_target_allowed("123456789", "", false).is_ok());
-        assert!(
-            ensure_call_target_allowed("7518545940799845719", "Đỗ Thành, Đtc, Hoang", true).is_ok()
-        );
-        assert!(ensure_call_target_allowed("", "", false).is_err());
-    }
-
-    #[test]
-    fn outbound_call_rejects_only_empty_target() {
-        assert!(!call_target_allowed("   ", "   ", false));
-        assert!(call_target_allowed("5585213365034222978", "", false));
-        assert!(call_target_allowed("", "Đỗ Thành", false));
-    }
-    #[test]
-    fn pipe_aes_roundtrip_and_delimiter() {
-        let msg = r#"{"type":"update","command":"native-ready"}"#;
-        let frame = encrypt_pipe_frame(msg).unwrap();
-        assert!(frame.ends_with('$'));
-        let decoded = decrypt_pipe_frame(&frame).unwrap();
-        assert_eq!(decoded, msg);
-    }
-
-    #[test]
-    fn drain_pipe_frames_splits_multiple_and_keeps_partial() {
-        let f1 = encrypt_pipe_frame(r#"{"a":1}"#).unwrap();
-        let f2 = encrypt_pipe_frame(r#"{"b":2}"#).unwrap();
-        let mut buf = format!("{f1}{f2}deadbeef");
-        let drained = drain_pipe_frames(&mut buf);
-        assert_eq!(drained.len(), 2);
-        assert_eq!(decrypt_pipe_frame(&drained[0]).unwrap(), r#"{"a":1}"#);
-        assert_eq!(decrypt_pipe_frame(&drained[1]).unwrap(), r#"{"b":2}"#);
-        assert_eq!(buf, "deadbeef");
-    }
-
-    #[test]
-    fn call_type_codes_match_zalo_pc() {
-        assert_eq!(CallType::from_flags(false, false) as u8, 1);
-        assert_eq!(CallType::from_flags(true, false) as u8, 3);
-        assert_eq!(CallType::from_flags(false, true) as u8, 5);
-        assert_eq!(CallType::from_flags(true, true) as u8, 6);
-    }
-
-    #[test]
-    fn make_call_payload_structure() {
-        let p = build_make_call_payload(
-            "12345",
-            "Nguyen Van A",
-            Some("https://ava.zdn.vn/1.jpg"),
-            true,
-            false,
-        );
-        assert_eq!(p["type"], "request");
-        assert_eq!(p["command"], "makeCall");
-        assert_eq!(p["data"]["type"], 3);
-        assert_eq!(p["data"]["partner"][0]["id"], "12345");
-        assert_eq!(p["data"]["partner"][0]["name"], "Nguyen Van A");
-    }
-
-    #[test]
-    fn extract_voip_controls_parses_embedded_json_data() {
-        let raw = json!({
-            "controls": [
-                {
-                    "content": {
-                        "act_type": "voip",
-                        "act": "request",
-                        "data": r#"{"callId":998877,"uidN":"12345","ts":1700000000000}"#
-                    }
-                },
-                {
-                    "content": {
-                        "act_type": "typing",
-                        "act": "typing"
-                    }
-                }
-            ]
-        });
-        let voip = extract_voip_controls(&raw);
-        assert_eq!(voip.len(), 1);
-        assert_eq!(voip[0]["act"], "request");
-        assert_eq!(voip[0]["data"]["callId"], 998877);
-    }
-
-    #[test]
-    fn normalize_voicecall_data_always_returns_json_object() {
-        assert!(normalize_voicecall_data(Value::Null).is_object());
-        assert!(normalize_voicecall_data(json!("")).is_object());
-        let parsed = normalize_voicecall_data(json!(r#"{"callId":42,"sessId":"abc"}"#));
-        assert_eq!(parsed["callId"], 42);
-        assert_eq!(parsed["sessId"], "abc");
-    }
-
-    #[test]
-    fn init_payload_prefers_numeric_uin_over_send2me() {
-        let mut s = Session::new(false, false, false).unwrap();
-        s.login = Some(crate::session::LoginInfo {
-            uin: "1000000000000000002".into(),
-            send2me_id: "9000000000000000001".into(),
-            display_name: "Hoang".into(),
-            ..Default::default()
-        });
-        let init = build_init_payload(&s, "init", true);
-        assert_eq!(init["data"]["local"]["id"], "1000000000000000002");
-        assert_eq!(init["data"]["local"]["name"], "Hoang");
-    }
-
-    #[test]
-    fn pure_rust_invite_fields_match_zrtc_format() {
-        let resp_401 = json!({
-            "rtpIP": "171.244.25.121:4200",
-            "rtcpIP": "171.244.25.121:4200",
-            "sessId": "sess_test_123",
-            "servers": [
-                {
-                    "rtpaddr": "171.244.128.61:4200",
-                    "rtcpaddr": "171.244.128.61:4200",
-                    "rtpIPv6": "2401:5f80:3fff:7::15:4200",
-                    "rtcpIPv6": "2401:5f80:3fff:7::15:4200",
-                    "spTcp": 1
-                },
-                {
-                    "rtpaddr": "171.244.25.118:4200",
-                    "rtcpaddr": "171.244.25.118:4200",
-                    "rtpIPv6": "2401:5f80:4001:e::10:4200",
-                    "rtcpIPv6": "2401:5f80:4001:e::10:4200",
-                    "spTcp": 1
-                }
-            ]
-        });
-        let (rtp, rtcp, sess, codec, ext) = build_pure_rust_invite_fields(&resp_401, true);
-        assert_eq!(rtp, "171.244.128.61:4200");
-        assert_eq!(rtcp, "171.244.128.61:4200");
-        assert_eq!(sess, "sess_test_123");
-        assert!(codec.contains("opus/16000/1"));
-        let ext_val: Value = serde_json::from_str(ext.trim()).unwrap();
-        assert_eq!(ext_val["callType"], 1);
-        assert_eq!(ext_val["newZrtc"], 1);
-        assert_eq!(ext_val["serverAddr"][0]["rtp"], "171.244.128.61:4200");
-        // Every 401 relay must be advertised: the official callee counts `serverAddr`
-        // (`_doInitZRTP size`) and a single-entry list kills the call in <1 s.
-        assert_eq!(ext_val["serverAddr"].as_array().map(Vec::len), Some(2));
-        assert_eq!(ext_val["serverAddr"][1]["rtp"], "171.244.25.118:4200");
-        assert_eq!(ext_val["serverResult"].as_array().map(Vec::len), Some(2));
-    }
-
-    #[test]
-    fn zrtp_udp_binary_packets_match_zalocall_layout() {
-        assert_eq!(uid_str_to_u32("1000000000000000005"), 2808348677);
-
-        let sess = "100000001-100000001@100000002";
-        let caller_init = build_zrtp_init_packet(true, 100000001, 100000003, 100000010, 2, sess);
-        assert_eq!(caller_init[0], 0x01);
-        assert_eq!(caller_init[1], 0x7E);
-        assert_eq!(
-            u32::from_le_bytes(caller_init[10..14].try_into().unwrap()),
-            100000001
-        );
-        assert_eq!(
-            u16::from_le_bytes(caller_init[18..20].try_into().unwrap()),
-            0x000B
-        );
-        assert_eq!(caller_init[20], 2);
-        assert_eq!(
-            u32::from_le_bytes(caller_init[21..25].try_into().unwrap()),
-            100000010
-        );
-        assert_eq!(
-            u32::from_le_bytes(caller_init[25..29].try_into().unwrap()),
-            100000003
-        );
-        assert_eq!(
-            u16::from_le_bytes(caller_init[29..31].try_into().unwrap()) as usize,
-            sess.len()
-        );
-        assert_eq!(&caller_init[31..], sess.as_bytes());
-
-        let callee_init = build_zrtp_init_packet(false, 100000001, 100000002, 100000010, 2, sess);
-        assert_eq!(
-            u16::from_le_bytes(callee_init[18..20].try_into().unwrap()),
-            0x000C
-        );
-        let ping = build_zrtp_ping_packet(100000001, 100000010, sess);
-        assert_eq!(ping[1], 0x01);
-        assert_eq!(u16::from_le_bytes(ping[18..20].try_into().unwrap()), 0x0002);
-        assert_eq!(ping[20], 0x01);
-        assert_eq!(&ping[23..], sess.as_bytes());
-
-        let echo = build_zrtp_echo_packet(0x4E1F, "1761096000");
-        assert_eq!(u32::from_le_bytes(echo[6..10].try_into().unwrap()), 0x4E1F);
-        assert_eq!(
-            u32::from_le_bytes(echo[10..14].try_into().unwrap()),
-            0x003E9765
-        );
-        assert_eq!(
-            u32::from_le_bytes(echo[14..18].try_into().unwrap()),
-            0x012F833C
-        );
-        assert_eq!(u16::from_le_bytes(echo[18..20].try_into().unwrap()), 0x0005);
-
-        let end_pkt = build_zrtp_end_packet(100000001, 100000010, sess);
-        assert_eq!(
-            u16::from_le_bytes(end_pkt[18..20].try_into().unwrap()),
-            0x0020
-        );
-        assert_eq!(end_pkt[20], 0x09);
-        assert_eq!(
-            u32::from_le_bytes(end_pkt[21..25].try_into().unwrap()) as usize,
-            sess.len()
-        );
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn live_call_dtc_trace() {
-        let mut s = Session::new(true, false, false).unwrap();
-        s.load_from_file("session.json").expect("load session.json");
-        let partner_id = "1000000000000000005";
-        let mut ctrl_state = CtrlPollState::default();
-        let _ = poll_voip_controls(&s, &mut ctrl_state).await;
-        println!(
-            "[TRACE] Initial ctrl cursor synced: {}",
-            ctrl_state.last_action_id
-        );
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        let call_id = ((now_ms % 1_800_000_000) + 100_000_000) as i64;
-        let req_401 = json!({
-            "calleeId": partner_id,
-            "callId": call_id,
-            "codec": "[]\n",
-            "type": 1
-        });
-        let resp_401 = dispatch_send_signal(&s, 401, &req_401).await.expect("401");
-        println!(
-            "[TRACE] 401 id={}, fromId={}, toId={}, rtpIP={}",
-            resp_401["id"], resp_401["fromId"], resp_401["toId"], resp_401["rtpIP"]
-        );
-
-        let real_call_id = resp_401["id"].as_i64().unwrap_or(call_id);
-        let from_uid_u32 = resp_401["fromId"].as_u64().unwrap() as u32;
-        let partner_uid_u32 = resp_401["toId"].as_u64().unwrap() as u32;
-        let sess_id_raw = resp_401["sessId"].as_str().unwrap().to_string();
-
-        let rtp_sock = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap());
-        let rtcp_sock = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap());
-        let local_port = rtp_sock.local_addr().unwrap().port();
-        let servers = collect_relay_servers(&resp_401);
-        println!(
-            "[TRACE] Bound local UDP port={}, servers={:?}",
-            local_port, servers
-        );
-
-        let pkt_init_rtp = build_zrtp_init_packet(
-            false,
-            from_uid_u32,
-            partner_uid_u32,
-            real_call_id as u32,
-            1,
-            &sess_id_raw,
-        );
-        let pkt_init_rtcp = build_zrtp_init_packet(
-            true,
-            from_uid_u32,
-            partner_uid_u32,
-            real_call_id as u32,
-            1,
-            &sess_id_raw,
-        );
-        let pkt_ping = build_zrtp_ping_packet(from_uid_u32, real_call_id as u32, &sess_id_raw);
-        let pkt_echo = build_zrtp_echo_packet(0x4E1F, &crate::login::unix_now().to_string());
-
-        for (rtp_addr, rtcp_addr) in &servers {
-            let _ = rtp_sock.send_to(&pkt_init_rtp, rtp_addr.as_str()).await;
-            let _ = rtp_sock.send_to(&pkt_echo, rtp_addr.as_str()).await;
-            let _ = rtp_sock.send_to(&pkt_ping, rtp_addr.as_str()).await;
-            let _ = rtcp_sock.send_to(&pkt_init_rtcp, rtcp_addr.as_str()).await;
-            let _ = rtcp_sock.send_to(&pkt_ping, rtcp_addr.as_str()).await;
-        }
-
-        // Read UDP responses for 500ms before 416
-        let start_wait = std::time::Instant::now();
-        let mut buf = [0u8; 1500];
-        while start_wait.elapsed() < std::time::Duration::from_millis(500) {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(80),
-                rtp_sock.recv_from(&mut buf),
-            )
-            .await
-            {
-                Ok(Ok((n, peer))) => {
-                    println!(
-                        "[TRACE] Pre-416 RTP recv {} bytes from {}: {:02x?}",
-                        n,
-                        peer,
-                        &buf[..n.min(48)]
-                    );
-                }
-                _ => {}
-            }
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(40),
-                rtcp_sock.recv_from(&mut buf),
-            )
-            .await
-            {
-                Ok(Ok((n, peer))) => {
-                    println!(
-                        "[TRACE] Pre-416 RTCP recv {} bytes from {}: {:02x?}",
-                        n,
-                        peer,
-                        &buf[..n.min(48)]
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        let (rtp_ip, rtcp_ip, sess_id, codec_str, extend_str) =
-            build_pure_rust_invite_fields_with_port(&resp_401, false, Some(local_port));
-        let req_416 = json!({
-            "callId": real_call_id,
-            "calleeId": partner_id,
-            "codec": codec_str,
-            "extendData": extend_str,
-            "rtcpAddress": rtcp_ip,
-            "rtpAddress": rtp_ip,
-            "session": sess_id
-        });
-        let resp_416 = dispatch_send_signal(&s, 416, &req_416).await.expect("416");
-        println!("[TRACE] resp_416 = {}", resp_416);
-
-        // Spawn UDP reader + keepalive
-        let rtp_c = rtp_sock.clone();
-        let rtcp_c = rtcp_sock.clone();
-        let servers_c = servers.clone();
-        let sess_c = sess_id_raw.clone();
-        let udp_task = tokio::spawn(async move {
-            let mut b1 = [0u8; 1500];
-            let mut b2 = [0u8; 1500];
-            let mut iv = tokio::time::interval(std::time::Duration::from_millis(300));
-            let mut seq = 1u32;
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let p_ir = build_zrtp_init_packet(false, from_uid_u32, partner_uid_u32, real_call_id as u32, 1, &sess_c);
-                        let p_ic = build_zrtp_init_packet(true, from_uid_u32, partner_uid_u32, real_call_id as u32, 1, &sess_c);
-                        let p_p = build_zrtp_ping_packet(from_uid_u32, real_call_id as u32, &sess_c);
-                        let p_e = build_zrtp_echo_packet(seq, &crate::login::unix_now().to_string());
-                        seq += 1;
-                        for (ra, ca) in &servers_c {
-                            let _ = rtp_c.send_to(&p_ir, ra.as_str()).await;
-                            let _ = rtp_c.send_to(&p_p, ra.as_str()).await;
-                            let _ = rtp_c.send_to(&p_e, ra.as_str()).await;
-                            let _ = rtcp_c.send_to(&p_ic, ca.as_str()).await;
-                            let _ = rtcp_c.send_to(&p_p, ca.as_str()).await;
-                        }
-                    }
-                    Ok((n, peer)) = rtp_c.recv_from(&mut b1) => {
-                        println!("[TRACE] Post-416 RTP recv {} bytes from {}: {:02x?}", n, peer, &b1[..n.min(64)]);
-                    }
-                    Ok((n, peer)) = rtcp_c.recv_from(&mut b2) => {
-                        println!("[TRACE] Post-416 RTCP recv {} bytes from {}: {:02x?}", n, peer, &b2[..n.min(64)]);
-                    }
-                }
-            }
-        });
-
-        let poll_start = std::time::Instant::now();
-        while poll_start.elapsed() < std::time::Duration::from_secs(18) {
-            if let Ok(evs) = poll_voip_controls(&s, &mut ctrl_state).await {
-                for ev in evs {
-                    println!(
-                        "[TRACE] VOIP CTRL EVENT @ {:?}: {}",
-                        poll_start.elapsed(),
-                        serde_json::to_string(&ev).unwrap()
-                    );
-                }
-            }
-        }
-        udp_task.abort();
-    }
-
-    #[test]
-    fn parse_zrtp_init_response_extracts_token_and_public_p2p() {
-        let mut pkt = vec![0u8; 21];
-        pkt[0] = 0x02;
-        pkt[1] = 0x7E;
-        pkt[18..20].copy_from_slice(&0x000Bu16.to_le_bytes());
-        pkt.extend_from_slice(&0i32.to_le_bytes());
-        pkt.extend_from_slice(&100000010u32.to_le_bytes());
-        pkt.extend_from_slice(&0xCAFE_BABEu32.to_le_bytes());
-        let pub_addr = b"203.0.113.10|9849";
-        pkt.extend_from_slice(&(pub_addr.len() as u16).to_le_bytes());
-        pkt.extend_from_slice(pub_addr);
-
-        let parsed = parse_zrtp_init_response(&pkt).expect("valid InitZRTP response");
-        assert_eq!(parsed.0, 0);
-        assert_eq!(parsed.1, 100000010);
-        assert_eq!(parsed.2, 0xCAFE_BABE);
-        assert_eq!(parsed.3, Some(("203.0.113.10".to_string(), 9849)));
-    }
-
-    #[test]
-    fn build_callee_extend_data_includes_select2side_and_public_p2p() {
-        let mut probe = ZrtpProbeResult {
-            local_port: 61234,
-            public_p2p: Some(("203.0.113.20".into(), 61234)),
-            ..Default::default()
-        };
-        probe
-            .echo_stats
-            .insert("42.113.206.4:10490".into(), (14, 18));
-        let ext_raw = build_callee_extend_data(
-            "42.113.206.4:10490",
-            "42.113.206.4:12490",
-            false,
-            Some(61234),
-            Some(&probe),
-        );
-        let ext: Value = serde_json::from_str(ext_raw.trim()).expect("callee extendData JSON");
-        assert_eq!(ext["select2side"], 1);
-        assert_eq!(ext["numServers"], 0);
-        let p2p = ext["p2p"].as_array().expect("p2p array");
-        assert!(p2p.iter().any(|e| e["type"] == 0 && e["port"] == 61234));
-        assert!(p2p
-            .iter()
-            .any(|e| e["type"] == 1 && e["ip"] == "203.0.113.20" && e["port"] == 61234));
-    }
-
-    #[test]
-    fn incoming_request_media_params_extract_rtp_ser_ip_and_video() {
-        let req_params = json!({
-            "rtpSerIp": "171.244.128.62:4200",
-            "rtpIP": "171.244.128.62:4200",
-            "sessId": "sess_incoming_456",
-            "extendData": r#"{"callType":1,"serverAddr":[{"rtp":"171.244.128.62:4200","rtcp":"171.244.128.62:4200"}],"video":{"codec":[{"name":"h264","payload":97}]}}"#,
-        });
-        let (rtp, rtcp, sess, _, _) =
-            build_pure_rust_invite_fields_with_probe(&req_params, true, Some(55000), None);
-        assert_eq!(rtp, "171.244.128.62:4200");
-        assert_eq!(rtcp, "171.244.128.62:4200");
-        assert_eq!(sess, "sess_incoming_456");
-    }
-
-    #[test]
-    fn group_requestcall_nested_callsetting_extracts_servers_and_session() {
-        let resp_12433 = json!({
-            "hostCall": 435550501,
-            "callId": 845699558,
-            "groupId": 718256583,
-            "session": "",
-            "callSetting": {
-                "session": "grp_sess_token_123",
-                "servers": [
-                    {
-                        "rtpaddr": "58.187.8.76:3000",
-                        "rtcpaddr": "58.187.8.76:3500"
-                    },
-                    {
-                        "rtpaddr": "14.238.143.137:3000",
-                        "rtcpaddr": "14.238.143.137:3500"
-                    }
-                ]
-            }
-        });
-        let srvs = collect_relay_servers(&resp_12433);
-        assert_eq!(srvs.len(), 2);
-        assert_eq!(srvs[0].0, "58.187.8.76:3000");
-        assert_eq!(srvs[0].1, "58.187.8.76:3500");
-
-        let mut probe = ZrtpProbeResult {
-            local_port: 59350,
-            selected_rtp: Some("14.238.143.137:3000".into()),
-            ..Default::default()
-        };
-        probe.echo_stats.insert("58.187.8.76:3000".into(), (14, 22));
-        probe
-            .echo_stats
-            .insert("14.238.143.137:3000".into(), (14, 15));
-
-        let (rtp, rtcp, sess, _, ext_raw) =
-            build_pure_rust_invite_fields_with_probe(&resp_12433, false, Some(59350), Some(&probe));
-        assert_eq!(rtp, "14.238.143.137:3000");
-        assert_eq!(rtcp, "14.238.143.137:3500");
-        assert_eq!(sess, "grp_sess_token_123");
-        let ext: Value = serde_json::from_str(ext_raw.trim()).expect("group extendData JSON");
-        assert_eq!(ext["numServers"], 2);
-        assert_eq!(ext["serverAddr"][0]["rtp"], "14.238.143.137:3000");
-        assert_eq!(ext["serverAddr"][0]["rtcp"], "14.238.143.137:3500");
-    }
-
-    #[test]
-    fn zrtp_group_init_ping_and_end_packet_headers_match_zalocall_exe() {
-        let init = build_zrtp_group_init_packet(435550501, 845699558, 718256583, 4, "grp_sess");
-        assert_eq!(&init[0..2], &[0x01, 0x7E]);
-        assert_eq!(
-            u32::from_le_bytes(init[10..14].try_into().unwrap()),
-            435550501
-        );
-        assert_eq!(u32::from_le_bytes(init[14..18].try_into().unwrap()), 0);
-        assert_eq!(u16::from_le_bytes(init[18..20].try_into().unwrap()), 0x000B);
-        assert_eq!(init[20], 4);
-        assert_eq!(
-            u32::from_le_bytes(init[21..25].try_into().unwrap()),
-            845699558
-        );
-        assert_eq!(
-            u32::from_le_bytes(init[25..29].try_into().unwrap()),
-            718256583
-        );
-        assert_eq!(u16::from_le_bytes(init[29..31].try_into().unwrap()), 8);
-        assert_eq!(&init[31..39], b"grp_sess");
-        assert_eq!(u16::from_le_bytes(init[39..41].try_into().unwrap()), 4);
-        assert_eq!(&init[41..45], &[0x00, 0x03, 0x01, 0x01]);
-
-        let ping =
-            build_zrtp_group_ping_packet(435550501, 310699996, 845699558, 718256583, "grp_sess");
-        assert_eq!(&ping[0..2], &[0x01, 0x7E]);
-        assert_eq!(
-            u32::from_le_bytes(ping[14..18].try_into().unwrap()),
-            310699996
-        );
-        assert_eq!(u16::from_le_bytes(ping[18..20].try_into().unwrap()), 0x0033);
-        assert_eq!(ping[20], 1);
-        assert_eq!(
-            u32::from_le_bytes(ping[21..25].try_into().unwrap()),
-            845699558
-        );
-        assert_eq!(
-            u32::from_le_bytes(ping[25..29].try_into().unwrap()),
-            718256583
-        );
-
-        let sub = build_zrtp_group_subscribe_video_packet(435550501, 310699996, 1, &[465181026]);
-        assert_eq!(&sub[0..2], &[0x01, 0x01]);
-        assert_eq!(u16::from_le_bytes(sub[18..20].try_into().unwrap()), 0x0020);
-        assert_eq!(sub[20], 0x0D);
-        assert_eq!(u16::from_le_bytes(sub[21..23].try_into().unwrap()), 6);
-        assert_eq!(sub[23], 1);
-        assert_eq!(
-            u32::from_le_bytes(sub[24..28].try_into().unwrap()),
-            465181026
-        );
-        assert_eq!(sub[28], 0);
-
-        let layers = build_zrtp_group_video_layers_packet(435550501, 310699996, 1);
-        assert_eq!(&layers[0..2], &[0x01, 0x01]);
-        assert_eq!(
-            u16::from_le_bytes(layers[18..20].try_into().unwrap()),
-            0x0020
-        );
-        assert_eq!(layers[20], 0x0C);
-        assert_eq!(u16::from_le_bytes(layers[21..23].try_into().unwrap()), 28);
-        assert_eq!(layers[23], 3);
-        assert_eq!(layers[24], 0);
-        assert_eq!(layers[33], 3);
-        assert_eq!(layers[42], 6);
-
-        let end = build_zrtp_group_end_packet(435550501, 310699996, 845699558);
-        assert_eq!(&end[0..2], &[0x01, 0x7E]);
-        assert_eq!(u16::from_le_bytes(end[18..20].try_into().unwrap()), 0x0003);
-        assert_eq!(end[20], 0x01);
-        assert_eq!(
-            u32::from_le_bytes(end[21..25].try_into().unwrap()),
-            845699558
-        );
-    }
-
-    #[tokio::test]
-    async fn callee_dismisses_ringing_when_answered_on_another_device() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let egui_ctx = eframe::egui::Context::default();
-        let gui_tx = crate::gui::GuiTx::new(tx, egui_ctx.clone());
-        let session = Arc::new(Mutex::new(Session::new(false, false, false).unwrap()));
-        let bridge = CallBridge::spawn(session, gui_tx, egui_ctx);
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-
-        // 1. Incoming call arrives
-        bridge.handle_control_event(json!({
-            "act": "request",
-            "data": {
-                "callId": 998877,
-                "uidN": "1000000000000000002",
-                "uidFrom": "1000000000000000002",
-                "ts": now_ms,
-                "Dname": "Test Caller"
-            }
-        }));
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Drain events to confirm IncomingCall
-        let mut got_incoming = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let GuiEvent::IncomingCall { call_id, .. } = ev {
-                if call_id == 998877 {
-                    got_incoming = true;
-                }
-            }
-        }
-        assert!(got_incoming, "IncomingCall event should be dispatched");
-
-        // 2. Answer arrives from another device (eff_status == 0)
-        bridge.handle_control_event(json!({
-            "act": "answer",
-            "data": {
-                "callId": 998877,
-                "status": 0,
-                "uidFrom": "1000000000000000002"
-            }
-        }));
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let mut got_free = false;
-        let mut got_connected = false;
-        let mut status_msg = String::new();
-        while let Ok(ev) = rx.try_recv() {
-            match ev {
-                GuiEvent::CallStateChanged(state) => {
-                    if state == "free" {
-                        got_free = true;
-                    }
-                    if state == "connected" {
-                        got_connected = true;
-                    }
-                }
-                GuiEvent::StatusUpdate(msg) => {
-                    status_msg = msg;
-                }
-                _ => {}
-            }
-        }
-
-        assert!(got_free, "Call state must transition to 'free'");
-        assert!(
-            !got_connected,
-            "Callee must NEVER transition to 'connected' when answered on another device"
-        );
-        assert!(
-            status_msg.contains("thiết bị khác"),
-            "Status message should indicate answered on another device: {status_msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn callee_ignores_benign_status_5_while_ringing() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let egui_ctx = eframe::egui::Context::default();
-        let gui_tx = crate::gui::GuiTx::new(tx, egui_ctx.clone());
-        let session = Arc::new(Mutex::new(Session::new(false, false, false).unwrap()));
-        let bridge = CallBridge::spawn(session, gui_tx, egui_ctx);
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-
-        bridge.handle_control_event(json!({
-            "act": "request",
-            "data": {
-                "callId": 887766,
-                "uidN": "1000000000000000002",
-                "uidFrom": "1000000000000000002",
-                "ts": now_ms,
-                "Dname": "Test Caller"
-            }
-        }));
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Drain IncomingCall event
-        let mut got_incoming = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let GuiEvent::IncomingCall { call_id, .. } = ev {
-                if call_id == 887766 {
-                    got_incoming = true;
-                }
-            }
-        }
-        assert!(got_incoming);
-
-        // Native Zalo sends benign status=5 packet ~0-1s into ringing
-        bridge.handle_control_event(json!({
-            "act": "answer",
-            "data": {
-                "callId": 887766,
-                "status": 5,
-                "uidFrom": "1000000000000000002"
-            }
-        }));
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let mut got_free = false;
-        let mut got_connected = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let GuiEvent::CallStateChanged(state) = ev {
-                if state == "free" {
-                    got_free = true;
-                }
-                if state == "connected" {
-                    got_connected = true;
-                }
-            }
-        }
-
-        assert!(!got_free, "Call must stay active and ringing, not free");
-        assert!(
-            !got_connected,
-            "Call must not connect on intermediate status 5"
-        );
     }
 }

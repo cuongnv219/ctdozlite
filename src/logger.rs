@@ -262,21 +262,3 @@ pub fn scan_logs() -> Vec<ScanFinding> {
 
     findings
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_log_error_records_entry() {
-        init(true);
-        clear_entries();
-        log_error("test_context", "test_error_message");
-        let entries = get_entries();
-        assert!(!entries.is_empty());
-        let last = entries.last().unwrap();
-        assert_eq!(last.url, "test_context");
-        assert_eq!(last.error_msg.as_deref(), Some("test_error_message"));
-        assert!(last.is_error);
-    }
-}

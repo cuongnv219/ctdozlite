@@ -7,7 +7,7 @@
 //! - Filterable conversation sidebar (`Tất cả`, `Cá nhân`, `Nhóm`), avatar badges, and grouped chat bubbles
 //! - Built-in Zalo Sticker rendering & picker (`[Nhãn dán]`)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
 
+mod app_lock_ui;
 pub(crate) mod attachments;
 mod color_emoji;
 pub(crate) mod messages;
@@ -31,15 +32,26 @@ mod stickers;
 mod theme;
 #[cfg(target_os = "linux")]
 mod tray;
+#[cfg(windows)]
+mod windows_tray;
 pub(crate) mod worker;
 pub(crate) mod workspace;
 
+pub use messages::{
+    compute_video_thumb_size, cover_uv_for, image_file_preview_size, media_source_size,
+    parse_inline_md_runs, parse_inline_md_runs_for_message, photo_display_size, InlineMdRun,
+};
 use messages::*;
 use poll_card::*;
 use stickers::*;
 use theme::*;
 pub use theme::{emoji_to_tex_key, load_app_icon, lucide, REACTION_LIST};
 pub use worker::WorkerCmd;
+#[cfg(windows)]
+pub use worker::{
+    flush_app_settings_with, save_app_settings_with, start_settings_writer_with,
+    write_app_settings, SettingsRequest,
+};
 use worker::*;
 
 fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
@@ -142,7 +154,7 @@ mod win32_frameless {
 
     // winit 0.30 keeps WS_CAPTION | WS_THICKFRAME and WS_EX_WINDOWEDGE even for undecorated
     // windows. Intel/hybrid WGL drivers use AdjustWindowRectEx on those bits and shift rendering,
-    // leaving an unrendered black border on the top/left edges.
+    /// leaving an unrendered black border on the top/left edges.
     const WS_BORDER: u32 = 0x0080_0000;
     const WS_DLGFRAME: u32 = 0x0040_0000;
     const WS_CAPTION: u32 = WS_BORDER | WS_DLGFRAME;
@@ -535,7 +547,7 @@ mod win32_frameless {
         }
         let (newly_subclassed, style_changed) = install_frameless_subclass(matched);
         if rounded_corners && (newly_subclassed || style_changed) {
-            // Enable hardware-clipped rounded corners on Windows 11; Windows 10 ignores safely.
+            /// Enable hardware-clipped rounded corners on Windows 11; Windows 10 ignores safely.
             const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
             const DWMWCP_ROUND: u32 = 2;
             let pref = DWMWCP_ROUND;
@@ -702,6 +714,14 @@ pub enum GuiEvent {
     },
     LoginFailed(String),
     ThreadsUpdated(Vec<Thread>),
+    /// A batch received directly from a live message transport.
+    LiveThreadsUpdated(Vec<Thread>),
+    /// The Windows settings worker completed the queued write.
+    #[cfg(windows)]
+    SettingsSaveFailed,
+    /// The Windows settings worker finished processing queued writes before exit.
+    #[cfg(windows)]
+    SettingsFlushed,
     MessageSent {
         client_message_id: String,
         thread_id: String,
@@ -1008,6 +1028,12 @@ pub enum GuiEvent {
         is_group: bool,
         logs: Vec<crate::thread_script::ScriptLog>,
     },
+    /// Worker detected an OS sleep/hibernate wall-clock jump exceeding the threshold.
+    SystemWakeDetected { jump_secs: i64 },
+    /// Periodic 5-second watchdog heartbeat emitted only when idle auto-lock is active.
+    LockWatchdogTick,
+    /// Worker completed credential wipe and session teardown after forgot-passcode sign-out.
+    ForgotLockSignedOut,
 }
 
 /// Summary shown when phone sync ends. `phone_error` explains why the phone step
@@ -1097,6 +1123,40 @@ struct ActiveCallOverlay {
     quick_reply_popover_open: bool,
 }
 
+impl ActiveCallOverlay {
+    /// Creates an active call overlay state with consistent defaults across call entry points.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        partner_id: String,
+        partner_name: String,
+        is_video: bool,
+        is_group: bool,
+        state_label: String,
+        cam_enabled: bool,
+        is_incoming_ringing: bool,
+    ) -> Self {
+        Self {
+            partner_id,
+            partner_name,
+            is_video,
+            is_group,
+            state_label,
+            started_at: std::time::Instant::now(),
+            mic_muted: false,
+            cam_enabled,
+            is_incoming_ringing,
+            error_code: None,
+            error_reason: None,
+            speaker_view: false,
+            pinned_tile_idx: 0,
+            call_page: 0,
+            members_popover_open: false,
+            invite_search_query: String::new(),
+            quick_reply_popover_open: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ImageViewerModal {
     tex_key: String,
@@ -1157,6 +1217,7 @@ enum SettingsTab {
     Account,
     Privacy,
     Sync,
+    DataStorage,
     Appearance,
     Notifications,
     Messages,
@@ -1222,15 +1283,16 @@ pub(crate) struct EditingMessage {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct AppSettings {
-    // 1. Cài đặt chung
     show_all_contacts: bool,
     language: String,
     autostart_on_boot: bool,
+    close_to_tray: bool,
     remember_login: bool,
     download_dir: String,
+    #[serde(default)]
+    pub(crate) storage_root: String,
     /// Mã ngôn ngữ đích cho dịch tin nhắn (vi/en/zh/ja/ko...). Mặc định vi.
     translate_target: String,
-    // 2. Quyền riêng tư
     show_birthday: String,
     show_online_status: bool,
     show_seen_status: bool,
@@ -1243,7 +1305,6 @@ pub(crate) struct AppSettings {
     friend_src_qr: bool,
     friend_src_group: bool,
     friend_src_card: bool,
-    // 3. Giao diện
     pub(crate) theme_mode: String, // "light" | "dark" | "system"
     pub(crate) use_avatar_as_wallpaper: bool,
     pub(crate) font_family: String,
@@ -1258,10 +1319,8 @@ pub(crate) struct AppSettings {
     pub(crate) custom_accent_color: Option<String>,
     pub(crate) custom_bubble_out_bg: Option<String>,
     pub(crate) custom_bubble_in_bg: Option<String>,
-    // 4. Thông báo
     enable_notifications: bool,
     play_notification_sound: bool,
-    // 5. Tin nhắn
     quick_messages_enabled: bool,
     quick_reply_enabled: bool,
     quick_reply_items: Vec<String>,
@@ -1277,12 +1336,10 @@ pub(crate) struct AppSettings {
     double_click_to_reply: bool,
     show_typing_indicator: bool,
     send_message_key: String, // "enter" | "cmd_enter"
-    // 6. Tiện ích
     suggest_stickers_while_typing: bool,
     suggest_mentions: bool,
     enable_gif_search: bool,
     enable_sticker_keyword_search: bool,
-    // 7. Thiết bị cuộc gọi (Mic & Camera)
     selected_mic_device: String,
     selected_camera_device: String,
     mic_gain_percent: u32,
@@ -1290,7 +1347,7 @@ pub(crate) struct AppSettings {
     pinned_threads: Vec<String>,
     muted_threads: HashMap<String, i64>,
     hidden_threads: HashSet<String>,
-    // Nhãn phân loại thread (WaveA3 gán tay chuột phải). Sibling đang dùng nhưng thiếu khai báo.
+    /// Nhãn phân loại thread (WaveA3 gán tay chuột phải). Sibling đang dùng nhưng thiếu khai báo.
     #[serde(default)]
     thread_labels: HashMap<String, String>,
     #[serde(default)]
@@ -1298,10 +1355,8 @@ pub(crate) struct AppSettings {
     /// Folder đang active ("" = Tất cả). Lưu cùng settings.
     #[serde(default)]
     active_chat_folder: String,
-    // 9. Cập nhật tự động qua GitHub Releases API
     auto_check_updates: bool,
     skipped_update_version: String,
-    // 10. Proxy & Đa tài khoản (#64)
     proxy_url: String,
     multi_profile_name: String,
     /// LLM endpoint (OpenAI-compatible). Trống = resolve từ opencode.json / Ollama local.
@@ -1329,8 +1384,10 @@ impl Default for AppSettings {
             show_all_contacts: false,
             language: "Tiếng Việt".into(),
             autostart_on_boot: true,
+            close_to_tray: false,
             remember_login: true,
             download_dir: default_dl,
+            storage_root: String::new(),
             translate_target: "vi".into(),
             show_birthday: "Không hiện".into(),
             show_online_status: true,
@@ -1419,15 +1476,25 @@ impl AppSettings {
         }
     }
 
+    pub(crate) fn normalize_muted_threads_at(&mut self, now_unix: i64) {
+        crate::unread::normalize_muted_threads(&mut self.muted_threads, now_unix);
+    }
+
     fn load() -> Self {
-        std::fs::read_to_string("app_settings.json")
+        let mut settings = std::fs::read_to_string("app_settings.json")
             .ok()
             .and_then(|s| serde_json::from_str::<Self>(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.normalize_muted_threads_at(crate::login::unix_now() as i64);
+        crate::storage_manager::set_storage_root(&settings.storage_root);
+        settings
     }
 
     fn save(&self) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
+            #[cfg(windows)]
+            worker::save_app_settings(json);
+            #[cfg(not(windows))]
             let _ = std::fs::write("app_settings.json", json);
         }
     }
@@ -1512,13 +1579,259 @@ impl IncomingPopupState {
 /// Message search hits for the sidebar: (thread_idx, msg_id, sender, text, is_outgoing).
 pub(crate) type MsgHits = Vec<(usize, String, String, String, bool)>;
 
+/// Active passcode management workflow inside the Settings -> Security panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum AppLockSettingsAction {
+    #[default]
+    Idle,
+    Enabling,
+    Changing,
+    Disabling,
+}
+
+/// Ephemeral UI state for the passcode lock screen, activity tracking, and settings drafts.
+pub(super) struct AppLockUiState {
+    pub(super) unlock_input: String,
+    pub(super) unlock_error: Option<String>,
+    pub(super) focus_requested: bool,
+    pub(super) confirm_forgot_open: bool,
+    pub(super) corrupted_config: bool,
+    pub(super) settings_action: AppLockSettingsAction,
+    pub(super) draft_mode: crate::app_lock::PasscodeMode,
+    pub(super) draft_current: String,
+    pub(super) draft_new: String,
+    pub(super) draft_confirm: String,
+    pub(super) settings_error: Option<String>,
+    pub(super) last_activity_ui_time: f64,
+    pub(super) last_frame_wall_unix: i64,
+    pub(super) last_frame_ui_time: f64,
+}
+
+impl Default for AppLockUiState {
+    fn default() -> Self {
+        Self {
+            unlock_input: String::new(),
+            unlock_error: None,
+            focus_requested: false,
+            confirm_forgot_open: false,
+            corrupted_config: false,
+            settings_action: AppLockSettingsAction::Idle,
+            draft_mode: crate::app_lock::PasscodeMode::Pin4,
+            draft_current: String::new(),
+            draft_new: String::new(),
+            draft_confirm: String::new(),
+            settings_error: None,
+            last_activity_ui_time: 0.0,
+            last_frame_wall_unix: crate::login::unix_now(),
+            last_frame_ui_time: 0.0,
+        }
+    }
+}
+
+impl AppLockUiState {
+    /// Reset Settings -> Privacy passcode form drafts and inline validation error.
+    pub(super) fn reset_settings_drafts(&mut self) {
+        self.settings_action = AppLockSettingsAction::Idle;
+        self.draft_current.clear();
+        self.draft_new.clear();
+        self.draft_confirm.clear();
+        self.settings_error = None;
+    }
+
+    /// Scrub ephemeral unlock inputs, forgot-passcode confirmation, and plaintext settings drafts on lock.
+    pub(super) fn clear_sensitive_on_lock(&mut self) {
+        self.unlock_input.clear();
+        self.unlock_error = None;
+        self.confirm_forgot_open = false;
+        self.focus_requested = true;
+        self.reset_settings_drafts();
+    }
+}
+
+/// Compute effective window focus, always treating a locked window as unfocused.
+fn combine_effective_focus(os_focused: bool, app_locked: bool) -> bool {
+    os_focused && !app_locked
+}
+
+/// Decide whether a lock trigger may lock the app given persisted config, lock state, and credentials.
+fn should_trigger_lock_with_creds(
+    cfg: &crate::app_lock::AppLockConfig,
+    app_locked: bool,
+    has_creds: bool,
+) -> bool {
+    !app_locked && cfg.enabled && has_creds
+}
+
+/// Refresh `last_activity_ui_time` when user input is observed in the current frame.
+fn record_activity_if_input(last_activity_ui_time: &mut f64, now_ui: f64, has_user_input: bool) {
+    if has_user_input {
+        *last_activity_ui_time = now_ui;
+    }
+}
+
+/// Format sender title and truncated 96-char preview for an incoming chat alert.
+fn format_incoming_notification_text(
+    thread_name: &str,
+    is_group: bool,
+    sender_raw: &str,
+    text_raw: &str,
+) -> (String, String) {
+    let sender_label = if is_group && !sender_raw.is_empty() {
+        format!("{sender_raw} · {thread_name}")
+    } else {
+        thread_name.to_string()
+    };
+    let preview_raw = text_raw.trim();
+    let preview_short = if preview_raw.chars().count() > 96 {
+        let s: String = preview_raw.chars().take(96).collect();
+        format!("{s}…")
+    } else if preview_raw.is_empty() {
+        "[ Đính kèm / Nhãn dán ]".to_string()
+    } else {
+        preview_raw.to_string()
+    };
+    (sender_label, preview_short)
+}
+
+/// Apply lock-screen notification masking to `(title, body, avatar_url)` when active.
+fn mask_chat_notification_payload(
+    should_mask: bool,
+    title: &str,
+    body: &str,
+    avt_url: Option<String>,
+    unread_count: usize,
+) -> (String, String, Option<String>) {
+    let (masked_title, masked_body) = crate::app_lock::mask_notification_content(
+        should_mask,
+        should_mask,
+        title,
+        body,
+        unread_count,
+    );
+    let masked_avt = if should_mask { None } else { avt_url };
+    (masked_title, masked_body, masked_avt)
+}
+
+/// Format `status_msg` for an incoming VoIP call, hiding caller identity while locked.
+fn incoming_call_status_text(app_locked: bool, resolved_name: &str, is_video: bool) -> String {
+    if app_locked {
+        "📲 Cuộc gọi đến — mở khoá để xem & trả lời".to_string()
+    } else {
+        format!(
+            "📲 Cuộc gọi {} đến từ {resolved_name}…",
+            if is_video { "video" } else { "thoại" }
+        )
+    }
+}
+
+/// Decide whether the signed-in display name may appear in the custom title bar.
+fn title_bar_shows_user_name(
+    compact_title_bar: bool,
+    is_logged_in: bool,
+    app_locked: bool,
+    user_name: &str,
+) -> bool {
+    !compact_title_bar && is_logged_in && !app_locked && !user_name.is_empty()
+}
+
+/// Decide whether the "Xem lịch sử đã lưu" button may appear in the custom title bar.
+fn title_bar_shows_saved_history_btn(
+    app_locked: bool,
+    is_logged_in: bool,
+    has_threads: bool,
+) -> bool {
+    !app_locked && !is_logged_in && has_threads
+}
+
+/// Decide whether the update status pill may appear in the custom title bar.
+fn title_bar_shows_update_pill(
+    app_locked: bool,
+    has_update: bool,
+    compact_title_bar: bool,
+) -> bool {
+    !app_locked && has_update && !compact_title_bar
+}
+
+/// Decide whether the Quick-Lock button appears in the custom title bar.
+fn title_bar_shows_lock_button(
+    app_locked: bool,
+    has_session_or_saved_creds: bool,
+    _enabled: bool,
+) -> bool {
+    !app_locked && has_session_or_saved_creds
+}
+
+/// Return whether standard floating toast overlays may render (suppressed while locked).
+pub(super) fn toast_overlay_allows_standard_toast(app_locked: bool) -> bool {
+    !app_locked
+}
+
+/// Mask toast text and scrub file-reveal metadata while lock-screen notification hiding is active.
+fn prepare_toast_payload(
+    app_locked: bool,
+    hide_notifications_when_locked: bool,
+    raw: String,
+    reveal_path: Option<String>,
+) -> (String, Option<String>) {
+    let masked = crate::app_lock::mask_toast_text(
+        app_locked,
+        hide_notifications_when_locked,
+        "Thông báo mới",
+        raw,
+    );
+    let safe_reveal = if app_locked && hide_notifications_when_locked {
+        None
+    } else {
+        reveal_path
+    };
+    (masked, safe_reveal)
+}
+
+/// Return true only when an active call overlay represents a live call (not a closed error dialog).
+fn is_live_active_call(call: Option<&ActiveCallOverlay>) -> bool {
+    call.is_some_and(|c| c.error_reason.is_none())
+}
+
+/// Build OS reaction notification `(title, body)` payloads, collapsing into one masked banner
+/// when lock-screen notification hiding is active.
+#[cfg(any(not(target_os = "windows"), test))]
+fn reaction_os_notify_payloads(
+    mask_notifications: bool,
+    masked_reactions: &[(String, String, Option<String>, bool, String)],
+) -> Vec<(String, String)> {
+    if masked_reactions.is_empty() {
+        return Vec::new();
+    }
+    if mask_notifications {
+        vec![crate::app_lock::mask_notification_content(
+            true,
+            true,
+            "",
+            "",
+            masked_reactions.len(),
+        )]
+    } else {
+        masked_reactions
+            .iter()
+            .map(|(_, title, _, _, body)| (title.clone(), body.clone()))
+            .collect()
+    }
+}
+
+/// Right-side top-edge width reserved for title-bar control buttons in frameless resize hit-testing.
+fn title_bar_controls_reserve_width(shows_lock_btn: bool) -> f32 {
+    if shows_lock_btn {
+        216.0
+    } else {
+        180.0
+    }
+}
+
 pub struct ZaloGuiApp {
-    // Theme state
     dark_mode: bool,
     theme_dirty: bool,
     cached_palette: ThemePalette,
 
-    // Session state
     is_logged_in: bool,
     user_name: String,
     user_uin: String,
@@ -1531,19 +1844,18 @@ pub struct ZaloGuiApp {
     /// Saved accounts listed in the account menu; refreshed when the menu opens so the
     /// directory scan stays off the per-frame path.
     pub(crate) account_menu_accounts: Vec<crate::account_manager::AccountProfile>,
+    /// Cached flag indicating saved session credentials exist on disk, avoiding per-frame scans.
+    has_saved_credentials_cached: bool,
 
-    // Login screen state
     login_tab: LoginTab,
     phone_input: String,
     password_input: String,
     login_in_progress: bool,
     login_status_msg: String,
 
-    // QR state
     qr_texture: Option<TextureHandle>,
     qr_status: String,
 
-    // Chat screen state
     threads: Vec<Thread>,
     /// Event ledger for reaction counts (see `reactions::ReactionInbox`).
     reaction_inbox: crate::reactions::ReactionInbox,
@@ -1554,7 +1866,6 @@ pub struct ZaloGuiApp {
     status_msg: String,
     pub(crate) voice_recorder: Option<crate::audio::VoiceRecorder>,
 
-    // Reply / forward state
     replying_to: Option<ChatMessage>,
     forward_msg: Option<ChatMessage>,
     forward_filter: String,
@@ -1607,6 +1918,8 @@ pub struct ZaloGuiApp {
     loading_stickers: HashSet<String>,
     /// Tracks sticker/avatar/thumb URLs that failed to download: `(attempts, last_failed_at)`.
     failed_stickers: HashMap<String, (u8, std::time::Instant)>,
+    /// Decoded non-call textures queued for bounded per-frame GPU upload.
+    pending_texture_uploads: VecDeque<(String, egui::ColorImage)>,
     emoji_textures: HashMap<String, TextureHandle>,
     app_logo_texture: Option<TextureHandle>,
     sticker_store_packs: Vec<crate::chat::StickerPackInfo>,
@@ -1709,8 +2022,15 @@ pub struct ZaloGuiApp {
     doc_viewer: Option<(String, String, String)>,
     user_online_map: HashMap<String, (bool, String)>,
     allow_quit: bool,
+    #[cfg(windows)]
+    windows_tray: Option<windows_tray::Tray>,
+    #[cfg(windows)]
+    windows_quit_deadline_secs: Option<f64>,
+    #[cfg(windows)]
+    windows_quit_ready: bool,
     settings_modal_open: bool,
     settings_tab: SettingsTab,
+    storage_media_expanded: bool,
     notification_authorization: crate::native_notifications::AuthorizationState,
     settings: AppSettings,
     update_checking: bool,
@@ -1786,7 +2106,6 @@ pub struct ZaloGuiApp {
     /// System-tray icon with an unread dot; `None` when the tray thread could not start.
     #[cfg(target_os = "linux")]
     tray: Option<tray::TrayHandle>,
-    // Background channels
     event_rx: Receiver<GuiEvent>,
     #[allow(dead_code)]
     event_tx: Sender<GuiEvent>,
@@ -1808,6 +2127,12 @@ pub struct ZaloGuiApp {
     win_restore_rect: Option<WinRect>,
     #[cfg(target_os = "windows")]
     win_resize_drag: Option<WinResizeDrag>,
+    /// Persisted application lock configuration loaded from `app_lock.json`.
+    pub(super) app_lock_config: crate::app_lock::AppLockConfig,
+    /// Whether the lock screen gate currently hides workspace and login content.
+    pub(super) app_locked: bool,
+    /// Ephemeral UI state for passcode entry, activity tracking, and settings drafts.
+    pub(super) app_lock_ui: AppLockUiState,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1907,16 +2232,17 @@ impl ZaloGuiApp {
             }
         }
         let now_ts = crate::login::unix_now() as i64;
+        crate::unread::reconcile_muted_threads_with_threads(
+            &mut loaded_settings.muted_threads,
+            &threads,
+            now_ts,
+        );
         for t in threads.iter_mut() {
-            if let Some(&until) = loaded_settings.muted_threads.get(&t.id) {
-                if until == -1 || until > now_ts {
-                    t.presentation.muted = true;
-                    t.unread.muted = true;
-                    t.unread.muted_until = (until > 0).then_some(until);
-                }
-            } else if t.unread.is_muted() {
-                t.presentation.muted = true;
-            }
+            crate::unread::apply_muted_settings_to_thread(
+                &loaded_settings.muted_threads,
+                t,
+                now_ts,
+            );
         }
         crate::chat::deduplicate_threads(&mut threads, None);
         if let Ok(mut watch) = VANISH_THREADS.lock() {
@@ -1935,6 +2261,16 @@ impl ZaloGuiApp {
             .map(|(idx, _)| idx)
             .unwrap_or(0);
         let startup_sched_db = crate::store::db_path_for_account(&user_uin);
+        let cfg_res = crate::app_lock::AppLockConfig::load_default();
+        let has_creds = crate::account_manager::has_any_saved_credentials();
+        let (start_locked, corrupted) =
+            crate::app_lock::should_lock_on_startup(&cfg_res, has_creds);
+        let app_lock_config = cfg_res.ok().flatten().unwrap_or_default();
+        worker::set_idle_lock_timeout_secs(if app_lock_config.enabled {
+            app_lock_config.idle_timeout_secs
+        } else {
+            0
+        });
 
         let app = Self {
             dark_mode,
@@ -1947,6 +2283,7 @@ impl ZaloGuiApp {
             pending_add_account_uin: None,
             background_unread: HashMap::new(),
             account_menu_accounts: Vec::new(),
+            has_saved_credentials_cached: has_creds,
             login_tab: LoginTab::QrCode,
             phone_input: String::new(),
             password_input: String::new(),
@@ -2001,6 +2338,7 @@ impl ZaloGuiApp {
             last_frame_textures: HashSet::new(),
             loading_stickers: HashSet::new(),
             failed_stickers: HashMap::new(),
+            pending_texture_uploads: VecDeque::new(),
             emoji_textures: load_default_emoji_textures(&cc.egui_ctx),
             app_logo_texture: load_app_logo_texture(&cc.egui_ctx),
             sticker_store_packs: Vec::new(),
@@ -2080,8 +2418,15 @@ impl ZaloGuiApp {
             doc_viewer: None,
             user_online_map: HashMap::new(),
             allow_quit: false,
+            #[cfg(windows)]
+            windows_tray: None,
+            #[cfg(windows)]
+            windows_quit_deadline_secs: None,
+            #[cfg(windows)]
+            windows_quit_ready: false,
             settings_modal_open: false,
             settings_tab: SettingsTab::General,
+            storage_media_expanded: false,
             notification_authorization: Default::default(),
             settings: loaded_settings,
             update_checking: false,
@@ -2168,6 +2513,13 @@ impl ZaloGuiApp {
             win_restore_rect: None,
             #[cfg(target_os = "windows")]
             win_resize_drag: None,
+            app_lock_config,
+            app_locked: start_locked,
+            app_lock_ui: AppLockUiState {
+                focus_requested: start_locked,
+                corrupted_config: corrupted,
+                ..Default::default()
+            },
         };
         let mut app = app;
         let _ = app.reload_custom_sticker_packs();
@@ -2181,14 +2533,13 @@ impl ZaloGuiApp {
         }
 
         app.publish_known_threads();
-        spawn_session_worker(
-            session,
-            GuiTx {
-                tx,
-                ctx: cc.egui_ctx.clone(),
-            },
-            cc.egui_ctx.clone(),
-        );
+        let gui_tx = GuiTx {
+            tx,
+            ctx: cc.egui_ctx.clone(),
+        };
+        #[cfg(windows)]
+        worker::start_settings_writer(&gui_tx);
+        spawn_session_worker(session, gui_tx, cc.egui_ctx.clone());
         ensure_cjk_font(&cc.egui_ctx, thread_texts(&app.threads));
 
         if let Some(wtx) = WORKER_TX.get() {
@@ -2201,6 +2552,64 @@ impl ZaloGuiApp {
         }
         app
     }
+}
+
+/// Apply an authoritative server mute snapshot to `muted_threads` and all open threads,
+/// matching group and DM ID prefixes consistently.
+pub(crate) fn apply_mute_snapshot_to_state(
+    muted_threads: &mut HashMap<String, i64>,
+    threads: &mut [Thread],
+    mut mute_map: HashMap<String, i64>,
+    now_ts: i64,
+) {
+    crate::unread::normalize_muted_threads(&mut mute_map, now_ts);
+    *muted_threads = mute_map;
+    for t in threads {
+        if let Some(until) =
+            crate::unread::active_mute_until(muted_threads, &t.id, t.is_group, now_ts)
+        {
+            t.presentation.muted = true;
+            t.unread.muted = true;
+            t.unread.muted_until = (until > 0).then_some(until);
+        } else {
+            t.presentation.muted = false;
+            t.unread.muted = false;
+            t.unread.muted_until = None;
+        }
+        t.unread.settings_fresh = true;
+        t.unread.fresh = true;
+    }
+}
+
+/// Apply real-time mute/unmute control events to `muted_threads` and matching threads.
+pub(crate) fn apply_mute_events_to_state(
+    muted_threads: &mut HashMap<String, i64>,
+    threads: &mut [Thread],
+    events: Vec<crate::chat::MuteControlEvent>,
+) -> bool {
+    let mut changed = false;
+    for ev in events {
+        if ev.muted {
+            let until_val = ev
+                .settings_until
+                .unwrap_or_else(|| ev.muted_until.unwrap_or(-1));
+            crate::unread::set_muted_thread(muted_threads, &ev.thread_id, ev.is_group, until_val);
+        } else {
+            crate::unread::clear_muted_thread(muted_threads, &ev.thread_id, ev.is_group);
+        }
+        for t in threads.iter_mut().filter(|t| {
+            t.is_group == ev.is_group
+                && crate::unread::mute_key_matches(&ev.thread_id, &t.id, t.is_group)
+        }) {
+            t.presentation.muted = ev.muted;
+            t.unread.muted = ev.muted;
+            t.unread.muted_until = ev.muted_until;
+            t.unread.settings_fresh = true;
+            t.unread.fresh = true;
+        }
+        changed = true;
+    }
+    changed
 }
 
 /// Maximum retries after an initial sticker/image download failure (1 initial + 2 retries = 3 attempts).
@@ -2234,6 +2643,98 @@ pub(crate) fn record_sticker_fetch_failure(
     entry.1 = now;
 }
 
+/// Maximum decoded non-call textures uploaded per frame so bulk arrivals never hitch the UI thread.
+pub(crate) const MAX_TEXTURE_UPLOADS_PER_FRAME: usize = 12;
+
+/// Returns `true` when `key` belongs to live call video/audio-overlay frames uploaded immediately.
+pub(crate) fn is_call_texture_key(key: &str) -> bool {
+    key.starts_with("call_")
+}
+
+/// Handles a failed download while keeping failed non-call keys inside `loading` until cooldown/cap.
+/// Returns `true` when `key` is a remote call video texture whose cached handle should be removed.
+pub(crate) fn handle_sticker_fetch_failure(
+    loading: &mut HashSet<String>,
+    failures: &mut HashMap<String, (u8, std::time::Instant)>,
+    key: &str,
+    now: std::time::Instant,
+) -> bool {
+    if is_call_texture_key(key) {
+        loading.remove(key);
+        return key.starts_with("call_remote_video");
+    }
+    record_sticker_fetch_failure(failures, key, now);
+    false
+}
+
+/// Releases cooled non-call failed keys from `loading` when retries remain, leaving exhausted keys blocked.
+pub(crate) fn release_cooled_failed_stickers_with_elapsed<F>(
+    loading: &mut HashSet<String>,
+    failures: &HashMap<String, (u8, std::time::Instant)>,
+    mut elapsed_fn: F,
+) where
+    F: FnMut(std::time::Instant) -> Duration,
+{
+    loading.retain(|key| match failures.get(key.as_str()) {
+        None => true,
+        Some(&(attempts, last_fail)) => {
+            attempts >= MAX_STICKER_FETCH_ATTEMPTS || elapsed_fn(last_fail) < STICKER_RETRY_COOLDOWN
+        }
+    });
+}
+
+/// Enqueues a decoded texture upload, replacing any stale queued payload for the same `key`.
+pub(crate) fn push_pending_texture_upload<T>(
+    queue: &mut VecDeque<(String, T)>,
+    key: String,
+    payload: T,
+) {
+    if let Some((_, existing)) = queue.iter_mut().find(|(k, _)| k == &key) {
+        *existing = payload;
+        return;
+    }
+    queue.push_back((key, payload));
+}
+
+/// Drains at most `limit` queued uploads and returns whether additional items remain queued.
+pub(crate) fn take_pending_upload_batch<T>(
+    queue: &mut VecDeque<(String, T)>,
+    limit: usize,
+) -> (Vec<(String, T)>, bool) {
+    let take_n = queue.len().min(limit);
+    let mut batch = Vec::with_capacity(take_n);
+    for _ in 0..take_n {
+        if let Some(item) = queue.pop_front() {
+            batch.push(item);
+        }
+    }
+    (batch, !queue.is_empty())
+}
+
+/// Stores an uploaded texture in the cache and marks it live for the current frame before LRU eviction.
+pub(super) fn install_uploaded_texture<T>(
+    textures: &mut HashMap<String, T>,
+    texture_lru: &mut crate::media_resources::ResourceLru,
+    last_frame_textures: &mut HashSet<String>,
+    loading_stickers: &mut HashSet<String>,
+    key: String,
+    tex: T,
+    bytes: u64,
+    protect_call_frame: bool,
+) {
+    loading_stickers.remove(&key);
+    last_frame_textures.insert(key.clone());
+    insert_texture_with_lru(
+        textures,
+        texture_lru,
+        last_frame_textures,
+        key,
+        tex,
+        bytes,
+        protect_call_frame,
+    );
+}
+
 thread_local! {
     static FRAME_TOUCHED_TEXTURES: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
@@ -2253,6 +2754,124 @@ fn drain_frame_touched_textures() -> HashSet<String> {
             .map(|mut set| std::mem::take(&mut *set))
             .unwrap_or_default()
     })
+}
+
+pub(super) const CALL_REMOTE_VIDEO_KEYS: [&str; 6] = [
+    "call_remote_video",
+    "call_remote_video_1",
+    "call_remote_video_2",
+    "call_remote_video_3",
+    "call_remote_video_4",
+    "call_remote_video_5",
+];
+
+/// Inserts or replaces a texture in both `textures` and `texture_lru`, protecting active call
+/// video frames from same-batch eviction before their first paint in `render_call_overlay`.
+pub(super) fn insert_texture_with_lru<T>(
+    textures: &mut HashMap<String, T>,
+    texture_lru: &mut crate::media_resources::ResourceLru,
+    last_frame_textures: &mut HashSet<String>,
+    key: String,
+    tex: T,
+    bytes: u64,
+    protect_call_frame: bool,
+) {
+    textures.insert(key.clone(), tex);
+    if protect_call_frame && key.starts_with("call_") {
+        mark_texture_used(&key);
+        last_frame_textures.insert(key.clone());
+    }
+    for evicted_key in texture_lru.insert_protecting(key, bytes, last_frame_textures) {
+        textures.remove(&evicted_key);
+    }
+}
+
+/// Removes a cached texture from `textures`, `texture_lru`, and `last_frame_textures`.
+pub(super) fn remove_cached_texture<T>(
+    textures: &mut HashMap<String, T>,
+    texture_lru: &mut crate::media_resources::ResourceLru,
+    last_frame_textures: &mut HashSet<String>,
+    key: &str,
+) {
+    textures.remove(key);
+    texture_lru.remove(key);
+    last_frame_textures.remove(key);
+}
+
+/// Clears remote call video textures (and local preview when `include_local` is true) from
+/// both `textures` and `texture_lru` so stale frame byte counts do not leak across calls.
+pub(super) fn clear_call_video_textures<T>(
+    textures: &mut HashMap<String, T>,
+    texture_lru: &mut crate::media_resources::ResourceLru,
+    last_frame_textures: &mut HashSet<String>,
+    include_local: bool,
+) {
+    for key in CALL_REMOTE_VIDEO_KEYS {
+        remove_cached_texture(textures, texture_lru, last_frame_textures, key);
+    }
+    if include_local {
+        remove_cached_texture(textures, texture_lru, last_frame_textures, "call_local_video");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CameraReadiness {
+    Ready,
+    MissingFfmpeg,
+    NoCameraDevice,
+}
+
+/// Evaluates whether local camera capture is ready given FFmpeg availability and camera list.
+pub(super) fn evaluate_camera_readiness(ffmpeg_ok: bool, cams: &[String]) -> CameraReadiness {
+    if !ffmpeg_ok {
+        CameraReadiness::MissingFfmpeg
+    } else if cams.is_empty() {
+        CameraReadiness::NoCameraDevice
+    } else {
+        CameraReadiness::Ready
+    }
+}
+
+/// Computes the next `cam_enabled` state on camera toggle and returns the failure reason when
+/// enabling is blocked locally so callers skip redundant `SetCallMediaState(false)` signaling.
+pub(super) fn next_camera_toggle_state(
+    current_enabled: bool,
+    readiness: CameraReadiness,
+) -> (bool, Option<CameraReadiness>) {
+    if current_enabled {
+        (false, None)
+    } else if readiness == CameraReadiness::Ready {
+        (true, None)
+    } else {
+        (false, Some(readiness))
+    }
+}
+
+/// Computes initial `cam_enabled` for an incoming call without blocking the UI event loop.
+pub(super) fn incoming_initial_cam_enabled(
+    is_video: bool,
+    ffmpeg_ok: bool,
+    cams: &[String],
+    scanning: bool,
+) -> bool {
+    is_video && ffmpeg_ok && (scanning || !cams.is_empty())
+}
+
+/// Formats the call toolbar camera label without masking an empty camera list as an active default.
+pub(super) fn format_call_camera_label<'a>(
+    selected_camera: &'a str,
+    cams: &'a [String],
+    scanning: bool,
+) -> &'a str {
+    if !selected_camera.is_empty() {
+        selected_camera
+    } else if let Some(first) = cams.first() {
+        first.as_str()
+    } else if scanning {
+        "Đang quét…"
+    } else {
+        "Không có camera"
+    }
 }
 
 /// Queues a worker download for a sticker/avatar/thumbnail without borrowing the full `ZaloGuiApp`.
@@ -2279,7 +2898,114 @@ pub(crate) fn queue_sticker_fetch(
     }
 }
 
+/// Emit a masked or unmasked corner popup and OS banner without borrowing `self.threads`.
+#[allow(clippy::too_many_arguments)]
+fn push_thread_chat_notification(
+    thread: &Thread,
+    sender_raw: &str,
+    text_raw: &str,
+    unread_count: usize,
+    should_mask: bool,
+    sticker_textures: &HashMap<String, TextureHandle>,
+    loading_stickers: &mut HashSet<String>,
+    failed_stickers: &HashMap<String, (u8, std::time::Instant)>,
+    incoming_popup: &mut Option<IncomingPopupState>,
+    chat_banners: &mut Vec<(String, String)>,
+) {
+    let (sender_label, preview_short) =
+        format_incoming_notification_text(&thread.name, thread.is_group, sender_raw, text_raw);
+    let raw_avt = thread.avatar.clone().filter(|u| !u.trim().is_empty());
+    let (title, body, avt_url) = mask_chat_notification_payload(
+        should_mask,
+        &sender_label,
+        &preview_short,
+        raw_avt,
+        unread_count,
+    );
+    if let Some(ref url) = avt_url {
+        let tex_key = format!("thumb_{}", crate::crypto::md5_hex(url));
+        queue_sticker_fetch(
+            sticker_textures,
+            loading_stickers,
+            failed_stickers,
+            tex_key,
+            url.clone(),
+        );
+    }
+    *incoming_popup = Some(IncomingPopupState::new(
+        thread.id.clone(),
+        title.clone(),
+        body.clone(),
+        avt_url,
+        thread.is_group,
+        unread_count,
+    ));
+    chat_banners.push((title, body));
+}
+
 impl ZaloGuiApp {
+    /// Checks FFmpeg availability and discovered camera devices, displaying a distinct toast
+    /// when FFmpeg is absent versus when no local camera device is detected.
+    pub(super) fn probe_local_camera_readiness(&mut self, call_start: bool) -> CameraReadiness {
+        let ff_ok = crate::media::is_ffmpeg_available();
+        if !ff_ok {
+            let msg = if call_start {
+                "⚠️ Không tìm thấy ffmpeg để bật Camera (cài bằng: winget install Gyan.FFmpeg hoặc đặt FFMPEG_PATH)"
+            } else {
+                "⚠️ Cần cài đặt ffmpeg để bật Camera (winget install Gyan.FFmpeg hoặc đặt FFMPEG_PATH)"
+            };
+            self.show_toast(msg);
+            return CameraReadiness::MissingFfmpeg;
+        }
+        let (_, cams) = crate::media::list_media_devices(false);
+        let readiness = evaluate_camera_readiness(true, &cams);
+        if readiness == CameraReadiness::NoCameraDevice {
+            let _ = crate::media::list_media_devices_nonblocking(true);
+            let msg = if call_start {
+                "⚠️ Không phát hiện thiết bị Camera trên máy — đang gọi không hình"
+            } else {
+                "⚠️ Không tìm thấy thiết bị Camera nào trên máy (kiểm tra kết nối hoặc bấm Quét lại)"
+            };
+            self.show_toast(msg);
+        }
+        readiness
+    }
+
+    /// Initializes the call overlay and dispatches `WorkerCmd::StartCall` with consistent
+    /// camera readiness checks across header buttons and call-again bubble actions.
+    pub(super) fn start_outgoing_call(
+        &mut self,
+        partner_id: String,
+        partner_name: String,
+        is_video: bool,
+        is_group: bool,
+        state_label: String,
+    ) {
+        let can_cam = if is_video {
+            self.probe_local_camera_readiness(true) == CameraReadiness::Ready
+        } else {
+            false
+        };
+        self.active_call = Some(ActiveCallOverlay::new(
+            partner_id.clone(),
+            partner_name.clone(),
+            is_video,
+            is_group,
+            state_label,
+            can_cam,
+            false,
+        ));
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::StartCall {
+                partner_id,
+                partner_name,
+                partner_avatar: None,
+                is_video,
+                is_group,
+            });
+        }
+    }
+
     /// Ask the worker to save a photo/video into the OS Downloads folder, ignoring repeat
     /// clicks while the same URL is still being saved.
     pub(super) fn save_media(&mut self, url: String, file_name: String) {
@@ -2684,9 +3410,140 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Activate the application lock screen and close transient modals, popovers, and viewers.
+    pub(super) fn lock_now(&mut self, ctx: &egui::Context) {
+        self.app_locked = true;
+        self.incoming_popup = None;
+        self.toast_notice = None;
+        self.toast_reveal_path = None;
+        self.settings_modal_open = false;
+        self.contacts_view_open = false;
+        self.feed_modal_open = false;
+        self.saved_modal_open = false;
+        self.profile_menu_open = false;
+        self.wipe_confirm_open = false;
+        self.logout_confirm_open = false;
+        self.phone_modal_open = false;
+        self.schedule_modal_open = false;
+        self.reminder_modal_open = false;
+        self.remind_custom_open = false;
+        self.folder_modal_open = false;
+        self.update_modal_open = false;
+        self.dev_panel_open = false;
+        self.image_viewer = None;
+        self.video_player = None;
+        self.doc_viewer = None;
+        self.forward_msg = None;
+        self.reactions_dialog = None;
+        self.pending_delete_thread = None;
+        self.pending_leave_group = None;
+        self.editing_message = None;
+        self.edit_history_open = None;
+        self.remind_pick_msg = None;
+        self.vanish_picker_open = false;
+        self.sticker_picker_open = false;
+        self.in_chat_search_open = false;
+        self.app_lock_ui.clear_sensitive_on_lock();
+        ctx.request_repaint();
+    }
+
+    /// Evaluate in-memory lock preconditions before checking saved credentials on disk.
+    fn try_trigger_lock(&mut self, ctx: &egui::Context) -> bool {
+        if self.app_locked || !self.app_lock_config.enabled {
+            return false;
+        }
+        let has_creds = crate::account_manager::has_any_saved_credentials();
+        if should_trigger_lock_with_creds(&self.app_lock_config, self.app_locked, has_creds) {
+            self.lock_now(ctx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return whether the window is effectively focused (always false while locked).
+    pub(super) fn effective_window_focused(&self, ctx: &egui::Context) -> bool {
+        combine_effective_focus(ctx.input(|i| i.focused), self.app_locked)
+    }
+
+    /// Return whether notification previews and toast text must be masked while locked.
+    pub(super) fn should_mask_notifications(&self) -> bool {
+        self.app_locked && self.app_lock_config.hide_notifications_when_locked
+    }
+
+    /// Return `(title, body, avatar_url)` masked according to `self.should_mask_notifications()`.
+    fn mask_notification_payload(
+        &self,
+        title: &str,
+        body: &str,
+        avt_url: Option<String>,
+        unread_count: usize,
+    ) -> (String, String, Option<String>) {
+        mask_chat_notification_payload(
+            self.should_mask_notifications(),
+            title,
+            body,
+            avt_url,
+            unread_count,
+        )
+    }
+
+    /// Mask a transient toast message when lock-screen notification hiding is active.
+    fn mask_toast_if_locked(&self, fallback: &str, text: String) -> String {
+        crate::app_lock::mask_toast_text(
+            self.app_locked,
+            self.app_lock_config.hide_notifications_when_locked,
+            fallback,
+            text,
+        )
+    }
+
+    /// Reset UI session state shared across normal logout and forgot-passcode sign-out.
+    fn reset_session_ui_after_logout(&mut self) {
+        self.is_logged_in = false;
+        self.user_name.clear();
+        self.user_uin.clear();
+        self.user_avatar = None;
+        crate::account_manager::set_active_uin("");
+        self.background_unread.clear();
+        self.threads.clear();
+        self.unread_counts.clear();
+        self.reaction_unread_counts.clear();
+        self.notified_msg_ids.clear();
+        if let Ok(mut watch) = VANISH_THREADS.lock() {
+            watch.clear();
+        }
+        self.selected_thread_index = 0;
+        self.qr_status = "Đang xin mã QR mới…".into();
+        self.status_msg = "Đã đăng xuất".into();
+        // Đăng xuất → cache nhóm không còn giá trị.
+        self.group_note_drafts.clear();
+        self.group_note_loaded.clear();
+        self.group_note_edited_at.clear();
+        self.group_note_save_retry_at.clear();
+        self.group_note_saved_label.clear();
+        self.group_watch_inputs.clear();
+        self.group_watch_cache.clear();
+        self.group_stats_cache.clear();
+        self.script_list_cache.clear();
+        self.script_editing_id = None;
+        self.script_output.clear();
+        self.group_note_loading.clear();
+        self.group_note_load_error.clear();
+        self.group_stats_loading.clear();
+        self.group_summary_pending = None;
+        self.group_jump_pending = None;
+        self.saved_items.clear();
+        self.scheduled_items.clear();
+        self.clear_pending_texture_uploads();
+        self.incoming_popup = None;
+        self.reaction_inbox = crate::reactions::ReactionInbox::default();
+        self.publish_known_threads();
+    }
+
     /// Clear active thread's unread badge and advance its read-point when focused (#146).
     fn mark_active_thread_read_if_focused(&mut self, ctx: &egui::Context) {
-        if !ctx.input(|i| i.focused) {
+        if !self.effective_window_focused(ctx) {
             return;
         }
         let Some(t) = self.threads.get_mut(self.selected_thread_index) else {
@@ -2721,8 +3578,74 @@ impl ZaloGuiApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
+    /// Drops any pending non-call texture uploads and unblocks their keys in `loading_stickers`.
+    fn clear_pending_texture_uploads(&mut self) {
+        while let Some((key, _)) = self.pending_texture_uploads.pop_front() {
+            self.loading_stickers.remove(&key);
+        }
+    }
+
+    /// Uploads a decoded image to GPU memory and protects it in `last_frame_textures` until rendered.
+    fn upload_decoded_texture(&mut self, ctx: &egui::Context, key: String, image: egui::ColorImage) {
+        let options = if is_call_texture_key(&key) {
+            TextureOptions::LINEAR
+        } else {
+            TextureOptions {
+                mipmap_mode: Some(egui::TextureFilter::Linear),
+                ..TextureOptions::LINEAR
+            }
+        };
+        let bytes = (image.size[0] as u64)
+            .saturating_mul(image.size[1] as u64)
+            .saturating_mul(4);
+        let tex = ctx.load_texture(&key, image, options);
+        install_uploaded_texture(
+            &mut self.sticker_textures,
+            &mut self.texture_lru,
+            &mut self.last_frame_textures,
+            &mut self.loading_stickers,
+            key,
+            tex,
+            bytes,
+            self.active_call.is_some(),
+        );
+    }
+
+    /// Uploads at most `MAX_TEXTURE_UPLOADS_PER_FRAME` pending textures and schedules another frame if more wait.
+    fn drain_pending_texture_uploads(&mut self, ctx: &egui::Context) {
+        if self.pending_texture_uploads.is_empty() {
+            return;
+        }
+        let (batch, has_more) = take_pending_upload_batch(
+            &mut self.pending_texture_uploads,
+            MAX_TEXTURE_UPLOADS_PER_FRAME,
+        );
+        for (key, image) in batch {
+            self.upload_decoded_texture(ctx, key, image);
+        }
+        if has_more {
+            ctx.request_repaint();
+        }
+    }
+
     fn check_events(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        if self.windows_quit_ready {
+            return;
+        }
+        release_cooled_failed_stickers_with_elapsed(
+            &mut self.loading_stickers,
+            &self.failed_stickers,
+            |last_fail| last_fail.elapsed(),
+        );
         while let Ok(event) = self.event_rx.try_recv() {
+            #[cfg(windows)]
+            if self.windows_quit_deadline_secs.is_some()
+                && !matches!(&event, GuiEvent::SettingsSaveFailed | GuiEvent::SettingsFlushed)
+            {
+                continue;
+            }
+            let live_delivery = matches!(&event, GuiEvent::LiveThreadsUpdated(_));
             match event {
                 GuiEvent::NotificationAuthorization { request_id, result } => {
                     self.notification_authorization.finish(request_id, result);
@@ -2758,11 +3681,13 @@ impl ZaloGuiApp {
                         self.group_stats_loading.clear();
                         self.group_summary_pending = None;
                         self.group_jump_pending = None;
+                        self.clear_pending_texture_uploads();
                     }
                     // Refresh (đã login ĐÚNG cùng tài khoản) thì merge, KHÔNG clear —
                     // đổi sang tài khoản khác PHẢI clear sạch state cũ (#119).
                     let is_refresh = self.is_logged_in && self.user_uin == uin;
                     self.is_logged_in = true;
+                    self.has_saved_credentials_cached = true;
                     self.pending_add_account_uin = None;
                     self.user_name = name;
                     self.user_uin = uin;
@@ -2792,17 +3717,29 @@ impl ZaloGuiApp {
                     self.login_in_progress = false;
                     self.composer_sticker_cache.retain(|_, v| !v.is_empty());
                     self.status_msg = "Trực tuyến · Đồng bộ thời gian thực".into();
+                    if !self.app_locked {
+                        self.app_lock_ui.last_activity_ui_time = ctx.input(|i| i.time);
+                    }
                 }
                 GuiEvent::LoginFailed(err) => {
                     self.login_in_progress = false;
                     self.login_status_msg = format!("Lỗi đăng nhập: {err}");
                     self.qr_status = format!("⚠️ {err}");
                 }
-                GuiEvent::ThreadsUpdated(updates) => {
-                    ensure_cjk_font(ctx, thread_texts(&updates));
+                #[cfg(windows)]
+                GuiEvent::SettingsSaveFailed => self.show_toast("Không thể lưu cài đặt."),
+                #[cfg(windows)]
+                GuiEvent::SettingsFlushed => {
+                    self.finish_windows_quit(ctx);
+                    break;
+                }
+                GuiEvent::ThreadsUpdated(updates) | GuiEvent::LiveThreadsUpdated(updates) => {
+                    let parked = self.is_parked_in_windows_tray();
+                    let parked_live = parked && live_delivery;
+                    if !parked {
+                        ensure_cjk_font(ctx, thread_texts(&updates));
+                    }
                     if self.is_logged_in && !updates.is_empty() {
-                        // Group Workspace: flush ghi chú đang treo (debounce) trước khi merge —
-                        // đổi nhóm nhanh (drawer chưa mở/đóng) không mất chữ đã gõ.
                         self.flush_group_note_pending();
                         let prev_selected = self.threads.get(self.selected_thread_index).cloned();
                         let live_ids: HashSet<String> = self
@@ -2822,36 +3759,38 @@ impl ZaloGuiApp {
                             .as_ref()
                             .map(|t| t.id.clone())
                             .unwrap_or_default();
-                        let is_focused = ctx.input(|i| i.focused);
+                        let is_focused = !parked && self.effective_window_focused(ctx);
+                        let mask_notifications = self.should_mask_notifications();
                         let mut new_incoming_alert = false;
+                        let mut unread_changed = false;
                         let mut chat_banners: Vec<(String, String)> = Vec::new();
-                        // Group Workspace: toast khớp keyword gom ở đây để bắn sau merge
-                        // (tránh borrow `existing` + `self` cùng lúc trong vòng lặp).
                         let mut watch_toasts: Vec<String> = Vec::new();
-                        // Script on_message: (thread_id, tin mới) chờ chạy sau merge (tránh borrow).
                         let mut script_msg_pending: Vec<(String, Vec<ChatMessage>)> = Vec::new();
                         let now_ts = crate::login::unix_now() as i64;
                         for mut nt in updates {
-                            let settings_muted_until = self
-                                .settings
-                                .muted_threads
-                                .get(&nt.id)
-                                .copied()
-                                .filter(|&u| u == -1 || u > now_ts);
-                            if let Some(until) = settings_muted_until {
-                                nt.presentation.muted = true;
-                                nt.unread.muted = true;
-                                nt.unread.muted_until = (until > 0).then_some(until);
-                            } else if nt.unread.is_muted() {
-                                nt.presentation.muted = true;
-                            }
+                            let settings_muted_until = crate::unread::active_mute_until(
+                                &self.settings.muted_threads,
+                                &nt.id,
+                                nt.is_group,
+                                now_ts,
+                            );
+                            let incoming_settings_fresh = nt.unread.settings_fresh;
+                            crate::unread::apply_muted_settings_to_thread(
+                                &self.settings.muted_threads,
+                                &mut nt,
+                                now_ts,
+                            );
                             if let Some(existing) = self.threads.iter_mut().find(|t| t.id == nt.id)
                             {
-                                let is_thread_muted = settings_muted_until.is_some()
-                                    || existing.presentation.muted
-                                    || existing.unread.is_muted()
-                                    || nt.presentation.muted
-                                    || nt.unread.is_muted();
+                                let is_thread_muted = crate::unread::is_thread_muted(
+                                    &self.settings.muted_threads,
+                                    existing,
+                                    now_ts,
+                                ) || crate::unread::is_thread_muted(
+                                    &self.settings.muted_threads,
+                                    &nt,
+                                    now_ts,
+                                );
                                 let was_empty = existing.messages.is_empty();
                                 let old_len = existing.messages.len();
                                 let old_max_ts = existing
@@ -2866,13 +3805,53 @@ impl ZaloGuiApp {
                                     .filter(|m| !m.id.is_empty())
                                     .map(|m| m.id.clone())
                                     .collect();
+                                let seen = existing.unread.last_seen_id.as_deref().unwrap_or("");
+                                #[cfg(windows)]
+                                if parked_live
+                                    && !is_thread_muted
+                                    && self.settings.enable_notifications
+                                {
+                                    if let Some(tray) = &mut self.windows_tray {
+                                        new_incoming_alert |= tray.record_message_alerts(
+                                            &self.user_uin,
+                                            &nt.id,
+                                            &nt.messages,
+                                            seen,
+                                        );
+                                    }
+                                }
+                                let live_unread = parked_live.then(|| {
+                                    nt.messages
+                                        .iter()
+                                        .filter(|m| {
+                                            tray_unread_message(m, seen)
+                                                && (seen.is_empty() || !old_ids.contains(&m.id))
+                                        })
+                                        .map(|m| (m.id.clone(), m.sender.clone(), m.text.clone()))
+                                        .collect::<Vec<_>>()
+                                });
                                 crate::chat::merge_thread_into(existing, nt, true);
-                                if was_empty && existing.unread.last_seen_id.is_none() {
-                                    // Empty thread receiving its initial history snapshot must not fire alerts.
-                                    let _ = advance_thread_read_point(existing);
+                                if let Some(until) = settings_muted_until {
+                                    existing.presentation.muted = true;
+                                    existing.unread.muted = true;
+                                    existing.unread.muted_until = (until > 0).then_some(until);
+                                } else if incoming_settings_fresh {
+                                    existing.presentation.muted = existing.unread.is_muted_at(now_ts);
+                                } else if existing.unread.muted_until.is_some_and(|u| u <= now_ts) {
+                                    existing.presentation.muted = false;
+                                    existing.unread.muted = false;
+                                    existing.unread.muted_until = None;
+                                }
+                                if was_empty
+                                    && existing.unread.last_seen_id.is_none()
+                                    && !parked_live
+                                {
+                                    if !parked {
+                                        let _ = advance_thread_read_point(existing);
+                                    }
                                 } else {
                                     let seen = existing.unread.last_seen_id.as_deref().unwrap_or("");
-                                    let fresh_unread_ids: Vec<(String, String, String)> =
+                                    let fresh_unread_ids = live_unread.unwrap_or_else(|| {
                                         collect_fresh_incoming_unread(
                                             &existing.messages,
                                             seen,
@@ -2881,7 +3860,8 @@ impl ZaloGuiApp {
                                         )
                                         .into_iter()
                                         .map(|m| (m.id.clone(), m.sender.clone(), m.text.clone()))
-                                        .collect();
+                                        .collect()
+                                    });
                                     if !fresh_unread_ids.is_empty() {
                                         if self.notified_msg_ids.len() > 8192 {
                                             self.notified_msg_ids.clear();
@@ -2913,72 +3893,33 @@ impl ZaloGuiApp {
                                                     .collect();
                                             let inc_cnt = notify_items.len();
                                             if inc_cnt > 0 {
+                                                unread_changed = true;
                                                 *self
                                                     .unread_counts
                                                     .entry(existing.id.clone())
                                                     .or_insert(0) += inc_cnt;
-                                                if !is_thread_muted {
+                                                if !is_thread_muted && !parked {
                                                     new_incoming_alert = true;
                                                     if let Some((_, sender_raw, text_raw)) =
                                                         notify_items.last()
                                                     {
-                                                        let sender_label = if existing.is_group
-                                                            && !sender_raw.is_empty()
-                                                        {
-                                                            format!(
-                                                                "{} · {}",
-                                                                sender_raw, existing.name
-                                                            )
-                                                        } else {
-                                                            existing.name.clone()
-                                                        };
-                                                        let preview_raw = text_raw.trim();
-                                                        let preview_short: String =
-                                                            if preview_raw.chars().count() > 96 {
-                                                                let s: String = preview_raw
-                                                                    .chars()
-                                                                    .take(96)
-                                                                    .collect();
-                                                                format!("{s}…")
-                                                            } else if preview_raw.is_empty() {
-                                                                "[ Đính kèm / Nhãn dán ]"
-                                                                    .to_string()
-                                                            } else {
-                                                                preview_raw.to_string()
-                                                            };
-                                                        let avt_url = existing
-                                                            .avatar
-                                                            .clone()
-                                                            .filter(|u| !u.trim().is_empty());
-                                                        if let Some(ref url) = avt_url {
-                                                            let tex_key = format!(
-                                                                "thumb_{}",
-                                                                crate::crypto::md5_hex(url)
-                                                            );
-                                                            queue_sticker_fetch(
-                                                                &self.sticker_textures,
-                                                                &mut self.loading_stickers,
-                                                                &self.failed_stickers,
-                                                                tex_key,
-                                                                url.clone(),
-                                                            );
-                                                        }
                                                         let unread_for_thread = self
                                                             .unread_counts
                                                             .get(&existing.id)
                                                             .copied()
                                                             .unwrap_or(1);
-                                                        self.incoming_popup =
-                                                            Some(IncomingPopupState::new(
-                                                                existing.id.clone(),
-                                                                sender_label.clone(),
-                                                                preview_short.clone(),
-                                                                avt_url,
-                                                                existing.is_group,
-                                                                unread_for_thread,
-                                                            ));
-                                                        chat_banners
-                                                            .push((sender_label, preview_short));
+                                                        push_thread_chat_notification(
+                                                            existing,
+                                                            sender_raw,
+                                                            text_raw,
+                                                            unread_for_thread,
+                                                            mask_notifications,
+                                                            &self.sticker_textures,
+                                                            &mut self.loading_stickers,
+                                                            &self.failed_stickers,
+                                                            &mut self.incoming_popup,
+                                                            &mut chat_banners,
+                                                        );
                                                     }
                                                 }
                                             }
@@ -3049,6 +3990,17 @@ impl ZaloGuiApp {
                                     && crate::chat::threads_represent_same_contact(t, &nt)
                             }) {
                                 crate::chat::merge_thread_into(existing, nt, true);
+                                if let Some(until) = settings_muted_until {
+                                    existing.presentation.muted = true;
+                                    existing.unread.muted = true;
+                                    existing.unread.muted_until = (until > 0).then_some(until);
+                                } else if incoming_settings_fresh {
+                                    existing.presentation.muted = existing.unread.is_muted_at(now_ts);
+                                } else if existing.unread.muted_until.is_some_and(|u| u <= now_ts) {
+                                    existing.presentation.muted = false;
+                                    existing.unread.muted = false;
+                                    existing.unread.muted_until = None;
+                                }
                             } else if !nt.id.is_empty() && nt.id != "0" {
                                 // Brand-new thread chưa có read-point (#1445): đây là lần
                                 // đầu thấy thread (history load hoặc poll đầu), KHÔNG
@@ -3058,12 +4010,30 @@ impl ZaloGuiApp {
                                 // event / poll batch tiếp theo) mới đếm qua nhánh
                                 // merge ở trên. Đơn giản và đúng vì mọi tin trong
                                 // batch đầu đều là history, không phải tin mới.
-                                let is_thread_muted = settings_muted_until.is_some()
-                                    || nt.presentation.muted
-                                    || nt.unread.is_muted();
+                                let is_thread_muted = crate::unread::is_thread_muted(
+                                    &self.settings.muted_threads,
+                                    &nt,
+                                    now_ts,
+                                );
                                 let seen = nt.unread.last_seen_id.as_deref().unwrap_or("");
-                                if seen.is_empty() {
-                                    let _ = advance_thread_read_point(&mut nt);
+                                #[cfg(windows)]
+                                if parked_live
+                                    && !is_thread_muted
+                                    && self.settings.enable_notifications
+                                {
+                                    if let Some(tray) = &mut self.windows_tray {
+                                        new_incoming_alert |= tray.record_message_alerts(
+                                            &self.user_uin,
+                                            &nt.id,
+                                            &nt.messages,
+                                            seen,
+                                        );
+                                    }
+                                }
+                                if seen.is_empty() && !parked_live {
+                                    if !parked {
+                                        let _ = advance_thread_read_point(&mut nt);
+                                    }
                                     self.threads.push(nt);
                                     continue;
                                 }
@@ -3074,8 +4044,10 @@ impl ZaloGuiApp {
                                         !m.is_outgoing
                                             && m.kind != crate::message_model::MessageKind::System
                                             && m.unread_policy.counts_unread()
-                                            && crate::unread::compare_ids(&m.id, seen)
-                                                == Some(std::cmp::Ordering::Greater)
+                                            && (seen.is_empty()
+                                                || crate::unread::compare_ids(&m.id, seen)
+                                                    == Some(std::cmp::Ordering::Greater))
+                                            && (!parked_live || !m.id.is_empty())
                                             && (m.id.is_empty()
                                                 || self.notified_msg_ids.insert(m.id.clone()))
                                     })
@@ -3083,77 +4055,65 @@ impl ZaloGuiApp {
                                     .collect();
                                 let inc_cnt = unseen_items.len();
                                 if inc_cnt > 0 && (nt.id != active_tid || !is_focused) {
+                                    unread_changed = true;
                                     *self.unread_counts.entry(nt.id.clone()).or_insert(0) +=
                                         inc_cnt;
                                 }
-                                if !is_thread_muted
+                                if !parked
+                                    && !is_thread_muted
                                     && inc_cnt > 0
                                     && (nt.id != active_tid || !is_focused)
                                 {
                                     new_incoming_alert = true;
-                                    if let Some((_, sender_raw, text_raw)) = unseen_items.last() {
-                                        let sender = if nt.is_group && !sender_raw.is_empty() {
-                                            format!("{} · {}", sender_raw, nt.name)
-                                        } else {
-                                            nt.name.clone()
-                                        };
-                                        let preview_raw = text_raw.trim();
-                                        let preview_short: String =
-                                            if preview_raw.chars().count() > 96 {
-                                                let s: String = preview_raw
-                                                    .chars()
-                                                    .take(96)
-                                                    .collect();
-                                                format!("{s}…")
-                                            } else if preview_raw.is_empty() {
-                                                "[ Đính kèm / Nhãn dán ]".to_string()
-                                            } else {
-                                                preview_raw.to_string()
-                                            };
-                                        let avt_url = nt
-                                            .avatar
-                                            .clone()
-                                            .filter(|u| !u.trim().is_empty());
-                                        if let Some(ref url) = avt_url {
-                                            let tex_key = format!(
-                                                "thumb_{}",
-                                                crate::crypto::md5_hex(url)
-                                            );
-                                            queue_sticker_fetch(
-                                                &self.sticker_textures,
-                                                &mut self.loading_stickers,
-                                                &self.failed_stickers,
-                                                tex_key,
-                                                url.clone(),
-                                            );
-                                        }
-                                        self.incoming_popup = Some(IncomingPopupState::new(
-                                            nt.id.clone(),
-                                            sender.clone(),
-                                            preview_short.clone(),
-                                            avt_url,
-                                            nt.is_group,
+                                    if let Some((_, sender_raw, text_raw)) =
+                                        unseen_items.last()
+                                    {
+                                        push_thread_chat_notification(
+                                            &nt,
+                                            sender_raw,
+                                            text_raw,
                                             inc_cnt,
-                                        ));
-                                        chat_banners.push((sender, preview_short));
+                                            mask_notifications,
+                                            &self.sticker_textures,
+                                            &mut self.loading_stickers,
+                                            &self.failed_stickers,
+                                            &mut self.incoming_popup,
+                                            &mut chat_banners,
+                                        );
                                     }
                                 }
                                 self.threads.push(nt);
                             }
                         }
                         // Group Workspace: bắn toast khớp keyword sau merge (ưu tiên, sau cùng thắng).
-                        for toast in watch_toasts {
-                            self.show_toast(toast);
+                        if mask_notifications {
+                            if let Some(first) = watch_toasts.into_iter().next() {
+                                self.show_toast(
+                                    self.mask_toast_if_locked("🔔 Bạn có thông báo mới", first),
+                                );
+                            }
+                        } else {
+                            for toast in watch_toasts {
+                                self.show_toast(toast);
+                            }
                         }
-                        if new_incoming_alert && self.settings.enable_notifications {
+                        let notify = new_incoming_alert && self.settings.enable_notifications;
+                        if notify {
                             if self.settings.play_notification_sound {
                                 crate::media::play_notification_chime();
                             }
                             #[cfg(not(target_os = "windows"))]
                             crate::os_notify::notify_chat_batch(&chat_banners);
                             #[cfg(target_os = "windows")]
-                            let _ = &chat_banners;
+                            self.notify_windows_tray();
                             ctx.request_repaint();
+                            if !is_focused && !parked {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                                    egui::UserAttentionType::Informational,
+                                ));
+                            }
+                        }
+                        if notify || (parked && unread_changed) {
                             let total_unread: usize = self.unread_counts.values().sum();
                             let title = if total_unread > 0 {
                                 format!("({total_unread}) ctdozlite")
@@ -3161,11 +4121,6 @@ impl ZaloGuiApp {
                                 "ctdozlite".to_string()
                             };
                             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-                            if !is_focused {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                                    egui::UserAttentionType::Informational,
-                                ));
-                            }
                         }
                         crate::chat::deduplicate_threads(&mut self.threads, Some(&live_ids));
                         // Restore selected thread by exact `id` first so contacts sharing the
@@ -3270,43 +4225,8 @@ impl ZaloGuiApp {
                     self.handle_background_account_activity(activity);
                 }
                 GuiEvent::LoggedOut => {
-                    self.is_logged_in = false;
-                    self.user_name.clear();
-                    self.user_uin.clear();
-                    crate::account_manager::set_active_uin("");
-                    self.background_unread.clear();
-                    self.threads.clear();
-                    self.unread_counts.clear();
-                    self.reaction_unread_counts.clear();
-                    self.notified_msg_ids.clear();
-                    if let Ok(mut watch) = VANISH_THREADS.lock() {
-                        watch.clear();
-                    }
-                    self.selected_thread_index = 0;
-                    self.qr_status = "Đang xin mã QR mới…".into();
-                    self.status_msg = "Đã đăng xuất".into();
-                    // Đăng xuất → cache nhóm không còn giá trị.
-                    self.group_note_drafts.clear();
-                    self.group_note_loaded.clear();
-                    self.group_note_edited_at.clear();
-                    self.group_note_save_retry_at.clear();
-                    self.group_note_saved_label.clear();
-                    self.group_watch_inputs.clear();
-                    self.group_watch_cache.clear();
-                    self.group_stats_cache.clear();
-                    self.script_list_cache.clear();
-                    self.script_editing_id = None;
-                    self.script_output.clear();
-                    self.group_note_loading.clear();
-                    self.group_note_load_error.clear();
-                    self.group_stats_loading.clear();
-                    self.group_summary_pending = None;
-                    self.group_jump_pending = None;
-                    self.saved_items.clear();
-                    self.scheduled_items.clear();
-                    self.incoming_popup = None;
-                    self.reaction_inbox = crate::reactions::ReactionInbox::default();
-                    self.publish_known_threads();
+                    self.reset_session_ui_after_logout();
+                    self.refresh_saved_credentials_cache();
                 }
                 GuiEvent::AccountSwitched {
                     uin,
@@ -3318,6 +4238,7 @@ impl ZaloGuiApp {
                     // ở đây phòng trường hợp GUI còn draft treo chưa kịp lưu.
                     self.flush_group_note_pending();
                     self.is_logged_in = true;
+                    self.has_saved_credentials_cached = true;
                     self.pending_add_account_uin = None;
                     self.user_uin = uin;
                     crate::account_manager::set_active_uin(&self.user_uin);
@@ -3372,6 +4293,9 @@ impl ZaloGuiApp {
                     self.publish_known_threads();
                     if let Some(tx) = WORKER_TX.get() {
                         let _ = tx.send(WorkerCmd::RefreshThreads);
+                    }
+                    if !self.app_locked {
+                        self.app_lock_ui.last_activity_ui_time = ctx.input(|i| i.time);
                     }
                 }
                 GuiEvent::MessageSent {
@@ -3619,15 +4543,11 @@ impl ZaloGuiApp {
                             continue;
                         }
                         for t in &self.threads {
-                            let muted = self
-                                .settings
-                                .muted_threads
-                                .get(&t.id)
-                                .copied()
-                                .filter(|&u| u == -1 || u > now_ts_react)
-                                .is_some()
-                                || t.presentation.muted
-                                || t.unread.is_muted();
+                            let muted = crate::unread::is_thread_muted(
+                                &self.settings.muted_threads,
+                                t,
+                                now_ts_react,
+                            );
                             if muted || !reactions_notify_on {
                                 continue;
                             }
@@ -3659,7 +4579,8 @@ impl ZaloGuiApp {
                         .get(self.selected_thread_index)
                         .map(|t| t.id.clone())
                         .unwrap_or_default();
-                    let is_focused_now = ctx.input(|i| i.focused);
+                    let is_focused_now =
+                        !self.is_parked_in_windows_tray() && self.effective_window_focused(ctx);
                     let my_uid_count = self.user_uin.clone();
                     for ev in &accepted {
                         if ev.r_type < 0 || ev.historical || banner_state.is_done(ev) {
@@ -3668,7 +4589,7 @@ impl ZaloGuiApp {
                         if ev.sender_id.is_empty() || ev.sender_id == my_uid_count {
                             continue;
                         }
-                        let mut hit_tid: Option<String> = None;
+                        let mut hit_target: Option<(String, bool, bool)> = None;
                         for t in &self.threads {
                             let Some(m) = find_reaction_target(&t.messages, ev) else {
                                 continue;
@@ -3676,28 +4597,30 @@ impl ZaloGuiApp {
                             if !m.is_outgoing {
                                 continue;
                             }
-                            if !ev.thread_id.is_empty() {
-                                hit_tid = Some(ev.thread_id.clone());
-                                break;
+                            let tid_val = if !ev.thread_id.is_empty() {
+                                ev.thread_id.clone()
                             } else {
-                                hit_tid = Some(t.id.clone());
-                                break;
-                            }
+                                t.id.clone()
+                            };
+                            let t_muted = crate::unread::is_thread_muted(
+                                &self.settings.muted_threads,
+                                t,
+                                now_ts_react,
+                            );
+                            hit_target = Some((tid_val, t.is_group, t_muted));
+                            break;
                         }
-                        let Some(tid) = hit_tid else { continue };
-                        let is_muted = self
-                            .settings
-                            .muted_threads
-                            .get(&tid)
-                            .copied()
-                            .filter(|&u| u == -1 || u > now_ts_react)
-                            .is_some()
-                            || self
-                                .threads
-                                .iter()
-                                .find(|t| t.id == tid)
-                                .map(|t| t.presentation.muted || t.unread.is_muted())
-                                .unwrap_or(false);
+                        let Some((tid, hit_is_group, hit_thread_muted)) = hit_target else {
+                            continue;
+                        };
+                        let is_muted = hit_thread_muted
+                            || crate::unread::active_mute_until(
+                                &self.settings.muted_threads,
+                                &tid,
+                                hit_is_group,
+                                now_ts_react,
+                            )
+                            .is_some();
                         if is_muted {
                             continue;
                         }
@@ -3736,8 +4659,26 @@ impl ZaloGuiApp {
                         });
                     }
                     if !reaction_banners.is_empty() && reactions_notify_on {
+                        #[cfg(windows)]
+                        if self.is_parked_in_windows_tray() {
+                            if reactions_sound_on {
+                                crate::media::play_notification_chime();
+                            }
+                            self.notify_windows_tray_with_body("Bạn có lượt bày tỏ cảm xúc mới");
+                            continue;
+                        }
+                        let masked_reactions: Vec<(String, String, Option<String>, bool, String)> =
+                            reaction_banners
+                                .into_iter()
+                                .map(|(tid, title, avt, is_grp, body)| {
+                                    let (m_title, m_body, m_avt) =
+                                        self.mask_notification_payload(&title, &body, avt, 1);
+                                    (tid, m_title, m_avt, is_grp, m_body)
+                                })
+                                .collect();
                         #[cfg(target_os = "windows")]
-                        if let Some((tid, title, avt, is_grp, body)) = reaction_banners.last().cloned()
+                        if let Some((tid, title, avt, is_grp, body)) =
+                            masked_reactions.last().cloned()
                         {
                             self.incoming_popup = Some(IncomingPopupState::new(
                                 tid, title, body, avt, is_grp, 1,
@@ -3745,8 +4686,11 @@ impl ZaloGuiApp {
                             ctx.request_repaint();
                         }
                         #[cfg(not(target_os = "windows"))]
-                        for (_, title, _, _, body) in &reaction_banners {
-                            crate::os_notify::notify(title, body);
+                        for (title, body) in reaction_os_notify_payloads(
+                            self.should_mask_notifications(),
+                            &masked_reactions,
+                        ) {
+                            crate::os_notify::notify(&title, &body);
                         }
                         if reactions_sound_on {
                             #[cfg(target_os = "windows")]
@@ -3987,42 +4931,27 @@ impl ZaloGuiApp {
                     ctx.request_repaint();
                 }
                 GuiEvent::StickerImageReady { key, image } => {
-                    self.loading_stickers.remove(&key);
                     self.failed_stickers.remove(&key);
-                    // Avatars and thumbnails are drawn far below their pixel size; without
-                    // mipmaps the downscale aliases into a grainy image. Live call frames are
-                    // replaced every frame, so they skip the mipmap generation cost.
-                    let options = if key.starts_with("call_") {
-                        TextureOptions::LINEAR
+                    if is_call_texture_key(&key) {
+                        self.upload_decoded_texture(ctx, key, image);
                     } else {
-                        TextureOptions {
-                            mipmap_mode: Some(egui::TextureFilter::Linear),
-                            ..TextureOptions::LINEAR
-                        }
-                    };
-                    let bytes = (image.size[0] as u64)
-                        .saturating_mul(image.size[1] as u64)
-                        .saturating_mul(4);
-                    let tex = ctx.load_texture(&key, image, options);
-                    self.sticker_textures.insert(key.clone(), tex);
-                    for evicted_key in
-                        self.texture_lru
-                            .insert_protecting(key, bytes, &self.last_frame_textures)
-                    {
-                        self.sticker_textures.remove(&evicted_key);
+                        push_pending_texture_upload(&mut self.pending_texture_uploads, key, image);
                     }
                 }
                 GuiEvent::StickerImageFailed { key } => {
-                    self.loading_stickers.remove(&key);
-                    if key.starts_with("call_remote_video") {
-                        self.sticker_textures.remove(&key);
-                        ctx.request_repaint();
-                    } else {
-                        record_sticker_fetch_failure(
-                            &mut self.failed_stickers,
+                    if handle_sticker_fetch_failure(
+                        &mut self.loading_stickers,
+                        &mut self.failed_stickers,
+                        &key,
+                        std::time::Instant::now(),
+                    ) {
+                        remove_cached_texture(
+                            &mut self.sticker_textures,
+                            &mut self.texture_lru,
+                            &mut self.last_frame_textures,
                             &key,
-                            std::time::Instant::now(),
                         );
+                        ctx.request_repaint();
                     }
                 }
                 GuiEvent::StickerStoreLoaded(packs) => {
@@ -4232,17 +5161,18 @@ impl ZaloGuiApp {
                             .as_ref()
                             .and_then(|c| c.error_reason.as_ref())
                             .is_some();
-                        self.sticker_textures.remove("call_remote_video");
-                        self.sticker_textures.remove("call_remote_video_1");
-                        self.sticker_textures.remove("call_remote_video_2");
-                        self.sticker_textures.remove("call_remote_video_3");
-                        self.sticker_textures.remove("call_remote_video_4");
-                        self.sticker_textures.remove("call_remote_video_5");
-                        self.sticker_textures.remove("call_local_video");
+                        clear_call_video_textures(
+                            &mut self.sticker_textures,
+                            &mut self.texture_lru,
+                            &mut self.last_frame_textures,
+                            true,
+                        );
                         if !has_error {
                             self.active_call = None;
                         }
                     } else if let Some(ref mut call) = self.active_call {
+                        let was_connected =
+                            call.state_label == "Đang trong cuộc gọi (Pure-Rust VoIP)";
                         if state == "incall" || state == "connected" {
                             call.is_incoming_ringing = false;
                         }
@@ -4257,6 +5187,18 @@ impl ZaloGuiApp {
                                 _ => format!("Đang kết nối ({state})…"),
                             };
                         }
+                        if (state == "incall" || state == "connected")
+                            && !was_connected
+                            && call.is_video
+                            && !call.cam_enabled
+                        {
+                            if let Some(tx) = WORKER_TX.get() {
+                                let _ = tx.send(WorkerCmd::SetCallMediaState {
+                                    is_on_mic: !call.mic_muted,
+                                    is_on_cam: false,
+                                });
+                            }
+                        }
                     }
                 }
                 GuiEvent::IncomingCall {
@@ -4266,35 +5208,32 @@ impl ZaloGuiApp {
                     is_video,
                     is_group,
                 } => {
+                    #[cfg(windows)]
+                    self.restore_windows_tray(ctx);
                     let resolved_name = self
                         .threads
                         .iter()
                         .find(|t| t.id == caller_id)
                         .map(|t| t.name.clone())
                         .unwrap_or(caller_name);
-                    self.status_msg = format!(
-                        "📲 Cuộc gọi {} đến từ {resolved_name}…",
-                        if is_video { "video" } else { "thoại" }
-                    );
-                    self.active_call = Some(ActiveCallOverlay {
-                        partner_id: caller_id,
-                        partner_name: resolved_name,
+                    self.status_msg =
+                        incoming_call_status_text(self.app_locked, &resolved_name, is_video);
+                    let cam_enabled = if is_video && crate::media::is_ffmpeg_available() {
+                        let (_, cams, scanning) =
+                            crate::media::list_media_devices_nonblocking(false);
+                        incoming_initial_cam_enabled(true, true, &cams, scanning)
+                    } else {
+                        false
+                    };
+                    self.active_call = Some(ActiveCallOverlay::new(
+                        caller_id,
+                        resolved_name,
                         is_video,
                         is_group,
-                        state_label: "Cuộc gọi đến đang đổ chuông…".into(),
-                        started_at: std::time::Instant::now(),
-                        mic_muted: false,
-                        cam_enabled: is_video,
-                        is_incoming_ringing: true,
-                        error_code: None,
-                        error_reason: None,
-                        speaker_view: false,
-                        pinned_tile_idx: 0,
-                        call_page: 0,
-                        members_popover_open: false,
-                        invite_search_query: String::new(),
-                        quick_reply_popover_open: false,
-                    });
+                        "Cuộc gọi đến đang đổ chuông…".into(),
+                        cam_enabled,
+                        true,
+                    ));
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                         egui::UserAttentionType::Critical,
                     ));
@@ -4311,7 +5250,7 @@ impl ZaloGuiApp {
                     self.status_msg = msg;
                 }
                 GuiEvent::ScriptToast { message, .. } => {
-                    self.show_toast(message);
+                    self.show_toast(self.mask_toast_if_locked("Thông báo mới", message));
                 }
                 GuiEvent::GroupLeft { group_id: _, success, error } => {
                     if success {
@@ -4436,7 +5375,11 @@ impl ZaloGuiApp {
                     } else {
                         String::new()
                     };
-                    self.show_toast(format!("⏰ Nhắc tin: {preview}{extra} — bấm vào đây để xem"));
+                    let raw_toast =
+                        format!("⏰ Nhắc tin: {preview}{extra} — bấm vào đây để xem");
+                    self.show_toast(
+                        self.mask_toast_if_locked("⏰ Bạn có nhắc hẹn đến hạn", raw_toast),
+                    );
                 }
                 GuiEvent::ReminderListUpdated => {
                     self.refresh_draft_reminder_cache();
@@ -4578,25 +5521,14 @@ impl ZaloGuiApp {
                     }
                 }
                 GuiEvent::MuteSnapshotSynced(mute_map) => {
-                    self.settings.muted_threads = mute_map.clone();
-                    self.settings.save();
                     let now_ts = crate::login::unix_now() as i64;
-                    for t in &mut self.threads {
-                        if let Some(&until) = mute_map.get(&t.id) {
-                            let active = until == -1 || until > now_ts;
-                            t.presentation.muted = active;
-                            t.unread.muted = active;
-                            t.unread.muted_until = (until > 0).then_some(until);
-                            t.unread.settings_fresh = true;
-                            t.unread.fresh = true;
-                        } else {
-                            t.presentation.muted = false;
-                            t.unread.muted = false;
-                            t.unread.muted_until = None;
-                            t.unread.settings_fresh = true;
-                            t.unread.fresh = true;
-                        }
-                    }
+                    apply_mute_snapshot_to_state(
+                        &mut self.settings.muted_threads,
+                        &mut self.threads,
+                        mute_map,
+                        now_ts,
+                    );
+                    self.settings.save();
                     self.persist_threads_async();
                 }
                 GuiEvent::PinnedSnapshotSynced(pinned_ids) => {
@@ -4618,26 +5550,11 @@ impl ZaloGuiApp {
                     self.persist_threads_async();
                 }
                 GuiEvent::MuteEventsReceived(events) => {
-                    let mut changed = false;
-                    for ev in events {
-                        if ev.muted {
-                            let until_val = ev.muted_until.unwrap_or(-1);
-                            self.settings
-                                .muted_threads
-                                .insert(ev.thread_id.clone(), until_val);
-                        } else {
-                            self.settings.muted_threads.remove(&ev.thread_id);
-                        }
-                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == ev.thread_id) {
-                            t.presentation.muted = ev.muted;
-                            t.unread.muted = ev.muted;
-                            t.unread.muted_until = ev.muted_until;
-                            t.unread.settings_fresh = true;
-                            t.unread.fresh = true;
-                        }
-                        changed = true;
-                    }
-                    if changed {
+                    if apply_mute_events_to_state(
+                        &mut self.settings.muted_threads,
+                        &mut self.threads,
+                        events,
+                    ) {
                         self.settings.save();
                         self.persist_threads_async();
                     }
@@ -4929,6 +5846,46 @@ impl ZaloGuiApp {
                     self.script_output = output;
                     self.script_logs_cache.insert(thread_id, logs);
                 }
+                GuiEvent::SystemWakeDetected { .. } => {
+                    if self.app_lock_config.lock_on_sleep {
+                        self.try_trigger_lock(ctx);
+                    }
+                }
+                GuiEvent::LockWatchdogTick => {
+                    let now_ui = ctx.input(|i| i.time);
+                    if !self.app_locked
+                        && self.app_lock_config.enabled
+                        && crate::app_lock::is_idle_expired(
+                            self.app_lock_ui.last_activity_ui_time,
+                            now_ui,
+                            self.app_lock_config.idle_timeout_secs,
+                            is_live_active_call(self.active_call.as_ref()),
+                        )
+                    {
+                        self.try_trigger_lock(ctx);
+                    }
+                }
+                GuiEvent::ForgotLockSignedOut => {
+                    self.reset_session_ui_after_logout();
+                    self.pending_add_account_uin = None;
+                    self.qr_texture = None;
+                    self.login_in_progress = false;
+                    self.account_menu_accounts.clear();
+                    self.has_saved_credentials_cached = false;
+                    self.active_call = None;
+                    self.app_lock_config = crate::app_lock::AppLockConfig::default();
+                    self.app_locked = false;
+                    let now_ui = ctx.input(|i| i.time);
+                    self.app_lock_ui = AppLockUiState {
+                        last_activity_ui_time: now_ui,
+                        last_frame_ui_time: now_ui,
+                        ..Default::default()
+                    };
+                    worker::set_idle_lock_timeout_secs(0);
+                    if let Some(tx) = WORKER_TX.get() {
+                        let _ = tx.send(WorkerCmd::RequestQr);
+                    }
+                }
             }
         }
     }
@@ -5000,18 +5957,16 @@ fn file_uri(path: &str) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
 // Lightweight Background Session Worker (2-thread Tokio pool, off-UI disk I/O)
-// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
 // Main eframe::App Implementation
-// ---------------------------------------------------------------------------
 
 impl eframe::App for ZaloGuiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.update_frame(ctx, frame);
-        self.color_emoji.paint(ctx);
+        if !ctx.will_discard() && !self.is_parked_in_windows_tray() {
+            self.color_emoji.paint(ctx);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -5032,40 +5987,64 @@ impl eframe::App for ZaloGuiApp {
                 );
             }
         }
-        let _ = self.settings.save();
+        #[cfg(windows)]
+        drop(self.windows_tray.take());
+        #[cfg(not(windows))]
+        self.settings.save();
         std::process::exit(0);
     }
 }
 
 impl ZaloGuiApp {
     fn update_frame(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.ensure_windows_frameless_subclass(ctx);
-
-        // Ctrl+Q and the tray's "Thoát" quit; closing the window only hides it to the
-        // tray while a tray icon is shown, so the app keeps receiving messages.
-        let quit_now = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q))
-            || self.take_tray_quit_request();
-        if quit_now {
-            self.allow_quit = true;
+        #[cfg(windows)]
+        self.update_windows_close(ctx);
+        if !self.is_parked_in_windows_tray() {
+            self.ensure_windows_frameless_subclass(ctx);
         }
-        let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if close_requested && !self.allow_quit && self.hides_to_tray() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        } else if quit_now || close_requested {
-            self.allow_quit = true;
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::EndCall);
+
+        #[cfg(not(windows))]
+        {
+            let quit_now = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q))
+                || self.take_tray_quit_request();
+            if quit_now {
+                self.allow_quit = true;
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            let close_requested = ctx.input(|i| i.viewport().close_requested());
+            if close_requested && !self.allow_quit && self.hides_to_tray() {
+                self.try_trigger_lock(ctx);
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else if quit_now || close_requested {
+                self.allow_quit = true;
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.send(WorkerCmd::EndCall);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
         #[cfg(target_os = "linux")]
         if let Some(tray) = self.tray.as_mut() {
             tray.set_unread(self.unread_counts.values().sum());
         }
-        if ctx.input(|i| {
-            (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)
-        }) {
+        if !self.app_locked
+            && self.app_lock_config.enabled
+            && ctx.input(|i| {
+                (i.modifiers.ctrl || (cfg!(target_os = "macos") && i.modifiers.command))
+                    && !i.modifiers.shift
+                    && !i.modifiers.alt
+                    && i.key_pressed(Key::L)
+            })
+        {
+            self.try_trigger_lock(ctx);
+        }
+        if !self.app_locked
+            && ctx.input(|i| {
+                (i.modifiers.ctrl || i.modifiers.command)
+                    && i.modifiers.shift
+                    && i.key_pressed(Key::P)
+            })
+        {
             self.settings_modal_open = true;
             self.settings_tab = SettingsTab::Privacy;
         }
@@ -5096,7 +6075,50 @@ impl ZaloGuiApp {
             self.theme_dirty = false;
         }
 
+        let (now_ui, has_user_input) = ctx.input(|i| {
+            let active = !i.events.is_empty()
+                || i.pointer.any_pressed()
+                || i.pointer.any_released()
+                || i.pointer.delta() != Vec2::ZERO;
+            (i.time, active)
+        });
+        record_activity_if_input(
+            &mut self.app_lock_ui.last_activity_ui_time,
+            now_ui,
+            has_user_input,
+        );
+
         self.check_events(ctx);
+        let parked = self.is_parked_in_windows_tray();
+        if !parked {
+            self.drain_pending_texture_uploads(ctx);
+        }
+
+        let now_wall = crate::login::unix_now();
+        let wall_delta = now_wall.saturating_sub(self.app_lock_ui.last_frame_wall_unix);
+        let ui_delta = (now_ui - self.app_lock_ui.last_frame_ui_time).max(0.0);
+        self.app_lock_ui.last_frame_wall_unix = now_wall;
+        self.app_lock_ui.last_frame_ui_time = now_ui;
+
+        if !self.app_locked && self.app_lock_config.enabled {
+            let sleep_jumped = self.app_lock_config.lock_on_sleep
+                && wall_delta >= crate::app_lock::SLEEP_JUMP_THRESHOLD_SECS
+                && (wall_delta as f64 - ui_delta) >= 30.0;
+            let idle_expired = crate::app_lock::is_idle_expired(
+                self.app_lock_ui.last_activity_ui_time,
+                now_ui,
+                self.app_lock_config.idle_timeout_secs,
+                is_live_active_call(self.active_call.as_ref()),
+            );
+            if sleep_jumped || idle_expired {
+                self.try_trigger_lock(ctx);
+            }
+        }
+
+        #[cfg(windows)]
+        if parked || self.allow_quit {
+            return;
+        }
 
         let scr_check = ctx.screen_rect();
         if scr_check.width() < 64.0 || scr_check.height() < 64.0 {
@@ -5241,8 +6263,7 @@ impl ZaloGuiApp {
 
         self.handle_frameless_resize(ctx);
         self.render_custom_title_bar(ctx, &pal);
-        // Dev Inspector Panel
-        if self.dev_mode && self.dev_panel_open {
+        if !self.app_locked && self.dev_mode && self.dev_panel_open {
             egui::TopBottomPanel::bottom("dev_inspector")
                 .resizable(true)
                 .default_height(250.0)
@@ -5285,20 +6306,29 @@ impl ZaloGuiApp {
                 });
         }
 
-        // Main Workspace
-        if !self.is_logged_in {
+        if self.app_locked {
+            self.render_lock_screen(ctx, &pal);
+            if self.incoming_popup.is_some() && self.settings.enable_notifications {
+                self.render_toast_overlay(ctx, &pal);
+            }
+        } else if !self.is_logged_in {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(pal.bg_chat_canvas))
                 .show(ctx, |ui| {
                     self.render_login_screen(ui, &pal);
                 });
+            #[cfg(windows)]
+            self.render_toast_overlay(ctx, &pal);
         } else {
             self.mark_active_thread_read_if_focused(ctx);
+            self.render_app_lock_setup_modal(ctx, &pal);
             self.render_chat_workspace(ctx, &pal);
         }
 
         // Auto-notification modal for new GitHub Releases (works on both Login & Chat screens)
-        self.render_update_notification_modal(ctx, &pal);
+        if !self.app_locked {
+            self.render_update_notification_modal(ctx, &pal);
+        }
 
         if !self.is_window_maximized(ctx) {
             let screen = ctx.screen_rect();
@@ -5320,9 +6350,6 @@ impl ZaloGuiApp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Screen Renderers
-// ---------------------------------------------------------------------------
 
 impl ZaloGuiApp {
     fn resize_cursor_for(dir: egui::ResizeDirection) -> CursorIcon {
@@ -5542,9 +6569,14 @@ impl ZaloGuiApp {
         let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
             return;
         };
-        // Keep the top-right window control buttons (Close / Max / Min / Theme) clickable
-        // even right up to the top-right corner of the frameless window.
-        if pos.y < screen.top() + 34.0 && pos.x >= screen.right() - 180.0 {
+        // Keep the top-right window control buttons (Close / Max / Min / Theme / Lock)
+        // clickable even right up to the top-right corner of the frameless window.
+        let reserve_w = title_bar_controls_reserve_width(title_bar_shows_lock_button(
+            self.app_locked,
+            self.is_logged_in || self.has_saved_credentials_cached,
+            self.app_lock_config.enabled,
+        ));
+        if pos.y < screen.top() + 34.0 && pos.x >= screen.right() - reserve_w {
             return;
         }
         let border = 5.0_f32;
@@ -5639,7 +6671,6 @@ impl ZaloGuiApp {
                 let mut buttons_left_x = bar_rect.right();
 
                 ui.horizontal_centered(|ui| {
-                    // 1. App Logo (20x20)
                     let (logo_rect, _) =
                         ui.allocate_exact_size(Vec2::new(20.0, 20.0), Sense::hover());
                     if let Some(tex) = &self.app_logo_texture {
@@ -5672,7 +6703,12 @@ impl ZaloGuiApp {
                         );
                     }
 
-                    if !compact_title_bar && self.is_logged_in && !self.user_name.is_empty() {
+                    if title_bar_shows_user_name(
+                        compact_title_bar,
+                        self.is_logged_in,
+                        self.app_locked,
+                        &self.user_name,
+                    ) {
                         ui.add_space(6.0);
                         ui.label(
                             RichText::new(format!("·  {}", truncate_chars(&self.user_name, 18)))
@@ -5681,11 +6717,9 @@ impl ZaloGuiApp {
                         );
                     }
 
-                    // 2. Right-side Window Control Buttons
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
 
-                        // Close Button (46x32)
                         let (close_rect, close_resp) =
                             ui.allocate_exact_size(Vec2::new(46.0, 32.0), Sense::click());
                         if close_resp.hovered() {
@@ -5717,7 +6751,11 @@ impl ZaloGuiApp {
                             "Đóng ứng dụng (Ctrl+Q)"
                         });
                         if close_resp.clicked() {
+                            #[cfg(windows)]
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            #[cfg(not(windows))]
                             if to_tray {
+                                self.try_trigger_lock(ctx);
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                             } else {
                                 self.allow_quit = true;
@@ -5728,7 +6766,6 @@ impl ZaloGuiApp {
                             }
                         }
 
-                        // Maximize / Restore Button (46x32)
                         let (max_rect, max_resp) =
                             ui.allocate_exact_size(Vec2::new(46.0, 32.0), Sense::click());
                         if max_resp.hovered() {
@@ -5779,7 +6816,6 @@ impl ZaloGuiApp {
                             toggle_max_requested = true;
                         }
 
-                        // Minimize Button (46x32)
                         let (min_rect, min_resp) =
                             ui.allocate_exact_size(Vec2::new(46.0, 32.0), Sense::click());
                         if min_resp.hovered() {
@@ -5800,7 +6836,6 @@ impl ZaloGuiApp {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
 
-                        // Quick Theme Toggle (36x32)
                         let (th_rect, th_resp) =
                             ui.allocate_exact_size(Vec2::new(36.0, 32.0), Sense::click());
                         if th_resp.hovered() {
@@ -5840,44 +6875,114 @@ impl ZaloGuiApp {
 
                         buttons_left_x = th_rect.left();
 
-                        if let Some(ref upd) = self.update_info {
-                            if upd.has_update && !compact_title_bar {
-                                ui.add_space(6.0);
-                                let badge_txt = if self.update_downloading {
-                                    let (dl, tot) = self.update_progress.unwrap_or((0, 0));
-                                    if tot > 0 {
-                                        let pct = ((dl as f64 / tot as f64) * 100.0).clamp(0.0, 100.0);
-                                        format!("{} Đang cập nhật {pct:.0}%", lucide::REFRESH)
+                        if title_bar_shows_lock_button(
+                            self.app_locked,
+                            self.is_logged_in || self.has_saved_credentials_cached,
+                            self.app_lock_config.enabled,
+                        ) {
+                            let (lock_rect, lock_resp) =
+                                ui.allocate_exact_size(Vec2::new(36.0, 32.0), Sense::click());
+                            if lock_resp.hovered() {
+                                ui.painter()
+                                    .rect_filled(lock_rect, Rounding::ZERO, pal.bg_hover);
+                            }
+                            let (lock_color, lock_tip) = if self.app_lock_config.enabled {
+                                (
+                                    if lock_resp.hovered() {
+                                        pal.primary_hover
                                     } else {
-                                        format!("{} Đang tải cập nhật…", lucide::REFRESH)
-                                    }
-                                } else {
-                                    format!("{} Cập nhật mới v{}", lucide::SPARKLES, upd.latest_version)
-                                };
-                                let upd_pill = egui::Button::new(
-                                    RichText::new(badge_txt)
-                                        .size(11.2)
-                                        .color(pal.primary_fg)
-                                        .strong(),
+                                        pal.primary
+                                    },
+                                    if cfg!(target_os = "macos") {
+                                        "Khoá ứng dụng (Cmd+L)"
+                                    } else {
+                                        "Khoá ứng dụng (Ctrl+L)"
+                                    },
                                 )
-                                .fill(pal.primary)
-                                .rounding(Rounding::same(5.0));
-                                let r = ui
-                                    .add(upd_pill)
-                                    .on_hover_cursor(CursorIcon::PointingHand)
-                                    .on_hover_text(format!(
-                                        "Đã có phiên bản v{} trên GitHub Releases — Bấm để xem chi tiết & cập nhật tự động",
-                                        upd.latest_version
-                                    ));
-                                buttons_left_x = r.rect.left() - 8.0;
-                                if r.clicked() {
-                                    self.update_modal_open = true;
-                                    self.update_banner_dismissed = false;
+                            } else {
+                                (
+                                    if lock_resp.hovered() {
+                                        pal.text_primary
+                                    } else {
+                                        pal.text_muted
+                                    },
+                                    "Thiết lập khoá ứng dụng (App Lock)",
+                                )
+                            };
+                            ui.painter().text(
+                                lock_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                lucide::LOCK,
+                                FontId::proportional(13.5),
+                                lock_color,
+                            );
+                            if lock_resp
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .on_hover_text(lock_tip)
+                                .clicked()
+                            {
+                                if self.app_lock_config.enabled {
+                                    self.refresh_saved_credentials_cache();
+                                    if self.is_logged_in || self.has_saved_credentials_cached {
+                                        self.lock_now(ctx);
+                                    }
+                                } else if self.is_logged_in {
+                                    self.open_app_lock_setup_modal(ctx);
+                                } else {
+                                    self.show_toast("Đăng nhập để thiết lập Khoá ứng dụng");
+                                }
+                            }
+                            buttons_left_x = lock_rect.left();
+                        }
+
+                        if !self.app_locked {
+                            if let Some(ref upd) = self.update_info {
+                                if title_bar_shows_update_pill(
+                                    self.app_locked,
+                                    upd.has_update,
+                                    compact_title_bar,
+                                ) {
+                                    ui.add_space(6.0);
+                                    let badge_txt = if self.update_downloading {
+                                        let (dl, tot) = self.update_progress.unwrap_or((0, 0));
+                                        if tot > 0 {
+                                            let pct = ((dl as f64 / tot as f64) * 100.0).clamp(0.0, 100.0);
+                                            format!("{} Đang cập nhật {pct:.0}%", lucide::REFRESH)
+                                        } else {
+                                            format!("{} Đang tải cập nhật…", lucide::REFRESH)
+                                        }
+                                    } else {
+                                        format!("{} Cập nhật mới v{}", lucide::SPARKLES, upd.latest_version)
+                                    };
+                                    let upd_pill = egui::Button::new(
+                                        RichText::new(badge_txt)
+                                            .size(11.2)
+                                            .color(pal.primary_fg)
+                                            .strong(),
+                                    )
+                                    .fill(pal.primary)
+                                    .rounding(Rounding::same(5.0));
+                                    let r = ui
+                                        .add(upd_pill)
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text(format!(
+                                            "Đã có phiên bản v{} trên GitHub Releases — Bấm để xem chi tiết & cập nhật tự động",
+                                            upd.latest_version
+                                        ));
+                                    buttons_left_x = r.rect.left() - 8.0;
+                                    if r.clicked() {
+                                        self.update_modal_open = true;
+                                        self.update_banner_dismissed = false;
+                                    }
                                 }
                             }
                         }
 
-                        if !self.is_logged_in && !self.threads.is_empty() {
+                        if title_bar_shows_saved_history_btn(
+                            self.app_locked,
+                            self.is_logged_in,
+                            !self.threads.is_empty(),
+                        ) {
                             ui.add_space(8.0);
                             let hist_btn = egui::Button::new(
                                 RichText::new("Xem lịch sử đã lưu")
@@ -6230,14 +7335,15 @@ impl ZaloGuiApp {
         }
         // Mute state is evaluated by the listener from that account's own thread list;
         // `settings.muted_threads` describes the active account and must not apply here.
+        let unread = activity.incoming.max(1);
         let banners: Vec<(String, String)> = activity
             .banners
             .iter()
             .map(|b| {
-                (
-                    format!("{} → {}", b.title, activity.account_name),
-                    b.body.clone(),
-                )
+                let raw_title = format!("{} → {}", b.title, activity.account_name);
+                let (title, body, _) =
+                    self.mask_notification_payload(&raw_title, &b.body, None, unread);
+                (title, body)
             })
             .collect();
         if banners.is_empty() {
@@ -6246,10 +7352,15 @@ impl ZaloGuiApp {
         *self
             .background_unread
             .entry(activity.uin.clone())
-            .or_insert(0) += activity.incoming.max(1);
+            .or_insert(0) += unread;
         if self.settings.enable_notifications {
             if self.settings.play_notification_sound {
                 crate::media::play_notification_chime();
+            }
+            #[cfg(target_os = "windows")]
+            if self.is_parked_in_windows_tray() {
+                self.notify_windows_tray();
+                return;
             }
             #[cfg(target_os = "windows")]
             if let Some((title, body)) = banners.last().cloned() {
@@ -6267,9 +7378,18 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Refresh the cached saved-credentials flag without running disk checks per frame.
+    pub(crate) fn refresh_saved_credentials_cache(&mut self) {
+        self.has_saved_credentials_cached =
+            self.is_logged_in || crate::account_manager::has_any_saved_credentials();
+    }
+
     /// Reload the saved accounts shown in the account menu.
     pub(crate) fn refresh_account_menu_accounts(&mut self) {
         self.account_menu_accounts = crate::account_manager::list_saved_accounts(&self.user_uin);
+        self.has_saved_credentials_cached = self.is_logged_in
+            || !self.account_menu_accounts.is_empty()
+            || crate::account_manager::has_any_saved_credentials();
     }
 
     /// Switch the UI to another saved account without scanning a QR code again.
@@ -6291,6 +7411,7 @@ impl ZaloGuiApp {
             self.pending_add_account_uin = None;
             return;
         }
+        self.has_saved_credentials_cached = true;
         // Remember the current account so "Thoát thêm tài khoản" can return to it. No
         // Logout is sent (#103): `RequestQr` signs the worker session out in memory only,
         // and the saved snapshot keeps the account listening in the background.
@@ -6303,6 +7424,7 @@ impl ZaloGuiApp {
         crate::account_manager::set_active_uin("");
         self.threads.clear();
         self.selected_thread_index = 0;
+        self.clear_pending_texture_uploads();
         self.qr_texture = None;
         self.login_tab = LoginTab::QrCode;
         self.login_in_progress = true;
@@ -6333,16 +7455,31 @@ impl ZaloGuiApp {
     }
 
     fn show_toast(&mut self, msg: impl Into<String>) {
-        let text = msg.into();
-        self.status_msg = text.clone();
+        let raw = msg.into();
+        let mask = self.should_mask_notifications();
+        let (text, _) = prepare_toast_payload(
+            self.app_locked,
+            self.app_lock_config.hide_notifications_when_locked,
+            raw.clone(),
+            None,
+        );
+        if !mask {
+            self.status_msg = raw;
+        }
         self.toast_notice = Some((text, std::time::Instant::now()));
         self.toast_reveal_path = None;
     }
 
     /// Toast with an "Mở thư mục" button that reveals `path` in the OS file manager.
     fn show_toast_with_reveal(&mut self, msg: impl Into<String>, path: String) {
+        let (_, reveal) = prepare_toast_payload(
+            self.app_locked,
+            self.app_lock_config.hide_notifications_when_locked,
+            String::new(),
+            Some(path),
+        );
         self.show_toast(msg);
-        self.toast_reveal_path = Some(path);
+        self.toast_reveal_path = reveal;
     }
 
     /// Append files to the composer queue, skipping duplicates and anything past the cap,
@@ -6470,7 +7607,7 @@ pub(super) fn resolve_dark_mode(theme_mode: &str, ctx: &egui::Context) -> bool {
 
 #[cfg(target_os = "windows")]
 fn detect_windows_os_dark_mode() -> Option<bool> {
-    // Query HKCU\...\Personalize\AppsUseLightTheme without extra crate deps (0 = dark, 1 = light).
+    /// Query HKCU\...\Personalize\AppsUseLightTheme without extra crate deps (0 = dark, 1 = light).
     type Hkey = isize;
     const HKEY_CURRENT_USER: Hkey = -0x7FFF_FFFF_isize; // 0x80000001
     const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
@@ -6569,6 +7706,47 @@ fn collect_fresh_incoming_unread<'a>(
         .collect()
 }
 
+fn tray_unread_message(message: &ChatMessage, seen: &str) -> bool {
+    !message.id.is_empty()
+        && !message.is_outgoing
+        && message.kind != crate::message_model::MessageKind::System
+        && message.unread_policy.counts_unread()
+        && (seen.is_empty()
+            || crate::unread::compare_ids(&message.id, seen) == Some(std::cmp::Ordering::Greater))
+}
+
+/// Message alerts already requested during the current stay in the tray.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct TrayMessageAlerts {
+    delivered: HashSet<(String, String, String)>,
+}
+
+#[cfg(any(windows, test))]
+impl TrayMessageAlerts {
+    fn record(
+        &mut self,
+        account: &str,
+        thread: &str,
+        messages: &[ChatMessage],
+        seen: &str,
+        since_ms: i64,
+    ) -> bool {
+        let mut should_alert = false;
+        for message in messages.iter().filter(|message| {
+            tray_unread_message(message, seen)
+                && crate::clock::normalize_ts_ms(message.ts) >= since_ms
+        }) {
+            should_alert |= self.delivered.insert((
+                account.to_owned(),
+                thread.to_owned(),
+                message.id.clone(),
+            ));
+        }
+        should_alert
+    }
+}
+
 /// Count incoming messages newer than each thread's read-point.
 ///
 /// Threads without a read-point, and message ids that cannot be ordered against it,
@@ -6595,415 +7773,169 @@ fn unread_counts_from_read_points(threads: &[Thread]) -> HashMap<String, usize> 
     counts
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{is_newer_semver, phone_sync_completion_message};
 
-    #[test]
-    fn file_uri_percent_encodes_spaces_unicode_and_quotes() {
-        assert_eq!(
-            super::file_uri("/home/u/Tải về/a b'c.jpg"),
-            "file:///home/u/T%E1%BA%A3i%20v%E1%BB%81/a%20b%27c.jpg"
-        );
-    }
-
-    fn unread_fixture(seen: Option<&str>, ids: &[(&str, bool)]) -> crate::chat::Thread {
-        let mut thread = crate::chat::Thread {
-            presentation: Default::default(),
-            unread: Default::default(),
-            id: "thread-1".into(),
-            name: "Thread 1".into(),
-            preview: String::new(),
-            time: String::new(),
-            avatar: None,
-            is_group: false,
-            messages: Vec::new(),
-            vanish: None,
-        };
-        thread.unread.last_seen_id = seen.map(str::to_string);
-        for (id, outgoing) in ids {
-            thread.messages.push(crate::chat::ChatMessage {
-                id: (*id).to_string(),
-                is_outgoing: *outgoing,
-                ..Default::default()
-            });
-        }
-        thread
-    }
-
-    #[test]
-    fn unread_rebuild_counts_incoming_messages_after_read_point() {
-        let thread = unread_fixture(Some("100"), &[("99", false), ("101", false), ("102", true), ("103", false)]);
-        let counts = super::unread_counts_from_read_points(&[thread]);
-        assert_eq!(counts.get("thread-1"), Some(&2));
-    }
-
-    #[test]
-    fn unread_rebuild_skips_threads_without_read_point() {
-        let thread = unread_fixture(None, &[("101", false)]);
-        assert!(super::unread_counts_from_read_points(&[thread]).is_empty());
-    }
-
-    #[test]
-    fn collect_fresh_incoming_unread_filters_read_backfill_and_non_numeric() {
-        let mut old_ids = std::collections::HashSet::new();
-        old_ids.insert("199".to_string());
-        let msgs = vec![
-            crate::chat::ChatMessage {
-                id: "190".into(),
-                is_outgoing: false,
-                ts: 900,
-                ..Default::default()
-            },
-            crate::chat::ChatMessage {
-                id: "199".into(),
-                is_outgoing: false,
-                ts: 1000,
-                ..Default::default()
-            },
-            crate::chat::ChatMessage {
-                id: "200".into(),
-                is_outgoing: false,
-                ts: 1000,
-                ..Default::default()
-            },
-            crate::chat::ChatMessage {
-                id: "msg_1050".into(),
-                is_outgoing: false,
-                ts: 1050,
-                ..Default::default()
-            },
-            crate::chat::ChatMessage {
-                id: "205".into(),
-                is_outgoing: false,
-                ts: 950, // backfilled older ts than old_max_ts=1000
-                ..Default::default()
-            },
-            crate::chat::ChatMessage {
-                id: "210".into(),
-                is_outgoing: true,
-                ts: 1100,
-                ..Default::default()
-            },
-            crate::chat::ChatMessage {
-                id: "215".into(),
-                is_outgoing: false,
-                ts: 1150,
-                ..Default::default()
-            },
-        ];
-        let fresh = super::collect_fresh_incoming_unread(&msgs, "200", &old_ids, 1000);
-        let ids: Vec<&str> = fresh.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["215"]);
-
-        let mut thread = unread_fixture(Some("200"), &[("199", false), ("215", false)]);
-        thread.messages.push(crate::chat::ChatMessage {
-            id: "out_1234".into(),
-            is_outgoing: true,
-            ..Default::default()
-        });
-        assert_eq!(
-            super::advance_thread_read_point(&mut thread).as_deref(),
-            Some("215")
-        );
-    }
-
-    #[test]
-    fn sent_message_reconciles_when_server_push_arrives_first() {
-        let mut thread = crate::chat::Thread::default();
-        let server = crate::chat::ChatMessage {
-            id: "server-a".into(),
-            client_message_id: "client-a".into(),
-            text: "Server push".into(),
-            is_outgoing: true,
-            delivery: crate::message_model::DeliveryState::Delivered,
-            ..Default::default()
-        };
-        super::merge_sent_message(&mut thread, server.clone());
-        for local_id in ["out_client-a", "server-a"] {
-            super::merge_sent_message(
-                &mut thread,
-                crate::chat::ChatMessage {
-                    id: local_id.into(),
-                    client_message_id: "client-a".into(),
-                    text: "Local echo".into(),
-                    is_outgoing: true,
-                    ..Default::default()
-                },
-            );
-            assert_eq!(thread.messages.len(), 1);
-            assert_eq!(thread.messages[0].id, "server-a");
-            assert_eq!(thread.messages[0].delivery, server.delivery);
-        }
-    }
-
-    #[test]
-    fn delayed_local_ack_preserves_server_chronology() {
-        let mut thread = crate::chat::Thread::default();
-        for (id, client, ts) in [
-            ("server-a", "client-a", 1000),
-            ("server-b", "client-b", 2000),
-        ] {
-            thread.messages.push(crate::chat::ChatMessage {
-                id: id.into(),
-                client_message_id: client.into(),
-                ts,
-                time: ts.to_string(),
-                is_outgoing: true,
-                ..Default::default()
-            });
-        }
-        for ack_id in ["out_client-a", "server-a"] {
-            super::merge_sent_message(
-                &mut thread,
-                crate::chat::ChatMessage {
-                    id: ack_id.into(),
-                    client_message_id: "client-a".into(),
-                    ts: 3000,
-                    time: "3000".into(),
-                    is_outgoing: true,
-                    ..Default::default()
-                },
-            );
-            let chronology: Vec<_> = thread
-                .messages
-                .iter()
-                .map(|message| (message.id.as_str(), message.ts, message.time.as_str()))
-                .collect();
-            assert_eq!(
-                chronology,
-                [("server-a", 1000, "1000"), ("server-b", 2000, "2000")]
-            );
-        }
-    }
-
-    #[test]
-    fn semver_comparison_handles_v_prefix_and_prerelease() {
-        assert!(is_newer_semver("v0.0.2", "0.0.1"));
-        assert!(is_newer_semver("0.1.0", "0.0.9"));
-        assert!(is_newer_semver("V1.0.0-beta.1", "0.9.9"));
-        assert!(!is_newer_semver("v0.0.1", "0.0.1"));
-        assert!(!is_newer_semver("0.0.1", "0.0.2"));
-    }
-
-    #[test]
-    fn phone_sync_completion_does_not_claim_phone_messages_were_imported() {
-        let none = phone_sync_completion_message(0, 0, false, None, None, &[]);
-        assert!(none.contains("Lịch sử điện thoại chưa được tải vào ứng dụng"));
-        assert!(none.contains("0 tin mới từ Cloud/Nhóm"));
-
-        let cloud = phone_sync_completion_message(12, 3, false, None, None, &[]);
-        assert!(cloud.contains("12 tin mới từ Cloud/Nhóm (3 hội thoại)"));
-        assert!(cloud.contains("Lịch sử điện thoại chưa được tải vào ứng dụng"));
-
-        let failed = phone_sync_completion_message(0, 0, false, Some("network"), None, &[]);
-        assert!(failed.contains("Đồng bộ thất bại: network"));
-    }
-
-    #[test]
-    fn phone_sync_completion_keeps_phone_step_error_visible() {
-        let msg = phone_sync_completion_message(
-            5,
-            2,
-            false,
-            None,
-            Some("Không tìm thấy Zalo PC trên máy này"),
-            &[],
-        );
-        assert!(msg.contains("5 tin mới từ Cloud/Nhóm (2 hội thoại)"));
-        assert!(
-            msg.contains("Không đồng bộ được từ điện thoại: Không tìm thấy Zalo PC trên máy này")
-        );
-        assert!(!msg.contains("Lịch sử điện thoại chưa được tải"));
-    }
-
-    #[test]
-    fn phone_sync_completion_marks_partial_fetch_failures() {
-        let warnings = vec!["Tải lịch sử Cloud/Nhóm: lỗi kết nối đến Zalo".into()];
-        let msg = phone_sync_completion_message(2, 1, false, None, None, &warnings);
-
-        assert!(msg.contains("Đồng bộ chưa đầy đủ"));
-        assert!(msg.contains("1 lỗi tải dữ liệu"));
-        assert!(msg.contains("lỗi kết nối đến Zalo"));
-        assert!(!msg.contains("Đã hoàn tất"));
-    }
-
-    #[test]
-    fn test_app_settings_font_and_color_defaults_and_serde() {
-        let default_settings = super::AppSettings::default();
-        assert_eq!(default_settings.font_family, "default");
-        assert_eq!(default_settings.font_scale, 1.0);
-        assert!(default_settings.animations_enabled);
-        assert_eq!(default_settings.animation_speed, 1.0);
-        assert_eq!(default_settings.custom_primary_color, None);
-        assert_eq!(default_settings.custom_accent_color, None);
-        assert_eq!(default_settings.custom_bubble_out_bg, None);
-        assert_eq!(default_settings.custom_bubble_in_bg, None);
-
-        let mut custom = default_settings.clone();
-        custom.font_family = "segoe_ui".into();
-        custom.font_scale = 1.15;
-        custom.animations_enabled = false;
-        custom.animation_speed = 1.5;
-        custom.custom_primary_color = Some("#0068FF".into());
-        custom.custom_accent_color = Some("#059669".into());
-        custom.custom_bubble_out_bg = Some("#25374D".into());
-        custom.custom_bubble_in_bg = Some("#323842".into());
-
-        let json = serde_json::to_string(&custom).expect("serialize settings");
-        let loaded: super::AppSettings = serde_json::from_str(&json).expect("deserialize settings");
-        assert_eq!(loaded.font_family, "segoe_ui");
-        assert_eq!(loaded.font_scale, 1.15);
-        assert!(!loaded.animations_enabled);
-        assert_eq!(loaded.animation_speed, 1.5);
-        assert_eq!(loaded.custom_primary_color.as_deref(), Some("#0068FF"));
-        assert_eq!(loaded.custom_accent_color.as_deref(), Some("#059669"));
-        assert_eq!(loaded.custom_bubble_out_bg.as_deref(), Some("#25374D"));
-        assert_eq!(loaded.custom_bubble_in_bg.as_deref(), Some("#323842"));
-    }
-
-    #[test]
-    fn compute_resized_rect_handles_edges_and_clamps_minimums() {
-        let base = super::WinRect {
-            left: 100,
-            top: 100,
-            right: 1100,
-            bottom: 800,
-        };
-        assert_eq!(base.width(), 1000);
-        assert_eq!(base.height(), 700);
-
-        let expanded = super::compute_resized_rect(
-            base,
-            eframe::egui::ResizeDirection::NorthWest,
-            -40,
-            -20,
-            480,
-            360,
-        );
-        assert_eq!(
-            expanded,
-            super::WinRect {
-                left: 60,
-                top: 80,
-                right: 1100,
-                bottom: 800,
-            }
-        );
-
-        let clamped_nw = super::compute_resized_rect(
-            base,
-            eframe::egui::ResizeDirection::NorthWest,
-            900,
-            600,
-            480,
-            360,
-        );
-        assert_eq!(clamped_nw.width(), 480);
-        assert_eq!(clamped_nw.height(), 360);
-        assert_eq!(clamped_nw.right, 1100);
-        assert_eq!(clamped_nw.bottom, 800);
-
-        let clamped_se = super::compute_resized_rect(
-            base,
-            eframe::egui::ResizeDirection::SouthEast,
-            -900,
-            -600,
-            480,
-            360,
-        );
-        assert_eq!(clamped_se.width(), 480);
-        assert_eq!(clamped_se.height(), 360);
-        assert_eq!(clamped_se.left, 100);
-        assert_eq!(clamped_se.top, 100);
-    }
-
-    #[test]
-    fn sticker_fetch_retry_respects_cooldown_and_max_attempts() {
-        let mut failures = std::collections::HashMap::new();
-        let t0 = std::time::Instant::now();
-        assert!(super::can_attempt_sticker_fetch(&failures, "stk_1", t0));
-
-        // 1st failure -> blocked during 30s cooldown, allowed after 30s.
-        super::record_sticker_fetch_failure(&mut failures, "stk_1", t0);
-        assert!(!super::can_attempt_sticker_fetch(
-            &failures,
-            "stk_1",
-            t0 + std::time::Duration::from_secs(10)
-        ));
-        let t1 = t0 + std::time::Duration::from_secs(30);
-        assert!(super::can_attempt_sticker_fetch(&failures, "stk_1", t1));
-
-        // 2nd failure -> allowed once more after cooldown.
-        super::record_sticker_fetch_failure(&mut failures, "stk_1", t1);
-        let t2 = t1 + std::time::Duration::from_secs(30);
-        assert!(super::can_attempt_sticker_fetch(&failures, "stk_1", t2));
-
-        // 3rd failure reaches MAX_STICKER_FETCH_ATTEMPTS -> permanently stops auto-retry.
-        super::record_sticker_fetch_failure(&mut failures, "stk_1", t2);
-        assert!(!super::can_attempt_sticker_fetch(
-            &failures,
-            "stk_1",
-            t2 + std::time::Duration::from_secs(3600)
-        ));
-    }
-
-    #[test]
-    fn truncate_chars_vietnamese_utf8_safety() {
-        let s = "Nguyễn Thị Hồng Nhung — Tiếng Việt có dấu";
-        let cut = super::truncate_chars(s, 16);
-        assert_eq!(cut.chars().count(), 17);
-        assert!(cut.ends_with('…'));
-        assert!(cut.starts_with("Nguyễn Thị Hồng"));
-        assert_eq!(super::truncate_chars("Ngắn", 16).as_ref(), "Ngắn");
-    }
-
-    #[test]
-    fn app_settings_animations_serde_defaults_and_clamping() {
-        let legacy: super::AppSettings = serde_json::from_str("{}").unwrap();
-        assert!(legacy.animations_enabled);
-        assert!((legacy.animation_speed - 1.0).abs() < f32::EPSILON);
-        assert!((legacy.normalized_animation_speed() - 1.0).abs() < f32::EPSILON);
-
-        let mut custom = super::AppSettings {
-            animations_enabled: false,
-            animation_speed: 3.5,
-            ..Default::default()
-        };
-        assert!((custom.normalized_animation_speed() - 2.0).abs() < f32::EPSILON);
-        custom.animation_speed = 0.1;
-        assert!((custom.normalized_animation_speed() - 0.5).abs() < f32::EPSILON);
-
-        let roundtrip: super::AppSettings =
-            serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
-        assert!(!roundtrip.animations_enabled);
-        assert!((roundtrip.animation_speed - 0.1).abs() < 1e-4);
-        assert!((legacy.normalized_scroll_speed() - 2.2).abs() < f32::EPSILON);
-
-        let mut fast_scroll = super::AppSettings {
-            scroll_speed: 9.0,
-            ..Default::default()
-        };
-        assert!((fast_scroll.normalized_scroll_speed() - 4.0).abs() < f32::EPSILON);
-        fast_scroll.scroll_speed = -1.0;
-        assert!((fast_scroll.normalized_scroll_speed() - 2.2).abs() < f32::EPSILON);
+#[cfg(any(windows, test))]
+pub fn tray_notification_body(mask_notifications: bool, body: &str) -> &str {
+    if mask_notifications {
+        "Bạn có thông báo mới"
+    } else {
+        body
     }
 }
 
 impl ZaloGuiApp {
+    #[cfg(windows)]
+    fn notify_windows_tray(&self) {
+        self.notify_windows_tray_with_body("Bạn có tin nhắn mới");
+    }
+
+    /// Show a Windows tray balloon while leaving sound preference to the application chime.
+    #[cfg(windows)]
+    fn notify_windows_tray_with_body(&self, body: &str) {
+        if let Some(tray) = &self.windows_tray {
+            let body = tray_notification_body(self.should_mask_notifications(), body);
+            if !tray.notify(body) {
+                eprintln!("Windows did not accept the tray notification");
+            }
+        }
+    }
+
+    fn is_parked_in_windows_tray(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.windows_tray.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    #[cfg(windows)]
+    fn restore_windows_tray(&mut self, ctx: &egui::Context) {
+        if let Some(tray) = self.windows_tray.take() {
+            tray.restore_window();
+            if self.app_locked {
+                self.app_lock_ui.focus_requested = true;
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ensure_cjk_font(ctx, thread_texts(&self.threads));
+        }
+    }
+
+    #[cfg(windows)]
+    fn update_windows_close(&mut self, ctx: &egui::Context) {
+        use windows_tray::Action;
+        let action = self
+            .windows_tray
+            .as_ref()
+            .and_then(windows_tray::Tray::take_action);
+        match action {
+            Some(Action::Open) if !self.allow_quit => self.restore_windows_tray(ctx),
+            Some(Action::ExplorerRestarted)
+                if !self.allow_quit
+                    && !self.windows_tray.as_ref().is_some_and(windows_tray::Tray::register) =>
+            {
+                self.restore_windows_tray(ctx);
+                self.show_toast("Không thể khôi phục biểu tượng khay hệ thống.");
+            }
+            _ => {}
+        }
+
+        let (close_requested, ctrl_q, now_ui) = ctx.input(|i| {
+            (
+                i.viewport().close_requested(),
+                i.modifiers.ctrl && i.key_pressed(Key::Q),
+                i.time,
+            )
+        });
+        let quit = self.allow_quit || action == Some(Action::Quit) || ctrl_q;
+        if close_requested && !self.windows_quit_ready {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        if !self.windows_quit_ready && (quit || close_requested) {
+            match windows_close_action(quit, self.settings.close_to_tray, self.active_call.is_some())
+            {
+                WindowsCloseAction::Quit => self.begin_windows_quit(ctx),
+                WindowsCloseAction::Minimize => {
+                    self.try_trigger_lock(ctx);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+                WindowsCloseAction::Park if self.windows_tray.is_none() => {
+                    let hwnd = self.resolve_windows_hwnd();
+                    match windows_tray::Tray::new(ctx, hwnd) {
+                        Ok(tray) => {
+                            self.windows_tray = Some(tray);
+                            self.incoming_popup = None;
+                            self.try_trigger_lock(ctx);
+                        }
+                        Err(err) => {
+                            eprintln!("Could not create Windows tray icon: {err}");
+                            self.show_toast("Không thể tạo biểu tượng khay hệ thống.");
+                        }
+                    }
+                }
+                WindowsCloseAction::Park => {}
+            }
+        }
+        if self
+            .windows_quit_deadline_secs
+            .is_some_and(|deadline| now_ui >= deadline)
+        {
+            self.finish_windows_quit(ctx);
+        }
+    }
+
+    /// Begin Windows app shutdown with best-effort call cleanup and bounded settings flush.
+    #[cfg(windows)]
+    fn begin_windows_quit(&mut self, ctx: &egui::Context) {
+        if self.windows_quit_deadline_secs.is_some() {
+            return;
+        }
+        self.allow_quit = true;
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::EndCall);
+        }
+        self.settings.save();
+        if worker::flush_app_settings() {
+            let timeout_secs = 2.0_f64;
+            let now_ui = ctx.input(|i| i.time);
+            self.windows_quit_deadline_secs = Some(now_ui + timeout_secs);
+            ctx.request_repaint_after(Duration::from_secs_f64(timeout_secs));
+        } else {
+            self.finish_windows_quit(ctx);
+        }
+    }
+
+    #[cfg(windows)]
+    fn finish_windows_quit(&mut self, ctx: &egui::Context) {
+        self.windows_quit_deadline_secs = None;
+        self.windows_quit_ready = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        ctx.request_repaint();
+    }
+
     /// Closing the window hides it to the tray instead of quitting (Linux, tray shown).
     fn hides_to_tray(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            self.tray.is_some() && tray::host_online()
+            // winit cannot hide a window on Wayland (set_visible is a no-op), so X must quit there.
+            self.tray.is_some()
+                && tray::host_online()
+                && std::env::var_os("WAYLAND_DISPLAY").is_none()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            self.settings.close_to_tray && self.active_call.is_none()
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             false
         }
     }
 
     /// A pending "Thoát" from the tray menu.
+    #[cfg(not(windows))]
     fn take_tray_quit_request(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -7013,5 +7945,25 @@ impl ZaloGuiApp {
         {
             false
         }
+    }
+}
+
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+pub enum WindowsCloseAction {
+    Quit,
+    Minimize,
+    Park,
+}
+
+#[cfg(any(windows, test))]
+pub fn windows_close_action(quit: bool, close_to_tray: bool, active_call: bool) -> WindowsCloseAction {
+    if quit || !close_to_tray {
+        WindowsCloseAction::Quit
+    } else if active_call {
+        WindowsCloseAction::Minimize
+    } else {
+        WindowsCloseAction::Park
     }
 }

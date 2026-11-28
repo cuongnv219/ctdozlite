@@ -108,7 +108,6 @@ async fn main() -> Result<()> {
     s.load_from_file("session.json")?;
     println!("Login: {:?}", s.login.as_ref().map(|l| &l.uin));
 
-    // ---------- 1. get-last-msgs raw dump ----------
     println!("\n--- [1] get-last-msgs (raw) ---");
     let threads = match zalo_rust::chat::get_friends(&s).await {
         Ok(t) => {
@@ -132,7 +131,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // ---------- 2. group/history raw dump ----------
     println!("\n--- [2] group/history raw dump (thử mọi group thread) ---");
     let groups: Vec<_> = threads.iter().filter(|t| t.is_group).collect();
     if groups.is_empty() {
